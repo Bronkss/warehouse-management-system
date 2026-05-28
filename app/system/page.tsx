@@ -1,9 +1,12 @@
+'use client'
 import * as React from 'react';
 import Image from 'next/image';
+import Link from 'next/link';
+import { ReactNode } from 'react';
 
 const menuItems = [
-    {title: 'Товары', icon: '/icons/tovar.png'},
-    {title: 'Продажи', icon: '/icons/order.png'},
+    {title: 'Товары', icon: '/icons/tovar.png', linkName: 'products'},
+    {title: 'Продажи', icon: '/icons/order.png', linkName: 'auth'}, // заглушка, в дальнейшем расписать пути
     {title: 'Приемки', icon: '/icons/priemka.png'},
     {title: 'Списания', icon: '/icons/spisaniya.png'},
     {title: 'Поставщики', icon: '/icons/postavshiki.png'},
@@ -11,14 +14,18 @@ const menuItems = [
     {title: 'Статистика', icon: '/icons/statistic.png'},
 ];
 
-export default function System() {
+type Props = {
+    children: ReactNode;
+}
+
+export default function System({ children }: Props) {
     return (
         <div className="w-screen min-h-screen bg-[#ececec] m-0 p-0">
             <div className="min-h-[calc(100vh-16px)] overflow-hidden bg-[#ececec]">
                 <header className="flex items-center justify-between bg-[#e5765d] px-8 py-7">
                     <nav className="flex flex-wrap items-center gap-5">
                         {menuItems.map((item) => (
-                            <button
+                            <Link href={`/${item.linkName}`} // Нужно в строку передать linkName из объекта
                                 key={item.title}
                                 type="button"
                                 className="flex h-[44px] items-center gap-2 rounded-full bg-[#f1f1f1] px-5 text-[15px] font-normal text-[#3a3a3a] shadow-sm transition hover:bg-white"
@@ -37,7 +44,7 @@ export default function System() {
                                 </span>
 
                                 <span>{item.title}</span>
-                            </button>
+                            </Link>
                         ))}
                     </nav>
 
@@ -56,7 +63,9 @@ export default function System() {
                     </button>
                 </header>
 
-                <main className="min-h-[calc(100vh-112px)] bg-[#ececec]"/>
+                <main className="min-h-[calc(100vh-112px)] bg-[#ececec]">
+                    {children}
+                </main>
             </div>
         </div>
     );
