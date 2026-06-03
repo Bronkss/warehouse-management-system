@@ -12,7 +12,10 @@ yarn dev
 pnpm dev
 # or
 bun dev
+
+rm -r -fo .next // очистка кэша next при необходимости
 ```
+rm -r -fo .next // очистка кэша next при необходимости
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 

@@ -20,7 +20,7 @@ type Props = {
 
 export default function System({ children }: Props) {
     return (
-        <div className="w-screen min-h-screen bg-[#ececec] m-0 p-0">
+        <div className="w-full min-h-screen bg-[#ececec] m-0 p-0">
             <div className="min-h-[calc(100vh-16px)] overflow-hidden bg-[#ececec]">
                 <header className="flex items-center justify-between bg-[#e5765d] px-8 py-7">
                     <nav className="flex flex-wrap items-center gap-5">
