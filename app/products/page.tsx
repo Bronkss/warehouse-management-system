@@ -1,7 +1,7 @@
 // app/products/page.tsx
 'use client'
 
-import {useState} from 'react'
+import {useEffect, useState} from 'react'
 import System from "../system/page"
 import {useModal} from '../hooks/useModal'
 import Modal from '../components/Modal'
@@ -59,128 +59,35 @@ export default function Products() {
     const {isOpen, open, close} = useModal()
     const [selectedCategory, setSelectedCategory] = useState<string>('')
 
-        const [products, setProducts] = useState<Product[]>([
-            {
-                id: 1,
-                name: "Макароны",
-                category: "Бакалея",
-                barcode: "4601234567890",
-                purchasePrice: 85,
-                sellingPrice: 110,
-                unit: "piece",
-                stock: 45,
-                minStock: 10,
-                image: imageProductBase
-            },
-            {
-                id: 2,
-                name: "Рис",
-                category: "Бакалея",
-                barcode: "4601234567891",
-                purchasePrice: 65,
-                sellingPrice: 84,
-                unit: "weight",
-                stock: 12.5,
-                minStock: 5,
-                image: imageProductBase
-            },
-            {
-                id: 3,
-                name: "Гречка",
-                category: "Бакалея",
-                barcode: "4601234567892",
-                purchasePrice: 75,
-                sellingPrice: 97,
-                unit: "weight",
-                stock: 3.2,
-                minStock: 5,
-                image: imageProductBase
-            },
-            {
-                id: 4,
-                name: "Водка",
-                category: "Алкоголь",
-                barcode: "4601234567893",
-                purchasePrice: 300,
-                sellingPrice: 390,
-                unit: "piece",
-                stock: 28,
-                minStock: 15,
-                image: imageProductBase
-            },
-            {
-                id: 5,
-                name: "Пиво светлое",
-                category: "Алкоголь",
-                barcode: "4601234567894",
-                purchasePrice: 60,
-                sellingPrice: 81,
-                unit: "piece",
-                stock: 150,
-                minStock: 50,
-                image: imageProductBase
-            },
-            {
-                id: 6,
-                name: "Вино",
-                category: "Алкоголь",
-                barcode: "4601234567895",
-                purchasePrice: 380,
-                sellingPrice: 494,
-                unit: "piece",
-                stock: 8,
-                minStock: 10,
-                image: imageProductBase
-            },
-            {
-                id: 7,
-                name: "Winston",
-                category: "Сигареты",
-                barcode: "4601234567896",
-                purchasePrice: 120,
-                sellingPrice: 156,
-                unit: "piece",
-                stock: 0,
-                minStock: 20,
-                image: imageProductBase
-            },
-            {
-                id: 8,
-                name: "Camel",
-                category: "Сигареты",
-                barcode: "4601234567897",
-                purchasePrice: 130,
-                sellingPrice: 169,
-                unit: "piece",
-                stock: 35,
-                minStock: 20,
-                image: imageProductBase
-            },
-            {
-                id: 9,
-                name: "Мальборо",
-                category: "Сигареты",
-                barcode: "4601234567898",
-                purchasePrice: 140,
-                sellingPrice: 182,
-                unit: "piece",
-                stock: 42,
-                minStock: 20,
-                image: imageProductBase
-            },
-            {
-                id: 10,
-                name: "Сахар",
-                category: "Бакалея",
-                barcode: "4601234567899",
-                purchasePrice: 50,
-                sellingPrice: 65,
-                unit: "weight",
-                stock: 25.8,
-                minStock: 10,
-                image: imageProductBase
+    const [products, setProducts] = useState<Product[]>([])
+    const [isLoading, setIsLoading] = useState(true)
+    const [error, setError] = useState<string | null>(null)
+
+    useEffect(() => {
+        const fetchProducts = async () => {
+            try {
+                setIsLoading(true)
+
+                const response = await fetch('/api/products')
+
+                if (!response.ok) {
+                    throw new Error('Не удалось загрузить товары')
+                }
+
+                const data: Product[] = await response.json()
+
+                setProducts(data)
+                setError(null)
+            } catch (error) {
+                console.error(error)
+                setError('Ошибка загрузки товаров')
+            } finally {
+                setIsLoading(false)
             }
-        ])
+        }
+
+        fetchProducts()
+    }, [])
 
     const filteredProducts = selectedCategory
         ? products.filter(p => p.category === selectedCategory)
@@ -209,22 +116,37 @@ export default function Products() {
         return barcode + checkDigit
     }
 
-    const handleAddProduct = (formData: ProductFormData) => {
-        const newProduct: Product = {
-            id: Date.now(),
-            name: formData.name,
-            category: formData.category,
-            barcode: formData.barcode || generateBarcode(),
-            purchasePrice: parseFloat(formData.purchasePrice),
-            sellingPrice: parseFloat(formData.sellingPrice) || 0,
-            unit: formData.unit,
-            stock: parseFloat(formData.stock) || 0,
-            minStock: parseFloat(formData.minStock) || 10,
-            image: "/api/placeholder/150/150"
-        }
+    const handleAddProduct = async (formData: ProductFormData) => {
+        try {
+            const response = await fetch('/api/products', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    name: formData.name,
+                    category: formData.category,
+                    barcode: formData.barcode,
+                    purchasePrice: formData.purchasePrice,
+                    sellingPrice: formData.sellingPrice,
+                    unit: formData.unit,
+                    stock: formData.stock,
+                    minStock: formData.minStock,
+                }),
+            })
 
-        setProducts(prev => [newProduct, ...prev])
-        close()
+            const data = await response.json()
+
+            if (!response.ok) {
+                throw new Error(data.message || 'Не удалось добавить товар')
+            }
+
+            setProducts(prev => [data, ...prev])
+            close()
+        } catch (error) {
+            console.error(error)
+            alert(error instanceof Error ? error.message : 'Ошибка добавления товара')
+        }
     }
 
     const getStockStatus = (product: Product) => {
@@ -380,103 +302,119 @@ export default function Products() {
                             </div>
                         )}
 
-                        <div
-                            className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                            {filteredProducts.map((product) => {
-                                const status = getStockStatus(product)
+                        {/* Эффект загрузки */}
+                        {isLoading && (
+                            <div className="text-center py-12">
+                                <p className="text-gray-500 text-lg">Загрузка товаров...</p>
+                            </div>
+                        )}
 
-                                return (
-                                    <article key={product.id}
-                                             className="bg-white rounded-lg shadow-md overflow-hidden hover:shadow-lg transition-shadow">
-                                        <div className="relative h-40 bg-gray-100">
-                                            <img
-                                                src={product.image}
-                                                alt={product.name}
-                                                className="w-full h-full object-cover"
-                                            />
-                                            <div className="absolute top-2 left-2">
+                        {error && (
+                            <div className="text-center py-12">
+                                <p className="text-red-500 text-lg">{error}</p>
+                            </div>
+                        )}
+
+
+                        {!isLoading && !error && (<div
+                                className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+                                {filteredProducts.map((product) => {
+                                    const status = getStockStatus(product)
+
+                                    return (
+                                        <article key={product.id}
+                                                 className="bg-white rounded-lg shadow-md overflow-hidden hover:shadow-lg transition-shadow">
+                                            <div className="relative h-40 bg-gray-100">
+                                                <img
+                                                    src='/icons/products.jpg' //{product.image} - это с базы
+                                                    alt={product.name}
+                                                    className="w-full h-full object-cover"
+                                                />
+                                                <div className="absolute top-2 left-2">
                         <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                             product.unit === 'weight' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
                         }`}>
                           {product.unit === 'weight' ? 'Весовой' : 'Штучный'}
                         </span>
-                                            </div>
-
-                                            <div
-                                                className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium ${status.bgColor} ${status.color}`}>
-                                                {status.label}
-                                            </div>
-                                        </div>
-
-                                        <div className="p-4">
-                                            <h4 className="font-semibold text-gray-800 text-lg mb-1">
-                                                {product.name}
-                                            </h4>
-                                            <p className="text-sm text-gray-500 mb-2">
-                                                {product.category}
-                                            </p>
-
-                                            {product.barcode && (
-                                                <div className="mb-2 flex items-center gap-2">
-                                                    <svg className="w-4 h-4 text-gray-400" fill="none"
-                                                         stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path strokeLinecap="round" strokeLinejoin="round"
-                                                              strokeWidth={1.5}
-                                                              d="M3 5h2M3 9h4M3 13h2M3 17h4M7 5h2M7 9h2M7 13h2M7 17h2M11 5h2M11 9h2M11 13h2M11 17h2M15 5h2M15 9h4M15 13h2M15 17h4M19 5h2M19 13h2"/>
-                                                    </svg>
-                                                    <span
-                                                        className="text-xs text-gray-500 font-mono">{product.barcode}</span>
                                                 </div>
-                                            )}
 
-                                            <div className={`p-3 rounded-lg mb-3 ${status.bgColor}`}>
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-sm font-medium text-gray-700">Остаток:</span>
-                                                    <span className={`font-bold ${status.color}`}>
+                                                <div
+                                                    className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium ${status.bgColor} ${status.color}`}>
+                                                    {status.label}
+                                                </div>
+                                            </div>
+
+                                            <div className="p-4">
+                                                <h4 className="font-semibold text-gray-800 text-lg mb-1">
+                                                    {product.name}
+                                                </h4>
+                                                <p className="text-sm text-gray-500 mb-2">
+                                                    {product.category}
+                                                </p>
+
+                                                {product.barcode && (
+                                                    <div className="mb-2 flex items-center gap-2">
+                                                        <svg className="w-4 h-4 text-gray-400" fill="none"
+                                                             stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round"
+                                                                  strokeWidth={1.5}
+                                                                  d="M3 5h2M3 9h4M3 13h2M3 17h4M7 5h2M7 9h2M7 13h2M7 17h2M11 5h2M11 9h2M11 13h2M11 17h2M15 5h2M15 9h4M15 13h2M15 17h4M19 5h2M19 13h2"/>
+                                                        </svg>
+                                                        <span
+                                                            className="text-xs text-gray-500 font-mono">{product.barcode}</span>
+                                                    </div>
+                                                )}
+
+                                                <div className={`p-3 rounded-lg mb-3 ${status.bgColor}`}>
+                                                    <div className="flex items-center justify-between">
+                                                        <span
+                                                            className="text-sm font-medium text-gray-700">Остаток:</span>
+                                                        <span className={`font-bold ${status.color}`}>
                             {formatStock(product)}
                           </span>
-                                                </div>
-                                                <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
-                                                    <div
-                                                        className={`h-2 rounded-full ${status.barColor}`}
-                                                        style={{
-                                                            width: `${Math.min(100, (product.stock / (product.minStock * 2)) * 100)}%`
-                                                        }}
-                                                    />
-                                                </div>
-                                                <div className="flex justify-between mt-1">
+                                                    </div>
+                                                    <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+                                                        <div
+                                                            className={`h-2 rounded-full ${status.barColor}`}
+                                                            style={{
+                                                                width: `${Math.min(100, (product.stock / (product.minStock * 2)) * 100)}%`
+                                                            }}
+                                                        />
+                                                    </div>
+                                                    <div className="flex justify-between mt-1">
                           <span className="text-xs text-gray-500">
                             Мин: {product.minStock} {product.unit === 'weight' ? 'кг' : 'шт.'}
                           </span>
-                                                    {product.stock <= product.minStock && product.stock > 0 && (
-                                                        <span className="text-xs text-orange-600 font-medium">⚠️ Пополнить</span>
-                                                    )}
-                                                    {product.stock === 0 && (
-                                                        <span
-                                                            className="text-xs text-red-600 font-medium">❌ Отсутствует</span>
-                                                    )}
+                                                        {product.stock <= product.minStock && product.stock > 0 && (
+                                                            <span className="text-xs text-orange-600 font-medium">⚠️ Пополнить</span>
+                                                        )}
+                                                        {product.stock === 0 && (
+                                                            <span
+                                                                className="text-xs text-red-600 font-medium">❌ Отсутствует</span>
+                                                        )}
+                                                    </div>
                                                 </div>
-                                            </div>
 
-                                            <div className="flex items-center justify-between mt-3">
-                                                <div>
+                                                <div className="flex items-center justify-between mt-3">
+                                                    <div>
                           <span className="text-sm font-bold text-blue-600">
                             Цена продажи: {product.sellingPrice} ₽
                           </span>
-                                                    <br/>
-                                                    <span className="text-sm font-bold text-blue-600">
+                                                        <br/>
+                                                        <span className="text-sm font-bold text-blue-600">
                             Цена закупки: {product.purchasePrice} ₽
                           </span>
-                                                    {product.category.toLowerCase().includes('пиво') && (
-                                                        <span className="text-xs text-amber-600 ml-1">🍺</span>
-                                                    )}
+                                                        {product.category.toLowerCase().includes('пиво') && (
+                                                            <span className="text-xs text-amber-600 ml-1">🍺</span>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                    </article>
-                                )
-                            })}
-                        </div>
+                                        </article>
+                                    )
+                                })}
+                            </div>
+                        )}
 
                         {filteredProducts.length === 0 && (
                             <div className="text-center py-12">
