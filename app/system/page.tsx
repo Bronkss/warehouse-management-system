@@ -6,7 +6,7 @@ import { ReactNode } from 'react';
 
 const menuItems = [
     {title: 'Товары', icon: '/icons/tovar.png', linkName: 'products'},
-    {title: 'Продажи', icon: '/icons/order.png', linkName: 'auth'}, // заглушка, в дальнейшем расписать пути
+    {title: 'Продажи', icon: '/icons/order.png', linkName: 'sales'}, // заглушка, в дальнейшем расписать пути
     {title: 'Приемки', icon: '/icons/priemka.png'},
     {title: 'Списания', icon: '/icons/spisaniya.png'},
     {title: 'Поставщики', icon: '/icons/postavshiki.png'},

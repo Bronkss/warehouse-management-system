@@ -23,7 +23,6 @@ const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
 })
 
-// Проверка подключения при старте
 pool.query('SELECT NOW()')
     .then(() => console.log('✅ PostgreSQL подключен'))
     .catch((err) => console.error('❌ Ошибка PostgreSQL:', err.message))
