@@ -1,0 +1,23 @@
+[
+  {
+    "id": "20260612-184066",
+    "createdAt": "2026-06-12T13:16:24.066Z",
+    "paymentMethod": "card",
+    "paymentLabel": "Карта",
+    "items": [
+      {
+        "productId": 19,
+        "name": "\"Варёнка\" Тяжин варенная сгущенка",
+        "barcode": "4607042933929",
+        "category": "Кондитерские изделия",
+        "unit": "piece",
+        "quantity": 1,
+        "price": 124.8,
+        "total": 124.8
+      }
+    ],
+    "total": 124.8,
+    "receivedAmount": 124.8,
+    "change": 0
+  }
+]
