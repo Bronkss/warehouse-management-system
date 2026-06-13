@@ -418,7 +418,7 @@
                                                     <img
                                                         src={product.image || '/icons/products.jpg'} //{product.image} - это с базы
                                                         alt={product.name}
-                                                        className="w-full h-full object-cover"
+                                                        className="w-full h-full object-contain bg-white"
                                                     />
                                                     <div className="absolute top-2 left-2">
                             <span className={`px-2 py-1 rounded-full text-xs font-medium ${
