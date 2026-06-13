@@ -1,5 +1,6 @@
 import * as React from 'react';
 import Image from 'next/image';
+import Link from 'next/link';
 
 export default function Auth() {
     return (
@@ -47,12 +48,14 @@ export default function Auth() {
                     </label>
 
                     <div className="flex items-end justify-between gap-4">
-                        <button
-                            type="submit"
-                            className="min-w-[190px] h-[56px] rounded-full bg-[#e67c63] text-white text-[28px] font-semibold hover:opacity-90 transition"
-                        >
-                            Войти
-                        </button>
+                        <Link href="/system">
+                            <button
+                                type="submit"
+                                className="min-w-[190px] h-[56px] rounded-full bg-[#e67c63] text-white text-[28px] font-semibold hover:opacity-90 transition"
+                            >
+                                Войти
+                            </button>
+                        </Link>
 
                         <button
                             type="button"
