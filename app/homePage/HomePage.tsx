@@ -1,5 +1,6 @@
 import classes from './homePage.module.css'
 import Image from "next/image";
+import Link from "next/link";
 
 export default function HomePage() {
     return (
@@ -14,9 +15,9 @@ export default function HomePage() {
                         className="h-auto w-auto"
                     />
                     <div className="flex items-center gap-4">
-                        <button className="text-lg font-semibold text-[#2F351B] hover:text-[#556B1F] transition">
+                        <Link href="/auth" className="text-lg font-semibold text-[#2F351B] hover:text-[#556B1F] transition">
                             Войти
-                        </button>
+                        </Link>
                         <button
                             className="rounded-full bg-[#7C9B30] px-8 py-3 text-base font-semibold text-white hover:bg-[#6C8828] transition">
                             Регистрация
