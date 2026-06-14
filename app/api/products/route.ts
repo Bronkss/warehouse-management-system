@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
 
-
 type ProductUnit = 'piece' | 'weight'
 
 interface ProductRow {
@@ -51,9 +50,32 @@ function generateBarcode(): string {
     return barcode + checkDigit
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
     try {
-        const result = await pool.query<ProductRow>(`
+        const { searchParams } = new URL(request.url)
+        const search = String(searchParams.get('search') || '').trim()
+
+        const values: string[] = []
+        const whereParts: string[] = []
+
+        if (search) {
+            values.push(`%${search}%`)
+            const paramIndex = values.length
+
+            whereParts.push(`
+                (
+                    name ILIKE $${paramIndex}
+                    OR barcode::text ILIKE $${paramIndex}
+                )
+            `)
+        }
+
+        const whereSql = whereParts.length > 0
+            ? `WHERE ${whereParts.join(' AND ')}`
+            : ''
+
+        const result = await pool.query<ProductRow>(
+            `
             SELECT 
                 id,
                 name,
@@ -66,8 +88,11 @@ export async function GET() {
                 min_stock,
                 image
             FROM products
+            ${whereSql}
             ORDER BY id DESC
-        `)
+            `,
+            values
+        )
 
         return NextResponse.json(result.rows.map(mapProduct))
     } catch (error) {
