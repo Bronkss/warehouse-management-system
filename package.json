@@ -11,6 +11,7 @@
   "dependencies": {
     "date-fns": "^4.4.0",
     "framer-motion": "^12.40.0",
+    "jsbarcode": "^3.12.3",
     "lucide-react": "^1.17.0",
     "next": "16.2.4",
     "pg": "^8.21.0",
@@ -22,6 +23,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/jsbarcode": "^3.11.4",
     "@types/node": "^20",
     "@types/pg": "^8.20.0",
     "@types/react": "^19",
