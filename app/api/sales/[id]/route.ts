@@ -3,14 +3,16 @@ import { pool } from '@/app/lib/db'
 
 export const runtime = 'nodejs'
 
+// Обновляем тип - params теперь Promise
 type RouteContext = {
-    params: {
-        id: string
-    }
+    params: Promise<{ id: string }>
 }
 
 export async function GET(_request: Request, { params }: RouteContext) {
     try {
+        // Дожидаемся params перед использованием
+        const { id } = await params
+
         const result = await pool.query(
             `
             SELECT
@@ -26,7 +28,7 @@ export async function GET(_request: Request, { params }: RouteContext) {
             FROM receipts
             WHERE id = $1
             `,
-            [params.id]
+            [id]
         )
 
         if (result.rows.length === 0) {
@@ -49,13 +51,16 @@ export async function GET(_request: Request, { params }: RouteContext) {
 
 export async function DELETE(_request: Request, { params }: RouteContext) {
     try {
+        // Дожидаемся params перед использованием
+        const { id } = await params
+
         const result = await pool.query(
             `
             DELETE FROM receipts
             WHERE id = $1
             RETURNING id
             `,
-            [params.id]
+            [id]
         )
 
         if (result.rows.length === 0) {

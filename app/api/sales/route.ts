@@ -83,7 +83,8 @@ export async function POST(request: Request) {
             )
         }
 
-        if (paymentMethod === 'cash' && (!Number.isFinite(receivedAmount) || receivedAmount < total)) {
+        // Добавляем проверку на null
+        if (paymentMethod === 'cash' && (receivedAmount === null || !Number.isFinite(receivedAmount) || receivedAmount < total)) {
             return NextResponse.json(
                 { message: 'Полученная сумма меньше суммы чека' },
                 { status: 400 }
@@ -164,8 +165,9 @@ export async function POST(request: Request) {
                 paymentMethod,
                 paymentLabel,
                 total,
-                paymentMethod === 'cash' ? receivedAmount : total,
-                paymentMethod === 'cash' ? change : 0,
+                // Здесь тоже проверяем на null
+                paymentMethod === 'cash' && receivedAmount !== null ? receivedAmount : total,
+                paymentMethod === 'cash' && change !== null ? change : 0,
                 JSON.stringify(items),
             ]
         )
