@@ -46,27 +46,68 @@
 -- CREATE INDEX IF NOT EXISTS idx_receipts_items
 --     ON receipts USING GIN (items);
 
-CREATE TABLE IF NOT EXISTS receipts (
+-- CREATE TABLE IF NOT EXISTS receipts (
+--     id BIGSERIAL PRIMARY KEY,
+--
+--     receipt_number VARCHAR(64) NOT NULL UNIQUE,
+--     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+--
+--     payment_method VARCHAR(20) NOT NULL CHECK (payment_method IN ('card', 'cash')),
+--     payment_label VARCHAR(50) NOT NULL,
+--
+--     total NUMERIC(12, 2) NOT NULL CHECK (total >= 0),
+--     received_amount NUMERIC(12, 2),
+--     change_amount NUMERIC(12, 2),
+--
+--     items JSONB NOT NULL DEFAULT '[]'::jsonb
+-- );
+--
+-- CREATE INDEX IF NOT EXISTS idx_receipts_created_at
+--     ON receipts(created_at DESC);
+--
+-- CREATE INDEX IF NOT EXISTS idx_receipts_payment_method
+--     ON receipts(payment_method);
+--
+-- CREATE INDEX IF NOT EXISTS idx_receipts_items
+--     ON receipts USING GIN (items);
+
+CREATE TABLE IF NOT EXISTS product_acceptances (
     id BIGSERIAL PRIMARY KEY,
-
-    receipt_number VARCHAR(64) NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    payment_method VARCHAR(20) NOT NULL CHECK (payment_method IN ('card', 'cash')),
-    payment_label VARCHAR(50) NOT NULL,
-
-    total NUMERIC(12, 2) NOT NULL CHECK (total >= 0),
-    received_amount NUMERIC(12, 2),
-    change_amount NUMERIC(12, 2),
-
-    items JSONB NOT NULL DEFAULT '[]'::jsonb
+    number TEXT UNIQUE,
+    source_file_name TEXT,
+    total_rows INTEGER NOT NULL DEFAULT 0,
+    created_count INTEGER NOT NULL DEFAULT 0,
+    updated_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status TEXT NOT NULL DEFAULT 'completed',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_receipts_created_at
-    ON receipts(created_at DESC);
+CREATE TABLE IF NOT EXISTS product_acceptance_items (
+    id BIGSERIAL PRIMARY KEY,
+    acceptance_id BIGINT NOT NULL REFERENCES product_acceptances(id) ON DELETE CASCADE,
+    row_number INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    result TEXT NOT NULL,
+    product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    product_name TEXT,
+    imported_name TEXT NOT NULL,
+    category TEXT,
+    barcode TEXT,
+    purchase_price NUMERIC(12, 2),
+    selling_price NUMERIC(12, 2),
+    quantity NUMERIC(12, 3),
+    unit TEXT,
+    min_stock NUMERIC(12, 3),
+    match_type TEXT,
+    match_score NUMERIC(5, 4),
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
-CREATE INDEX IF NOT EXISTS idx_receipts_payment_method
-    ON receipts(payment_method);
+CREATE INDEX IF NOT EXISTS idx_product_acceptances_created_at
+ON product_acceptances(created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_receipts_items
-    ON receipts USING GIN (items);
+CREATE INDEX IF NOT EXISTS idx_product_acceptance_items_acceptance_id
+ON product_acceptance_items(acceptance_id);
