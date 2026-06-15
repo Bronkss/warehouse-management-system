@@ -1,6 +1,11 @@
 'use client'
 import { useState, useRef, useCallback, useEffect, type ChangeEvent, type FormEvent } from 'react'
 import CustomSelect from '../components/CustomSelect'
+import {
+    formatBarcodeInput,
+    parseBarcodeList,
+    serializeBarcodeList,
+} from '../utils/barcodes'
 
 interface ProductFormData {
     name: string
@@ -74,17 +79,21 @@ const calculateMarkup = (price: string, cat: string): string => {
     return String(Math.ceil(cost * multiplier))
 }
 
-const getInitialState = (data?: ProductFormData) => ({
-    name: data?.name || '',
-    category: data?.category || '',
-    barcode: data?.barcode || '',
-    purchasePrice: data?.purchasePrice || '',
-    sellingPrice: data?.sellingPrice || '',
-    unit: data?.unit || 'piece' as 'piece' | 'weight',
-    stock: data?.stock || '0',
-    minStock: data?.minStock || '10',
-    image: data?.image || '',
-})
+const getInitialState = (data?: ProductFormData) => {
+    const barcodeList = parseBarcodeList(data?.barcode)
+
+    return {
+        name: data?.name || '',
+        category: data?.category || '',
+        barcodeList: barcodeList.length > 0 ? barcodeList : [''],
+        purchasePrice: data?.purchasePrice || '',
+        sellingPrice: data?.sellingPrice || '',
+        unit: data?.unit || 'piece' as 'piece' | 'weight',
+        stock: data?.stock || '0',
+        minStock: data?.minStock || '10',
+        image: data?.image || '',
+    }
+}
 
 export default function AddProductForm({ onSave, onCancel, initialData }: AddProductFormProps) {
     const [formState, setFormState] = useState(() => getInitialState(initialData))
@@ -182,9 +191,40 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
         return '30%'
     }
 
-    const formatBarcode = (value: string): string => {
-        const numbers = value.replace(/\D/g, '')
-        return numbers.slice(0, 14)
+    const updateBarcodeAt = (index: number, value: string) => {
+        const formatted = formatBarcodeInput(value)
+
+        setFormState(prev => {
+            const nextBarcodeList = [...prev.barcodeList]
+            nextBarcodeList[index] = formatted
+
+            return {
+                ...prev,
+                barcodeList: nextBarcodeList,
+            }
+        })
+
+        clearFieldError('barcode')
+    }
+
+    const addBarcodeField = () => {
+        setFormState(prev => ({
+            ...prev,
+            barcodeList: [...prev.barcodeList, ''],
+        }))
+    }
+
+    const removeBarcodeField = (index: number) => {
+        setFormState(prev => {
+            const nextBarcodeList = prev.barcodeList.filter((_, itemIndex) => itemIndex !== index)
+
+            return {
+                ...prev,
+                barcodeList: nextBarcodeList.length > 0 ? nextBarcodeList : [''],
+            }
+        })
+
+        clearFieldError('barcode')
     }
 
     const handleImageChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -228,8 +268,20 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
         if (!formState.name.trim()) newErrors.name = 'Введите название товара'
         if (!formState.category) newErrors.category = 'Выберите категорию товара'
 
-        if (formState.barcode && formState.barcode.length > 0 && formState.barcode.length < 8) {
-            newErrors.barcode = 'Штрихкод должен содержать от 8 до 14 цифр'
+        const finalBarcodes = formState.barcodeList
+            .map(code => formatBarcodeInput(code))
+            .filter(Boolean)
+
+        const hasInvalidBarcode = finalBarcodes.some(code => code.length < 8 || code.length > 14)
+
+        if (hasInvalidBarcode) {
+            newErrors.barcode = 'Каждый штрихкод должен содержать от 8 до 14 цифр'
+        }
+
+        const hasDuplicateBarcodes = new Set(finalBarcodes).size !== finalBarcodes.length
+
+        if (hasDuplicateBarcodes) {
+            newErrors.barcode = 'Штрихкоды не должны повторяться'
         }
 
         if (!formState.purchasePrice || parsePrice(formState.purchasePrice) <= 0) {
@@ -252,7 +304,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
         onSave({
             name: formState.name,
             category: formState.category,
-            barcode: formState.barcode,
+            barcode: serializeBarcodeList(formState.barcodeList),
             purchasePrice: formState.purchasePrice,
             sellingPrice: finalSellingPrice,
             unit: formState.unit,
@@ -282,7 +334,8 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                             className="absolute top-2 right-2 p-1.5 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors"
                         >
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                      d="M6 18L18 6M6 6l12 12"/>
                             </svg>
                         </button>
                     </div>
@@ -291,8 +344,10 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                         onClick={() => fileInputRef.current?.click()}
                         className="w-full h-48 border-2 border-dashed border-gray-300 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors"
                     >
-                        <svg className="w-12 h-12 text-gray-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        <svg className="w-12 h-12 text-gray-400 mb-2" fill="none" stroke="currentColor"
+                             viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                                  d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
                         </svg>
                         <p className="text-sm text-gray-500">Нажмите для загрузки</p>
                         <p className="text-xs text-gray-400 mt-1">PNG, JPG до 5MB</p>
@@ -352,38 +407,72 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
 
             <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Штрихкод товара
-                    <span className="text-xs text-gray-500 ml-1">(EAN-13, UPC или другой формат)</span>
+                    Штрихкоды товара
+                    <span className="text-xs text-gray-500 ml-1">
+            можно добавить несколько
+        </span>
                 </label>
-                <div className="relative">
-                    <input
-                        type="text"
-                        value={formState.barcode}
-                        onChange={(e) => {
-                            const formatted = formatBarcode(e.target.value)
-                            updateField('barcode', formatted)
-                        }}
-                        placeholder="Например: 4601234567890"
-                        maxLength={14}
-                        className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono ${
-                            errors.barcode ? 'border-red-500' : 'border-gray-300'
-                        }`}
-                    />
-                    <svg
-                        className="absolute right-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                    >
-                        <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={1.5}
-                            d="M3 5h2M3 9h4M3 13h2M3 17h4M7 5h2M7 9h2M7 13h2M7 17h2M11 5h2M11 9h2M11 13h2M11 17h2M15 5h2M15 9h4M15 13h2M15 17h4M19 5h2M19 13h2"
-                        />
-                    </svg>
+
+                <div className="space-y-2">
+                    {formState.barcodeList.map((barcode, index) => (
+                        <div key={index} className="relative flex gap-2">
+                            <div className="relative flex-1">
+                                <input
+                                    type="text"
+                                    value={barcode}
+                                    onChange={(e) => updateBarcodeAt(index, e.target.value)}
+                                    placeholder={
+                                        index === 0
+                                            ? 'Основной штрихкод, например: 4601234567890'
+                                            : `Дополнительный штрихкод №${index + 1}`
+                                    }
+                                    maxLength={14}
+                                    className={`w-full px-4 py-2 pr-10 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono ${
+                                        errors.barcode ? 'border-red-500' : 'border-gray-300'
+                                    }`}
+                                />
+
+                                <svg
+                                    className="absolute right-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    viewBox="0 0 24 24"
+                                >
+                                    <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={1.5}
+                                        d="M3 5h2M3 9h4M3 13h2M3 17h4M7 5h2M7 9h2M7 13h2M7 17h2M11 5h2M11 9h2M11 13h2M11 17h2M15 5h2M15 9h4M15 13h2M15 17h4M19 5h2M19 13h2"
+                                    />
+                                </svg>
+                            </div>
+
+                            {formState.barcodeList.length > 1 && (
+                                <button
+                                    type="button"
+                                    onClick={() => removeBarcodeField(index)}
+                                    className="px-3 rounded-lg border border-red-200 text-red-600 hover:bg-red-50"
+                                >
+                                    ✕
+                                </button>
+                            )}
+                        </div>
+                    ))}
                 </div>
+
+                <button
+                    type="button"
+                    onClick={addBarcodeField}
+                    className="mt-2 text-sm font-medium text-blue-600 hover:text-blue-700"
+                >
+                    + Добавить ещё штрихкод
+                </button>
+
                 {errors.barcode && <p className="mt-1 text-sm text-red-500">{errors.barcode}</p>}
+
+                <p className="mt-1 text-xs text-gray-500">
+                    В базе штрихкоды будут храниться в одном поле через разделитель.
+                </p>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -507,12 +596,23 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                         )}
                         <p><span className="text-gray-500">Название:</span> {formState.name}</p>
                         <p><span className="text-gray-500">Категория:</span> {formState.category}</p>
-                        {formState.barcode && <p><span className="text-gray-500">Штрихкод:</span> {formState.barcode}</p>}
+                        {formState.barcodeList.some(Boolean) && (
+                            <p>
+                                <span className="text-gray-500">Штрихкоды:</span>{' '}
+                                {formState.barcodeList.filter(Boolean).join(', ')}
+                            </p>
+                        )}
                         <p><span className="text-gray-500">Закупка:</span> {formState.purchasePrice} ₽</p>
                         <p><span className="text-gray-500">Продажа:</span> {formState.sellingPrice || '—'} ₽</p>
-                        <p><span className="text-gray-500">Тип:</span> {formState.unit === 'piece' ? 'Штучный' : 'Весовой'}</p>
-                        <p><span className="text-gray-500">Остаток:</span> {formState.stock} {formState.unit === 'weight' ? 'кг' : 'шт.'}</p>
-                        <p><span className="text-gray-500">Мин. остаток:</span> {formState.minStock} {formState.unit === 'weight' ? 'кг' : 'шт.'}</p>
+                        <p><span
+                            className="text-gray-500">Тип:</span> {formState.unit === 'piece' ? 'Штучный' : 'Весовой'}
+                        </p>
+                        <p><span
+                            className="text-gray-500">Остаток:</span> {formState.stock} {formState.unit === 'weight' ? 'кг' : 'шт.'}
+                        </p>
+                        <p><span
+                            className="text-gray-500">Мин. остаток:</span> {formState.minStock} {formState.unit === 'weight' ? 'кг' : 'шт.'}
+                        </p>
                     </div>
                 </div>
             )}

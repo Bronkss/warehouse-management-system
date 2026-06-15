@@ -38,7 +38,7 @@ export default function Modal({ isOpen, onClose, title, children }: ModalProps) 
 
             <div className="relative z-[10000] bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
                 <div className="flex items-center justify-between p-6 border-b sticky top-0 bg-white rounded-t-lg">
-                    <h2 className="text-xl font-semibold">{title}</h2>
+                    <h2 className="text-xl font-semibold z-[10000]">{title}</h2>
                     <button
                         onClick={onClose}
                         className="p-2 hover:bg-gray-100 rounded-full transition-colors"

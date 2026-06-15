@@ -6,6 +6,7 @@ import {useModal} from '../hooks/useModal'
 import Modal from '../components/Modal'
 import AddProductForm from '../components/AddProductForm'
 import CustomSelect from '../components/CustomSelect'
+import {getBarcodeDisplay} from '../utils/barcodes'
 
 interface Product {
     id: number
@@ -492,16 +493,15 @@ export default function Products() {
                                                 </p>
 
                                                 {product.barcode && (
-                                                    <div className="mb-2 flex items-center gap-2">
-                                                        <svg className="w-4 h-4 text-gray-400" fill="none"
+                                                    <div className="mb-2 flex items-start gap-2">
+                                                        <svg className="w-4 h-4 text-gray-400 mt-0.5" fill="none"
                                                              stroke="currentColor" viewBox="0 0 24 24">
                                                             <path strokeLinecap="round" strokeLinejoin="round"
                                                                   strokeWidth={1.5}
                                                                   d="M3 5h2M3 9h4M3 13h2M3 17h4M7 5h2M7 9h2M7 13h2M7 17h2M11 5h2M11 9h2M11 13h2M11 17h2M15 5h2M15 9h4M15 13h2M15 17h4M19 5h2M19 13h2"/>
                                                         </svg>
-                                                        <span className="text-xs text-gray-500 font-mono">
-                                                            {product.barcode}
-                                                        </span>
+
+                                                        <span className="text-xs text-gray-500 font-mono break-all">{getBarcodeDisplay(product.barcode)}</span>
                                                     </div>
                                                 )}
 
