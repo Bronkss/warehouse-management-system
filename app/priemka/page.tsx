@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import System from '@/app/system/page'
+import ProductMovementForm from '@/app/components/ProductMovementForm'
 
 type ProductUnit = 'piece' | 'weight'
 type ImportAction = 'update' | 'create' | 'skip'
@@ -362,14 +363,17 @@ export default function Page() {
                                                 <div className="text-gray-400">стр.</div>
                                                 <div className="font-bold">{item.totalRows}</div>
                                             </div>
+
                                             <div className="rounded bg-green-50 p-1 text-green-700">
                                                 <div>созд.</div>
                                                 <div className="font-bold">{item.created}</div>
                                             </div>
+
                                             <div className="rounded bg-blue-50 p-1 text-blue-700">
                                                 <div>обн.</div>
                                                 <div className="font-bold">{item.updated}</div>
                                             </div>
+
                                             <div className="rounded bg-orange-50 p-1 text-orange-700">
                                                 <div>проп.</div>
                                                 <div className="font-bold">{item.skipped}</div>
@@ -380,6 +384,8 @@ export default function Page() {
                             </div>
                         </div>
                     </div>
+
+                    <ProductMovementForm mode="acceptance" />
 
                     {previewRows.length > 0 && (
                         <>
