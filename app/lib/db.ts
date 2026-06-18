@@ -1,11 +1,18 @@
 import { Pool } from 'pg'
 
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-})
+const globalForPg = globalThis as unknown as {
+    pool?: Pool
+}
 
-pool.query('SELECT NOW()')
-    .then(() => console.log('✅ PostgreSQL подключен'))
-    .catch((err) => console.error('❌ Ошибка PostgreSQL:', err.message))
+export const pool =
+    globalForPg.pool ||
+    new Pool({
+        connectionString: process.env.DATABASE_URL,
+        max: 5,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+    })
 
-export { pool }
+if (process.env.NODE_ENV !== 'production') {
+    globalForPg.pool = pool
+}

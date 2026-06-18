@@ -16,7 +16,7 @@ import {
     getPrimaryBarcode,
     hasBarcodeSearchMatch,
     hasExactBarcode,
-} from '../utils/barcodes'
+} from '../utils/barcodes';
 
 type ProductId = string | number;
 
@@ -34,6 +34,14 @@ type Product = {
     minStock?: number | string;
     min_stock?: number | string;
     image?: string;
+};
+
+type ProductsApiResponse = {
+    items: Product[];
+    nextCursor: number | null;
+    hasMore: boolean;
+    limit: number;
+    durationMs?: number;
 };
 
 type CheckoutItem = {
@@ -66,13 +74,14 @@ type Receipt = {
     change?: number;
 };
 
-type StockFilter = 'all' | 'available' | 'low' | 'empty';
-
 type ApiError = {
     message?: string;
 };
 
 type PrintMode = 'selected' | 'filtered' | 'all';
+
+const PRODUCTS_PAGE_LIMIT = 100;
+const SEARCH_LIMIT = 30;
 
 const safeParseNumber = (value: unknown): number => {
     if (typeof value === 'number') {
@@ -114,6 +123,41 @@ const normalizeProduct = (product: Product): Product => {
         category: product.category || 'Другое',
         barcode: product.barcode || '',
         image: product.image || '',
+    };
+};
+
+const normalizeProductsApiResponse = (data: unknown): ProductsApiResponse => {
+    if (Array.isArray(data)) {
+        return {
+            items: data,
+            nextCursor: null,
+            hasMore: false,
+            limit: data.length,
+        };
+    }
+
+    if (
+        typeof data === 'object' &&
+        data !== null &&
+        'items' in data &&
+        Array.isArray((data as ProductsApiResponse).items)
+    ) {
+        const response = data as ProductsApiResponse;
+
+        return {
+            items: response.items,
+            nextCursor: response.nextCursor ?? null,
+            hasMore: Boolean(response.hasMore),
+            limit: Number(response.limit || response.items.length),
+            durationMs: response.durationMs,
+        };
+    }
+
+    return {
+        items: [],
+        nextCursor: null,
+        hasMore: false,
+        limit: 0,
     };
 };
 
@@ -179,16 +223,93 @@ const readJsonSafe = async <T,>(response: Response): Promise<T | null> => {
     }
 };
 
+const fetchProductsPage = async ({
+                                     search,
+                                     cursor,
+                                     limit = PRODUCTS_PAGE_LIMIT,
+                                     signal,
+                                 }: {
+    search?: string;
+    cursor?: number | null;
+    limit?: number;
+    signal?: AbortSignal;
+}): Promise<ProductsApiResponse> => {
+    const params = new URLSearchParams();
+
+    params.set('limit', String(limit));
+
+    if (search) {
+        params.set('search', search);
+    }
+
+    if (cursor) {
+        params.set('cursor', String(cursor));
+    }
+
+    const response = await fetch(`/api/products?${params.toString()}`, {
+        method: 'GET',
+        cache: 'no-store',
+        signal,
+    });
+
+    const data = await readJsonSafe<ProductsApiResponse | Product[] | ApiError>(response);
+
+    if (!response.ok) {
+        throw new Error(
+            data && typeof data === 'object' && 'message' in data && data.message
+                ? data.message
+                : 'Не удалось загрузить товары'
+        );
+    }
+
+    return normalizeProductsApiResponse(data);
+};
+
+const searchProducts = async (query: string, signal?: AbortSignal): Promise<Product[]> => {
+    const page = await fetchProductsPage({
+        search: query,
+        limit: SEARCH_LIMIT,
+        signal,
+    });
+
+    return page.items.map(normalizeProduct);
+};
+
+const fetchAllProducts = async (): Promise<Product[]> => {
+    const allProducts: Product[] = [];
+
+    let nextCursor: number | null = null;
+    let hasMore = true;
+    let safetyCounter = 0;
+
+    while (hasMore && safetyCounter < 300) {
+        const page = await fetchProductsPage({
+            cursor: nextCursor,
+            limit: PRODUCTS_PAGE_LIMIT,
+        });
+
+        allProducts.push(...page.items.map(normalizeProduct));
+
+        nextCursor = page.nextCursor;
+        hasMore = Boolean(page.hasMore && nextCursor);
+
+        safetyCounter += 1;
+    }
+
+    return allProducts;
+};
+
 export default function PosPage() {
     const [checkoutItems, setCheckoutItems] = useState<CheckoutItem[]>([]);
     const [allProducts, setAllProducts] = useState<Product[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
-    const [categoryFilter, setCategoryFilter] = useState('');
-    const [stockFilter, setStockFilter] = useState<StockFilter>('all');
     const [foundProducts, setFoundProducts] = useState<Product[]>([]);
+
     const [isLoading, setIsLoading] = useState(false);
+    const [isSearchLoading, setIsSearchLoading] = useState(false);
     const [isPaying, setIsPaying] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
     const [paymentModal, setPaymentModal] = useState<PaymentMethod | null>(null);
     const [cashReceived, setCashReceived] = useState('');
     const [lastReceipt, setLastReceipt] = useState<Receipt | null>(null);
@@ -207,18 +328,6 @@ export default function PosPage() {
     const cashReceivedNumber = safeParseNumber(cashReceived);
     const change = cashReceivedNumber - total;
 
-    const categories = useMemo(() => {
-        const unique = Array.from(
-            new Set(
-                allProducts
-                    .map(product => product.category)
-                    .filter(Boolean) as string[]
-            )
-        );
-
-        return unique.sort((a, b) => a.localeCompare(b));
-    }, [allProducts]);
-
     const priceLabelProducts = useMemo(() => {
         const query = priceLabelSearch.trim().toLowerCase();
 
@@ -235,82 +344,53 @@ export default function PosPage() {
         });
     }, [allProducts, priceLabelSearch]);
 
-    const selectedPriceLabelProducts = useMemo(() => {
-        return allProducts.filter(product =>
-            selectedPriceLabelIds.includes(String(product.id))
-        );
-    }, [allProducts, selectedPriceLabelIds]);
-
     const refreshProducts = async (): Promise<Product[]> => {
-        const response = await fetch('/api/products');
+        const products = await fetchAllProducts();
 
-        if (!response.ok) {
-            throw new Error('Не удалось загрузить товары');
-        }
+        setAllProducts(products);
 
-        const data: Product[] = await response.json();
-        const normalized = data.map(normalizeProduct);
-
-        setAllProducts(normalized);
-
-        return normalized;
+        return products;
     };
 
     useEffect(() => {
-        const fetchAllProducts = async () => {
-            try {
-                setIsLoading(true);
-                setError(null);
-                await refreshProducts();
-            } catch (err) {
-                console.error(err);
-                setError('Ошибка загрузки товаров');
-            } finally {
-                setIsLoading(false);
-            }
-        };
+        const query = searchQuery.trim();
 
-        fetchAllProducts();
-    }, []);
-
-    useEffect(() => {
-        const query = searchQuery.trim().toLowerCase();
-
-        if (!query || !allProducts.length) {
+        if (query.length < 2) {
             setFoundProducts([]);
+            setIsSearchLoading(false);
             return;
         }
 
-        const delayDebounce = setTimeout(() => {
-            const results = allProducts.filter(product => {
-                const matchesSearch =
-                    product.name.toLowerCase().includes(query) ||
-                    hasBarcodeSearchMatch(product.barcode, query);
+        const controller = new AbortController();
 
-                const matchesCategory = categoryFilter
-                    ? product.category === categoryFilter
-                    : true;
+        const timeoutId = setTimeout(async () => {
+            try {
+                setIsSearchLoading(true);
+                setError(null);
 
-                const stock = getStock(product);
-                const minStock = getMinStock(product);
+                const products = await searchProducts(query, controller.signal);
 
-                const matchesStock =
-                    stockFilter === 'all'
-                        ? true
-                        : stockFilter === 'available'
-                            ? stock > 0
-                            : stockFilter === 'low'
-                                ? stock > 0 && stock <= minStock
-                                : stock === 0;
+                setFoundProducts(products);
+            } catch (err) {
+                if (err instanceof Error && err.name === 'AbortError') {
+                    return;
+                }
 
-                return matchesSearch && matchesCategory && matchesStock;
-            });
+                console.error(err);
+                setFoundProducts([]);
+                setError(err instanceof Error ? err.message : 'Ошибка поиска товара');
+            } finally {
+                if (!controller.signal.aborted) {
+                    setIsSearchLoading(false);
+                }
+            }
+        }, 220);
 
-            setFoundProducts(results);
-        }, 250);
-
-        return () => clearTimeout(delayDebounce);
-    }, [searchQuery, allProducts, categoryFilter, stockFilter]);
+        return () => {
+            clearTimeout(timeoutId);
+            controller.abort();
+        };
+    }, [searchQuery]);
 
     const createSaleInDb = async (receipt: Receipt): Promise<Receipt> => {
         const response = await fetch('/api/sales', {
@@ -328,6 +408,25 @@ export default function PosPage() {
         }
 
         return data || receipt;
+    };
+
+    const updateLocalStockAfterSale = (items: ReceiptItem[]) => {
+        setAllProducts(prevProducts =>
+            prevProducts.map(product => {
+                const receiptItem = items.find(item =>
+                    String(item.productId) === String(product.id)
+                );
+
+                if (!receiptItem) {
+                    return product;
+                }
+
+                return {
+                    ...product,
+                    stock: Math.max(0, getStock(product) - receiptItem.quantity),
+                };
+            })
+        );
     };
 
     const addQuantityToCheckout = (product: Product, quantity: number) => {
@@ -476,7 +575,7 @@ export default function PosPage() {
         setCheckoutItems(prev => prev.filter(item => item.id !== itemId));
     };
 
-    const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    const handleKeyDown = async (e: KeyboardEvent<HTMLInputElement>) => {
         if (e.key !== 'Enter') {
             return;
         }
@@ -489,26 +588,51 @@ export default function PosPage() {
             return;
         }
 
-        const exactBarcodeProduct = allProducts.find(product =>
-            hasExactBarcode(product.barcode, query)
-        )
+        try {
+            setIsSearchLoading(true);
+            setError(null);
 
-        if (exactBarcodeProduct) {
-            addToCheckout(exactBarcodeProduct);
-            return;
+            let products = foundProducts;
+
+            const exactFromCurrentResults = products.find(product =>
+                hasExactBarcode(product.barcode, query)
+            );
+
+            if (exactFromCurrentResults) {
+                addToCheckout(exactFromCurrentResults);
+                return;
+            }
+
+            products = await searchProducts(query);
+
+            setFoundProducts(products);
+
+            const exactBarcodeProduct = products.find(product =>
+                hasExactBarcode(product.barcode, query)
+            );
+
+            if (exactBarcodeProduct) {
+                addToCheckout(exactBarcodeProduct);
+                return;
+            }
+
+            if (products.length === 1) {
+                addToCheckout(products[0]);
+                return;
+            }
+
+            if (products.length > 1) {
+                setError('Найдено несколько товаров. Выберите нужный из списка');
+                return;
+            }
+
+            setError('Товар не найден в базе');
+        } catch (err) {
+            console.error(err);
+            setError(err instanceof Error ? err.message : 'Ошибка поиска товара');
+        } finally {
+            setIsSearchLoading(false);
         }
-
-        if (foundProducts.length === 1) {
-            addToCheckout(foundProducts[0]);
-            return;
-        }
-
-        if (foundProducts.length > 1) {
-            setError('Найдено несколько товаров. Выберите нужный из списка');
-            return;
-        }
-
-        setError('Товар не найден в базе');
     };
 
     const openPayment = (method: PaymentMethod) => {
@@ -602,7 +726,7 @@ export default function PosPage() {
 
             const savedReceipt = await createSaleInDb(receipt);
 
-            await refreshProducts();
+            updateLocalStockAfterSale(receiptItems);
 
             setCheckoutItems([]);
             setPaymentModal(null);
@@ -694,23 +818,23 @@ export default function PosPage() {
 
     const buildPriceLabelsHtml = (products: Product[]): string => {
         const chunkProducts = (items: Product[], size: number): Product[][] => {
-            const chunks: Product[][] = []
+            const chunks: Product[][] = [];
 
             for (let i = 0; i < items.length; i += size) {
-                chunks.push(items.slice(i, i + size))
+                chunks.push(items.slice(i, i + size));
             }
 
-            return chunks
-        }
+            return chunks;
+        };
 
         const sheets = chunkProducts(products, 28).map(sheetProducts => {
             const labels = sheetProducts.map(product => {
-                const name = escapeHtml(product.name)
-                const price = Math.ceil(getSellingPrice(product))
-                const unitLabel = escapeHtml(getUnitPriceLabel(product))
+                const name = escapeHtml(product.name);
+                const price = Math.ceil(getSellingPrice(product));
+                const unitLabel = escapeHtml(getUnitPriceLabel(product));
 
-                const barcodeFromDb = String(product.barcode || '').trim()
-                const barcodeSvg = renderBarcodeSvgFromDbValue(barcodeFromDb)
+                const barcodeFromDb = String(product.barcode || '').trim();
+                const barcodeSvg = renderBarcodeSvgFromDbValue(barcodeFromDb);
 
                 return `
                 <section class="label">
@@ -725,15 +849,15 @@ export default function PosPage() {
                         ${barcodeSvg ? barcodeSvg : '<div class="no-barcode">Штрихкод не задан в БД</div>'}
                     </div>
                 </section>
-            `
-            }).join('')
+            `;
+            }).join('');
 
             return `
             <main class="sheet">
                 ${labels}
             </main>
-        `
-        }).join('')
+        `;
+        }).join('');
 
         return `
         <!doctype html>
@@ -870,8 +994,8 @@ export default function PosPage() {
                 </script>
             </body>
         </html>
-    `
-    }
+    `;
+    };
 
     const printPriceLabels = async (mode: PrintMode) => {
         try {
@@ -886,7 +1010,7 @@ export default function PosPage() {
                 ? freshProducts.filter(product => {
                     return (
                         product.name.toLowerCase().includes(query) ||
-                        String(product.barcode || '').toLowerCase().includes(query) ||
+                        hasBarcodeSearchMatch(product.barcode, query) ||
                         String(getSellingPrice(product)).includes(query)
                     );
                 })
@@ -979,6 +1103,12 @@ export default function PosPage() {
                             </span>
                         </div>
 
+                        {isSearchLoading && (
+                            <div className="mt-3 text-sm text-indigo-600">
+                                Идёт поиск товара...
+                            </div>
+                        )}
+
                         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                             <button
                                 type="button"
@@ -997,7 +1127,7 @@ export default function PosPage() {
                     </div>
 
                     <AnimatePresence>
-                        {searchQuery && foundProducts.length === 0 && (
+                        {searchQuery && !isSearchLoading && foundProducts.length === 0 && (
                             <motion.div
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
@@ -1044,7 +1174,7 @@ export default function PosPage() {
 
                                                     <div className="text-sm text-gray-500 truncate">
                                                         {product.category || 'Без категории'}
-                                                        {product.barcode ? ` · ШК: ${product.barcode}` : ''}
+                                                        {product.barcode ? ` · ШК: ${getBarcodeDisplay(product.barcode)}` : ''}
                                                     </div>
 
                                                     <div className={`text-sm ${isEmpty ? 'text-red-600' : 'text-green-600'}`}>
@@ -1105,7 +1235,7 @@ export default function PosPage() {
 
                                                 {item.product.barcode && (
                                                     <div className="text-sm text-gray-500 truncate">
-                                                        ШК: {item.product.barcode}
+                                                        ШК: {getBarcodeDisplay(item.product.barcode)}
                                                     </div>
                                                 )}
 
@@ -1446,7 +1576,7 @@ export default function PosPage() {
                                                 </td>
 
                                                 <td className="p-3 font-mono text-xs text-gray-500">
-                                                    {product.barcode || 'Штрихкод не задан'}
+                                                    {product.barcode ? getBarcodeDisplay(product.barcode) : 'Штрихкод не задан'}
                                                 </td>
 
                                                 <td className="p-3">

@@ -122,76 +122,75 @@ export default function Page() {
 
     return (
         <System>
-            <div className="w-full p-6">
-                <div className="mb-6 flex items-start justify-between gap-4">
+            <div className="sales-page w-full p-6">
+                <div className="sales-header mb-6 flex items-start justify-between gap-4">
                     <div>
-                        <h1 className="text-3xl font-bold text-gray-800">
+                        <h1 className="sales-title text-3xl font-bold text-gray-800">
                             Все онлайн продажи в магазине ТОЧКА .
                         </h1>
-
                     </div>
 
                     <button
                         type="button"
                         onClick={fetchReceipts}
-                        className="rounded-xl bg-indigo-600 px-5 py-3 text-white hover:bg-indigo-700"
+                        className="sales-refresh rounded-xl bg-indigo-600 px-5 py-3 text-white hover:bg-indigo-700"
                     >
                         Обновить
                     </button>
                 </div>
 
                 {error && (
-                    <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-red-700">
+                    <div className="sales-error mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-red-700">
                         {error}
                     </div>
                 )}
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                    <div className="rounded-2xl bg-white shadow p-5">
+                <div className="sales-stats grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                    <div className="sales-stat-card rounded-2xl bg-white shadow p-5">
                         <div className="text-sm text-gray-500">
                             Чеков
                         </div>
 
-                        <div className="text-3xl font-bold text-indigo-700">
+                        <div className="sales-stat-value text-3xl font-bold text-indigo-700">
                             {filteredReceipts.length}
                         </div>
                     </div>
 
-                    <div className="rounded-2xl bg-white shadow p-5">
+                    <div className="sales-stat-card rounded-2xl bg-white shadow p-5">
                         <div className="text-sm text-gray-500">
                             Товаров продано
                         </div>
 
-                        <div className="text-3xl font-bold text-emerald-700">
+                        <div className="sales-stat-value text-3xl font-bold text-emerald-700">
                             {totalItems}
                         </div>
                     </div>
 
-                    <div className="rounded-2xl bg-white shadow p-5">
+                    <div className="sales-stat-card rounded-2xl bg-white shadow p-5">
                         <div className="text-sm text-gray-500">
                             Выручка
                         </div>
 
-                        <div className="text-3xl font-bold text-blue-700">
+                        <div className="sales-stat-value text-3xl font-bold text-blue-700">
                             {formatCurrency(totalRevenue)}
                         </div>
                     </div>
                 </div>
 
-                <div className="rounded-2xl bg-white shadow p-5 mb-6">
-                    <div className="grid grid-cols-1 md:grid-cols-[1fr_180px_170px_170px_auto] gap-3">
+                <div className="sales-filters rounded-2xl bg-white shadow p-5 mb-6">
+                    <div className="sales-filters-grid grid grid-cols-1 md:grid-cols-[1fr_180px_170px_170px_auto] gap-3">
                         <input
                             type="text"
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
                             placeholder="Поиск по номеру чека, товару, категории или штрихкоду"
-                            className="rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
+                            className="sales-field rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
                         />
 
                         <select
                             value={paymentFilter}
                             onChange={(e) => setPaymentFilter(e.target.value as 'all' | PaymentMethod)}
-                            className="rounded-xl border border-gray-300 px-4 py-3 bg-white outline-none focus:ring-2 focus:ring-indigo-500"
+                            className="sales-field rounded-xl border border-gray-300 px-4 py-3 bg-white outline-none focus:ring-2 focus:ring-indigo-500"
                         >
                             <option value="all">Все оплаты</option>
                             <option value="card">Карта</option>
@@ -202,20 +201,20 @@ export default function Page() {
                             type="date"
                             value={dateFrom}
                             onChange={(e) => setDateFrom(e.target.value)}
-                            className="rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
+                            className="sales-field rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
                         />
 
                         <input
                             type="date"
                             value={dateTo}
                             onChange={(e) => setDateTo(e.target.value)}
-                            className="rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
+                            className="sales-field rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
                         />
 
                         <button
                             type="button"
                             onClick={clearFilters}
-                            className="rounded-xl border border-gray-300 px-5 py-3 hover:bg-gray-50"
+                            className="sales-reset rounded-xl border border-gray-300 px-5 py-3 hover:bg-gray-50"
                         >
                             Сбросить
                         </button>
@@ -223,47 +222,47 @@ export default function Page() {
                 </div>
 
                 {isLoading ? (
-                    <div className="rounded-2xl bg-white shadow p-10 text-center text-gray-500">
+                    <div className="sales-empty rounded-2xl bg-white shadow p-10 text-center text-gray-500">
                         Загрузка чеков...
                     </div>
                 ) : filteredReceipts.length === 0 ? (
-                    <div className="rounded-2xl bg-white shadow p-10 text-center text-gray-500">
+                    <div className="sales-empty rounded-2xl bg-white shadow p-10 text-center text-gray-500">
                         Продажи не найдены
                     </div>
                 ) : (
-                    <div className="space-y-4">
+                    <div className="sales-list space-y-4">
                         {filteredReceipts.map((receipt) => (
                             <article
                                 key={receipt.id}
-                                className="rounded-2xl bg-white shadow overflow-hidden"
+                                className="sales-receipt rounded-2xl bg-white shadow overflow-hidden"
                             >
-                                <div className="p-5 border-b border-gray-100 flex flex-wrap items-start justify-between gap-4">
-                                    <div>
-                                        <div className="text-lg font-bold text-indigo-700">
+                                <div className="sales-receipt-header p-5 border-b border-gray-100 flex flex-wrap items-start justify-between gap-4">
+                                    <div className="sales-receipt-info">
+                                        <div className="sales-receipt-id text-lg font-bold text-indigo-700">
                                             Чек № {receipt.id}
                                         </div>
 
-                                        <div className="text-sm text-gray-500 mt-1">
+                                        <div className="sales-receipt-date text-sm text-gray-500 mt-1">
                                             {new Date(receipt.createdAt).toLocaleString('ru-RU')}
                                         </div>
 
-                                        <div className="text-sm text-gray-500 mt-1">
+                                        <div className="sales-receipt-payment text-sm text-gray-500 mt-1">
                                             Оплата: {receipt.paymentLabel}
                                         </div>
                                     </div>
 
-                                    <div className="flex items-start gap-4">
-                                        <div className="text-right">
+                                    <div className="sales-receipt-total-block flex items-start gap-4">
+                                        <div className="sales-receipt-total text-right">
                                             <div className="text-sm text-gray-500">
                                                 Сумма чека
                                             </div>
 
-                                            <div className="text-2xl font-bold text-indigo-700">
+                                            <div className="sales-receipt-total-value text-2xl font-bold text-indigo-700">
                                                 {formatCurrency(receipt.total)}
                                             </div>
 
                                             {receipt.paymentMethod === 'cash' && (
-                                                <div className="text-sm text-gray-500 mt-1">
+                                                <div className="sales-cash-info text-sm text-gray-500 mt-1">
                                                     Получено: {formatCurrency(receipt.receivedAmount || 0)}
                                                     <br />
                                                     Сдача: {formatCurrency(receipt.change || 0)}
@@ -273,8 +272,8 @@ export default function Page() {
                                     </div>
                                 </div>
 
-                                <div className="p-5 overflow-x-auto">
-                                    <table className="w-full text-sm">
+                                <div className="sales-table-wrap p-5 overflow-x-auto">
+                                    <table className="sales-table w-full text-sm">
                                         <thead>
                                         <tr className="text-left text-gray-500 border-b">
                                             <th className="py-2 pr-4">Товар</th>
@@ -292,27 +291,45 @@ export default function Page() {
                                                 key={`${receipt.id}-${item.productId}-${index}`}
                                                 className="border-b last:border-b-0"
                                             >
-                                                <td className="py-3 pr-4 font-medium text-gray-800">
+                                                <td
+                                                    data-label="Товар"
+                                                    className="py-3 pr-4 font-medium text-gray-800"
+                                                >
                                                     {item.name}
                                                 </td>
 
-                                                <td className="py-3 pr-4 text-gray-500">
+                                                <td
+                                                    data-label="Категория"
+                                                    className="py-3 pr-4 text-gray-500"
+                                                >
                                                     {item.category || '—'}
                                                 </td>
 
-                                                <td className="py-3 pr-4 text-gray-500 font-mono">
+                                                <td
+                                                    data-label="ШК"
+                                                    className="py-3 pr-4 text-gray-500 font-mono"
+                                                >
                                                     {item.barcode || '—'}
                                                 </td>
 
-                                                <td className="py-3 pr-4 text-right">
+                                                <td
+                                                    data-label="Цена"
+                                                    className="py-3 pr-4 text-right"
+                                                >
                                                     {formatCurrency(item.price)}
                                                 </td>
 
-                                                <td className="py-3 pr-4 text-right">
+                                                <td
+                                                    data-label="Кол-во"
+                                                    className="py-3 pr-4 text-right"
+                                                >
                                                     {item.quantity}
                                                 </td>
 
-                                                <td className="py-3 text-right font-semibold">
+                                                <td
+                                                    data-label="Сумма"
+                                                    className="py-3 text-right font-semibold"
+                                                >
                                                     {formatCurrency(item.total)}
                                                 </td>
                                             </tr>
@@ -324,6 +341,287 @@ export default function Page() {
                         ))}
                     </div>
                 )}
+
+                <style>{`
+                    .sales-table {
+                        min-width: 760px;
+                    }
+
+                    @media (max-width: 1024px) {
+                        .sales-page {
+                            padding: 20px;
+                        }
+
+                        .sales-title {
+                            font-size: 28px;
+                            line-height: 1.2;
+                        }
+
+                        .sales-filters-grid {
+                            grid-template-columns: 1fr 1fr;
+                        }
+
+                        .sales-field,
+                        .sales-reset {
+                            width: 100%;
+                        }
+                    }
+
+                    @media (max-width: 768px) {
+                        .sales-page {
+                            padding: 16px;
+                        }
+
+                        .sales-header {
+                            flex-direction: column;
+                            align-items: stretch;
+                            gap: 16px;
+                            margin-bottom: 20px;
+                        }
+
+                        .sales-title {
+                            font-size: 24px;
+                            line-height: 1.25;
+                        }
+
+                        .sales-refresh {
+                            width: 100%;
+                            padding: 12px 18px;
+                            border-radius: 14px;
+                        }
+
+                        .sales-stats {
+                            gap: 12px;
+                            margin-bottom: 18px;
+                        }
+
+                        .sales-stat-card {
+                            padding: 18px;
+                            border-radius: 18px;
+                        }
+
+                        .sales-stat-value {
+                            font-size: 28px;
+                            line-height: 1.2;
+                        }
+
+                        .sales-filters {
+                            padding: 16px;
+                            border-radius: 18px;
+                            margin-bottom: 18px;
+                        }
+
+                        .sales-filters-grid {
+                            grid-template-columns: 1fr;
+                            gap: 12px;
+                        }
+
+                        .sales-field,
+                        .sales-reset {
+                            min-height: 48px;
+                            font-size: 15px;
+                            border-radius: 14px;
+                        }
+
+                        .sales-empty {
+                            padding: 32px 18px;
+                            border-radius: 18px;
+                        }
+
+                        .sales-receipt {
+                            border-radius: 18px;
+                        }
+
+                        .sales-receipt-header {
+                            flex-direction: column;
+                            padding: 18px;
+                            gap: 14px;
+                        }
+
+                        .sales-receipt-total-block {
+                            width: 100%;
+                        }
+
+                        .sales-receipt-total {
+                            width: 100%;
+                            text-align: left;
+                            border-radius: 16px;
+                            background: #f8fafc;
+                            padding: 14px;
+                        }
+
+                        .sales-receipt-total-value {
+                            font-size: 24px;
+                        }
+
+                        .sales-table-wrap {
+                            padding: 16px;
+                        }
+                    }
+
+                    @media (max-width: 640px) {
+                        .sales-table-wrap {
+                            overflow-x: visible;
+                        }
+
+                        .sales-table {
+                            min-width: 0;
+                        }
+
+                        .sales-table,
+                        .sales-table thead,
+                        .sales-table tbody,
+                        .sales-table tr,
+                        .sales-table th,
+                        .sales-table td {
+                            display: block;
+                            width: 100%;
+                        }
+
+                        .sales-table thead {
+                            display: none;
+                        }
+
+                        .sales-table tbody {
+                            display: grid;
+                            gap: 12px;
+                        }
+
+                        .sales-table tr {
+                            border: 1px solid #e5e7eb;
+                            border-radius: 16px;
+                            padding: 12px;
+                            background: #ffffff;
+                        }
+
+                        .sales-table td {
+                            display: flex;
+                            align-items: flex-start;
+                            justify-content: space-between;
+                            gap: 16px;
+                            border-bottom: 1px dashed #e5e7eb;
+                            padding: 8px 0;
+                            text-align: right;
+                        }
+
+                        .sales-table td:last-child {
+                            border-bottom: 0;
+                        }
+
+                        .sales-table td::before {
+                            content: attr(data-label);
+                            flex: 0 0 90px;
+                            text-align: left;
+                            font-weight: 600;
+                            color: #6b7280;
+                        }
+
+                        .sales-table td:first-child {
+                            display: block;
+                            text-align: left;
+                            font-size: 15px;
+                        }
+
+                        .sales-table td:first-child::before {
+                            display: block;
+                            margin-bottom: 4px;
+                        }
+                    }
+
+                    @media (max-width: 480px) {
+                        .sales-page {
+                            padding: 12px;
+                        }
+
+                        .sales-title {
+                            font-size: 21px;
+                        }
+
+                        .sales-refresh {
+                            padding: 11px 16px;
+                            font-size: 15px;
+                        }
+
+                        .sales-stat-card {
+                            padding: 16px;
+                        }
+
+                        .sales-stat-value {
+                            font-size: 25px;
+                        }
+
+                        .sales-filters {
+                            padding: 14px;
+                        }
+
+                        .sales-field,
+                        .sales-reset {
+                            padding: 11px 14px;
+                            font-size: 14px;
+                        }
+
+                        .sales-receipt-header {
+                            padding: 16px;
+                        }
+
+                        .sales-receipt-id {
+                            font-size: 16px;
+                            word-break: break-word;
+                        }
+
+                        .sales-receipt-date,
+                        .sales-receipt-payment,
+                        .sales-cash-info {
+                            font-size: 13px;
+                        }
+
+                        .sales-receipt-total-value {
+                            font-size: 21px;
+                        }
+
+                        .sales-table-wrap {
+                            padding: 12px;
+                        }
+
+                        .sales-table tr {
+                            padding: 10px;
+                            border-radius: 14px;
+                        }
+
+                        .sales-table td {
+                            gap: 10px;
+                            font-size: 13px;
+                        }
+
+                        .sales-table td::before {
+                            flex-basis: 78px;
+                        }
+                    }
+
+                    @media (max-width: 360px) {
+                        .sales-page {
+                            padding: 10px;
+                        }
+
+                        .sales-title {
+                            font-size: 19px;
+                        }
+
+                        .sales-stat-value {
+                            font-size: 23px;
+                        }
+
+                        .sales-table td {
+                            flex-direction: column;
+                            gap: 4px;
+                            text-align: left;
+                        }
+
+                        .sales-table td::before {
+                            flex-basis: auto;
+                        }
+                    }
+                `}</style>
             </div>
         </System>
     )

@@ -18,6 +18,14 @@ type Product = {
     image: string
 }
 
+type ProductsApiResponse = {
+    items: Product[]
+    nextCursor: number | null
+    hasMore: boolean
+    limit: number
+    durationMs?: number
+}
+
 type MovementItem = {
     product: Product
     quantity: string
@@ -85,11 +93,50 @@ function calcSellingPrice(purchasePrice: string, category: string, name?: string
     return String(result)
 }
 
+function normalizeProductsResponse(data: unknown): Product[] {
+    if (Array.isArray(data)) {
+        return data as Product[]
+    }
+
+    if (
+        typeof data === 'object' &&
+        data !== null &&
+        'items' in data &&
+        Array.isArray((data as ProductsApiResponse).items)
+    ) {
+        return (data as ProductsApiResponse).items
+    }
+
+    return []
+}
+
+async function searchProducts(query: string, signal?: AbortSignal): Promise<Product[]> {
+    const params = new URLSearchParams()
+
+    params.set('search', query)
+    params.set('limit', '10')
+
+    const response = await fetch(`/api/products?${params.toString()}`, {
+        method: 'GET',
+        cache: 'no-store',
+        signal,
+    })
+
+    const data = await response.json()
+
+    if (!response.ok) {
+        throw new Error(data?.message || 'Не удалось найти товары')
+    }
+
+    return normalizeProductsResponse(data)
+}
+
 function findBestProduct(products: Product[], query: string) {
     const normalizedQuery = query.trim().toLowerCase()
+    const rawQuery = query.trim()
 
     const exact = products.find(product =>
-        product.barcode === query.trim() ||
+        product.barcode === rawQuery ||
         product.name.toLowerCase() === normalizedQuery
     )
 
@@ -117,20 +164,6 @@ export default function ProductMovementForm({ mode }: Props) {
 
     const [shipper, setShipper] = useState('')
     const [consignee, setConsignee] = useState('')
-    const [driver, setDriver] = useState('')
-    const [vehicle, setVehicle] = useState('')
-
-    const searchProducts = async (query: string) => {
-        const response = await fetch(`/api/products?search=${encodeURIComponent(query)}`)
-
-        if (!response.ok) {
-            throw new Error('Не удалось найти товары')
-        }
-
-        const data: Product[] = await response.json()
-
-        return data
-    }
 
     useEffect(() => {
         const query = searchQuery.trim()
@@ -138,22 +171,27 @@ export default function ProductMovementForm({ mode }: Props) {
         if (query.length < 2) {
             setSuggestions([])
             setSelectedProduct(null)
+
+            if (isAcceptance) {
+                setAcceptanceCategory('')
+                setAcceptancePurchasePrice('')
+                setAcceptanceSellingPrice('')
+            }
+
             return
         }
+
+        const controller = new AbortController()
 
         const timeoutId = setTimeout(async () => {
             try {
                 setIsSearchLoading(true)
 
-                const data = await searchProducts(query)
-                setSuggestions(data)
+                const products = await searchProducts(query, controller.signal)
 
-                const exactProduct = data.find(product =>
-                    product.barcode === query ||
-                    product.name.toLowerCase() === query.toLowerCase()
-                )
+                setSuggestions(products)
 
-                const bestProduct = exactProduct || data[0] || null
+                const bestProduct = findBestProduct(products, query)
 
                 if (bestProduct) {
                     setSelectedProduct(bestProduct)
@@ -178,15 +216,24 @@ export default function ProductMovementForm({ mode }: Props) {
                     }
                 }
             } catch (error) {
+                if (error instanceof Error && error.name === 'AbortError') {
+                    return
+                }
+
                 console.error(error)
                 setSuggestions([])
                 setSelectedProduct(null)
             } finally {
-                setIsSearchLoading(false)
+                if (!controller.signal.aborted) {
+                    setIsSearchLoading(false)
+                }
             }
         }, 250)
 
-        return () => clearTimeout(timeoutId)
+        return () => {
+            clearTimeout(timeoutId)
+            controller.abort()
+        }
     }, [searchQuery, isAcceptance])
 
     useEffect(() => {
@@ -319,17 +366,11 @@ export default function ProductMovementForm({ mode }: Props) {
 
     const handleSuggestionClick = (product: Product) => {
         const category = isAcceptance
-            ? String(acceptanceCategory || product.category || '').trim()
+            ? String(product.category || '').trim()
             : product.category
 
-        /**
-         * ВАЖНО:
-         * цена закупки берётся из product.purchasePrice,
-         * это поле приходит из БД purchase_price.
-         * Цена продажи product.sellingPrice здесь не используется как закупочная.
-         */
         const purchasePrice = isAcceptance
-            ? String(acceptancePurchasePrice || product.purchasePrice || '')
+            ? String(product.purchasePrice || '')
             : String(product.purchasePrice || 0)
 
         const sellingPrice = isAcceptance
@@ -357,9 +398,10 @@ export default function ProductMovementForm({ mode }: Props) {
             let product = selectedProduct || findBestProduct(suggestions, query)
 
             if (!product) {
-                const data = await searchProducts(query)
-                setSuggestions(data)
-                product = findBestProduct(data, query)
+                const products = await searchProducts(query)
+
+                setSuggestions(products)
+                product = findBestProduct(products, query)
             }
 
             if (!product) {
@@ -371,11 +413,6 @@ export default function ProductMovementForm({ mode }: Props) {
                 ? String(acceptanceCategory || product.category || '').trim()
                 : product.category
 
-            /**
-             * ВАЖНО:
-             * если поле закупки уже заполнено, берём его;
-             * иначе берём product.purchasePrice из БД purchase_price.
-             */
             const purchasePrice = isAcceptance
                 ? String(acceptancePurchasePrice || product.purchasePrice || '')
                 : String(product.purchasePrice || 0)
@@ -608,7 +645,6 @@ export default function ProductMovementForm({ mode }: Props) {
                         <strong>Грузополучатель:</strong>
                         <div class="line">${escapeHtml(consignee || '-')}</div>
                     </div>
-
                 </div>
 
                 <table>
@@ -821,7 +857,9 @@ export default function ProductMovementForm({ mode }: Props) {
                         )}
 
                         <th className="w-[170px] p-4 text-left">Количество</th>
-                        <th className="w-[170px] p-4 text-left">{isShipment ? 'Сумма' : 'Сумма закупки'}</th>
+                        <th className="w-[170px] p-4 text-left">
+                            {isShipment ? 'Сумма' : 'Сумма закупки'}
+                        </th>
                         <th className="w-[130px] p-4 text-right">Действие</th>
                     </tr>
                     </thead>

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
 
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
 type ProductUnit = 'piece' | 'weight'
 
 interface ProductRow {
@@ -18,7 +21,7 @@ interface ProductRow {
 
 function mapProduct(row: ProductRow) {
     return {
-        id: row.id,
+        id: Number(row.id),
         name: row.name,
         category: row.category,
         barcode: row.barcode,
@@ -31,15 +34,21 @@ function mapProduct(row: ProductRow) {
     }
 }
 
+/**
+ * Генерация внутреннего EAN-13 штрихкода.
+ * Было неправильно: 200 + 10 цифр + check digit = 14 цифр.
+ * Теперь правильно: 200 + 9 цифр + check digit = 13 цифр.
+ */
 function generateBarcode(): string {
     const prefix = '200'
-    const random = Math.floor(Math.random() * 10000000000)
+
+    const randomPart = Math.floor(Math.random() * 1000000000)
         .toString()
-        .padStart(10, '0')
+        .padStart(9, '0')
 
-    const barcode = prefix + random
+    const barcodeWithoutCheckDigit = prefix + randomPart
 
-    const digits = barcode.split('').map(Number)
+    const digits = barcodeWithoutCheckDigit.split('').map(Number)
 
     const sum = digits.reduce((acc, digit, index) => {
         return acc + (index % 2 === 0 ? digit : digit * 3)
@@ -47,36 +56,114 @@ function generateBarcode(): string {
 
     const checkDigit = (10 - (sum % 10)) % 10
 
-    return barcode + checkDigit
+    return barcodeWithoutCheckDigit + checkDigit
+}
+
+function parseLimit(value: string | null): number {
+    const parsed = Number(value || 50)
+
+    if (Number.isNaN(parsed)) {
+        return 50
+    }
+
+    return Math.min(Math.max(parsed, 1), 100)
+}
+
+function parseCursor(value: string | null): number | null {
+    if (!value) {
+        return null
+    }
+
+    const parsed = Number(value)
+
+    if (Number.isNaN(parsed) || parsed <= 0) {
+        return null
+    }
+
+    return parsed
+}
+
+function parseNumber(value: unknown, fallback = 0): number {
+    if (value === undefined || value === null || value === '') {
+        return fallback
+    }
+
+    const parsed = Number(value)
+
+    return Number.isNaN(parsed) ? fallback : parsed
 }
 
 export async function GET(request: NextRequest) {
+    const startedAt = performance.now()
+
     try {
         const { searchParams } = new URL(request.url)
-        const search = String(searchParams.get('search') || '').trim()
 
-        const values: string[] = []
+        const search = String(searchParams.get('search') || '').trim()
+        const limit = parseLimit(searchParams.get('limit'))
+        const cursor = parseCursor(searchParams.get('cursor'))
+
+        const values: Array<string | number> = []
         const whereParts: string[] = []
 
+        /**
+         * Поиск:
+         * 1. Если пользователь ввёл только цифры — сначала ищем точный barcode.
+         * 2. Потом ищем по name/barcode через ILIKE.
+         * 3. Для ILIKE '%...%' нужен pg_trgm индекс в Neon.
+         */
         if (search) {
-            values.push(`%${search}%`)
-            const paramIndex = values.length
+            const isBarcodeLike = /^\d{4,20}$/.test(search)
 
-            whereParts.push(`
-                (
-                    name ILIKE $${paramIndex}
-                    OR barcode::text ILIKE $${paramIndex}
-                )
-            `)
+            if (isBarcodeLike) {
+                values.push(search)
+                const exactBarcodeIndex = values.length
+
+                values.push(`%${search}%`)
+                const likeIndex = values.length
+
+                whereParts.push(`
+                    (
+                        barcode = $${exactBarcodeIndex}
+                        OR barcode ILIKE $${likeIndex}
+                        OR name ILIKE $${likeIndex}
+                    )
+                `)
+            } else {
+                values.push(`%${search}%`)
+                const likeIndex = values.length
+
+                whereParts.push(`
+                    (
+                        name ILIKE $${likeIndex}
+                        OR barcode ILIKE $${likeIndex}
+                    )
+                `)
+            }
+        }
+
+        /**
+         * Cursor pagination:
+         * Вместо OFFSET используем id < cursor.
+         * Это быстрее и стабильнее на больших таблицах.
+         */
+        if (cursor) {
+            values.push(cursor)
+            const cursorIndex = values.length
+
+            whereParts.push(`id < $${cursorIndex}`)
         }
 
         const whereSql = whereParts.length > 0
             ? `WHERE ${whereParts.join(' AND ')}`
             : ''
 
+        values.push(limit + 1)
+        const limitIndex = values.length
+
         const result = await pool.query<ProductRow>(
             `
-            SELECT 
+            SELECT
                 id,
                 name,
                 category,
@@ -90,11 +177,37 @@ export async function GET(request: NextRequest) {
             FROM products
             ${whereSql}
             ORDER BY id DESC
+            LIMIT $${limitIndex}
             `,
             values
         )
 
-        return NextResponse.json(result.rows.map(mapProduct))
+        const mappedRows = result.rows.map(mapProduct)
+
+        const hasMore = mappedRows.length > limit
+        const items = hasMore ? mappedRows.slice(0, limit) : mappedRows
+
+        const nextCursor = hasMore && items.length > 0
+            ? items[items.length - 1].id
+            : null
+
+        const durationMs = Math.round(performance.now() - startedAt)
+
+        return NextResponse.json(
+            {
+                items,
+                nextCursor,
+                hasMore,
+                limit,
+                durationMs,
+            },
+            {
+                headers: {
+                    'Cache-Control': 'private, no-store',
+                    'Server-Timing': `db;dur=${durationMs}`,
+                },
+            }
+        )
     } catch (error) {
         console.error('GET /api/products error:', error)
 
@@ -114,12 +227,12 @@ export async function POST(request: NextRequest) {
         const barcode = String(body.barcode || generateBarcode()).trim()
         const unit = body.unit as ProductUnit
 
-        const purchasePrice = Number(body.purchasePrice)
-        const sellingPrice = Number(body.sellingPrice || 0)
-        const stock = Number(body.stock || 0)
-        const minStock = Number(body.minStock || 10)
+        const purchasePrice = parseNumber(body.purchasePrice, NaN)
+        const sellingPrice = parseNumber(body.sellingPrice, 0)
+        const stock = parseNumber(body.stock, 0)
+        const minStock = parseNumber(body.minStock, 10)
 
-        const image = body.image || '/icons/products.jpg'
+        const image = String(body.image || '/icons/products.jpg').trim()
 
         if (!name) {
             return NextResponse.json(
@@ -135,6 +248,13 @@ export async function POST(request: NextRequest) {
             )
         }
 
+        if (!barcode) {
+            return NextResponse.json(
+                { message: 'Штрихкод обязателен' },
+                { status: 400 }
+            )
+        }
+
         if (unit !== 'piece' && unit !== 'weight') {
             return NextResponse.json(
                 { message: 'Некорректная единица измерения' },
@@ -142,9 +262,30 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        if (Number.isNaN(purchasePrice)) {
+        if (Number.isNaN(purchasePrice) || purchasePrice < 0) {
             return NextResponse.json(
                 { message: 'Некорректная закупочная цена' },
+                { status: 400 }
+            )
+        }
+
+        if (sellingPrice < 0) {
+            return NextResponse.json(
+                { message: 'Некорректная цена продажи' },
+                { status: 400 }
+            )
+        }
+
+        if (stock < 0) {
+            return NextResponse.json(
+                { message: 'Некорректное количество товара' },
+                { status: 400 }
+            )
+        }
+
+        if (minStock < 0) {
+            return NextResponse.json(
+                { message: 'Некорректный минимальный остаток' },
                 { status: 400 }
             )
         }
@@ -163,7 +304,7 @@ export async function POST(request: NextRequest) {
                 image
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING 
+            RETURNING
                 id,
                 name,
                 category,
@@ -192,7 +333,7 @@ export async function POST(request: NextRequest) {
     } catch (error: any) {
         console.error('POST /api/products error:', error)
 
-        if (error.code === '23505') {
+        if (error?.code === '23505') {
             return NextResponse.json(
                 { message: 'Товар с таким штрихкодом уже существует' },
                 { status: 409 }
