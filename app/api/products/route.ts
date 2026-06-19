@@ -6,6 +6,8 @@ export const dynamic = 'force-dynamic'
 
 type ProductUnit = 'piece' | 'weight'
 
+const DEFAULT_PRODUCT_IMAGE = '/icons/products.jpg'
+
 interface ProductRow {
     id: number
     name: string
@@ -30,15 +32,24 @@ function mapProduct(row: ProductRow) {
         unit: row.unit,
         stock: Number(row.stock),
         minStock: Number(row.min_stock),
-        image: row.image,
+        image: row.image || DEFAULT_PRODUCT_IMAGE,
     }
 }
 
-/**
- * Генерация внутреннего EAN-13 штрихкода.
- * Было неправильно: 200 + 10 цифр + check digit = 14 цифр.
- * Теперь правильно: 200 + 9 цифр + check digit = 13 цифр.
- */
+function normalizeImageUrl(value: unknown): string {
+    const image = String(value || '').trim()
+
+    if (!image) {
+        return DEFAULT_PRODUCT_IMAGE
+    }
+
+    if (image.startsWith('data:image/')) {
+        throw new Error('Изображение нужно сначала загрузить в хранилище, а в товар сохранить только URL')
+    }
+
+    return image
+}
+
 function generateBarcode(): string {
     const prefix = '200'
 
@@ -47,7 +58,6 @@ function generateBarcode(): string {
         .padStart(9, '0')
 
     const barcodeWithoutCheckDigit = prefix + randomPart
-
     const digits = barcodeWithoutCheckDigit.split('').map(Number)
 
     const sum = digits.reduce((acc, digit, index) => {
@@ -106,12 +116,6 @@ export async function GET(request: NextRequest) {
         const values: Array<string | number> = []
         const whereParts: string[] = []
 
-        /**
-         * Поиск:
-         * 1. Если пользователь ввёл только цифры — сначала ищем точный barcode.
-         * 2. Потом ищем по name/barcode через ILIKE.
-         * 3. Для ILIKE '%...%' нужен pg_trgm индекс в Neon.
-         */
         if (search) {
             const isBarcodeLike = /^\d{4,20}$/.test(search)
 
@@ -142,11 +146,6 @@ export async function GET(request: NextRequest) {
             }
         }
 
-        /**
-         * Cursor pagination:
-         * Вместо OFFSET используем id < cursor.
-         * Это быстрее и стабильнее на больших таблицах.
-         */
         if (cursor) {
             values.push(cursor)
             const cursorIndex = values.length
@@ -157,6 +156,9 @@ export async function GET(request: NextRequest) {
         const whereSql = whereParts.length > 0
             ? `WHERE ${whereParts.join(' AND ')}`
             : ''
+
+        values.push(DEFAULT_PRODUCT_IMAGE)
+        const defaultImageIndex = values.length
 
         values.push(limit + 1)
         const limitIndex = values.length
@@ -173,7 +175,7 @@ export async function GET(request: NextRequest) {
                 unit,
                 stock,
                 min_stock,
-                image
+                COALESCE(NULLIF(image_url, ''), $${defaultImageIndex}) AS image
             FROM products
             ${whereSql}
             ORDER BY id DESC
@@ -231,8 +233,7 @@ export async function POST(request: NextRequest) {
         const sellingPrice = parseNumber(body.sellingPrice, 0)
         const stock = parseNumber(body.stock, 0)
         const minStock = parseNumber(body.minStock, 10)
-
-        const image = String(body.image || '/icons/products.jpg').trim()
+        const image = normalizeImageUrl(body.image)
 
         if (!name) {
             return NextResponse.json(
@@ -301,7 +302,7 @@ export async function POST(request: NextRequest) {
                 unit,
                 stock,
                 min_stock,
-                image
+                image_url
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING
@@ -314,7 +315,7 @@ export async function POST(request: NextRequest) {
                 unit,
                 stock,
                 min_stock,
-                image
+                COALESCE(NULLIF(image_url, ''), $10) AS image
             `,
             [
                 name,
@@ -326,6 +327,7 @@ export async function POST(request: NextRequest) {
                 stock,
                 minStock,
                 image,
+                DEFAULT_PRODUCT_IMAGE,
             ]
         )
 
@@ -337,6 +339,13 @@ export async function POST(request: NextRequest) {
             return NextResponse.json(
                 { message: 'Товар с таким штрихкодом уже существует' },
                 { status: 409 }
+            )
+        }
+
+        if (error instanceof Error && error.message.includes('Изображение')) {
+            return NextResponse.json(
+                { message: error.message },
+                { status: 400 }
             )
         }
 

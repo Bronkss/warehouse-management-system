@@ -1,5 +1,13 @@
 'use client'
-import { useState, useRef, useCallback, useEffect, type ChangeEvent, type FormEvent } from 'react'
+
+import {
+    useState,
+    useRef,
+    useCallback,
+    useEffect,
+    type ChangeEvent,
+    type FormEvent,
+} from 'react'
 import CustomSelect from '../components/CustomSelect'
 import {
     formatBarcodeInput,
@@ -17,13 +25,36 @@ interface ProductFormData {
     stock: string
     minStock: string
     image: string
+    imageFile?: File | null
 }
 
 interface AddProductFormProps {
-    onSave: (data: ProductFormData) => void
+    onSave: (data: ProductFormData) => void | Promise<void>
     onCancel: () => void
     initialData?: ProductFormData
 }
+
+interface ProductFormState {
+    name: string
+    category: string
+    barcodeList: string[]
+    purchasePrice: string
+    sellingPrice: string
+    unit: 'piece' | 'weight'
+    stock: string
+    minStock: string
+    image: string
+    imagePreview: string
+    imageFile: File | null
+}
+
+const MAX_IMAGE_SIZE_BYTES = 4 * 1024 * 1024
+
+const ALLOWED_IMAGE_TYPES = new Set([
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+])
 
 const CATEGORIES = [
     { value: '', label: 'Выберите категорию', disabled: true },
@@ -45,7 +76,7 @@ const CATEGORIES = [
     { value: 'Бытовая химия', label: 'Бытовая химия' },
     { value: 'Косметика и гигиена', label: 'Косметика и гигиена' },
     { value: 'Товары для дома', label: 'Товары для дома' },
-    { value: 'Другое', label: 'Другое' }
+    { value: 'Другое', label: 'Другое' },
 ]
 
 const normalizeNumberString = (value: string): string => {
@@ -79,7 +110,7 @@ const calculateMarkup = (price: string, cat: string): string => {
     return String(Math.ceil(cost * multiplier))
 }
 
-const getInitialState = (data?: ProductFormData) => {
+const getInitialState = (data?: ProductFormData): ProductFormState => {
     const barcodeList = parseBarcodeList(data?.barcode)
 
     return {
@@ -88,22 +119,35 @@ const getInitialState = (data?: ProductFormData) => {
         barcodeList: barcodeList.length > 0 ? barcodeList : [''],
         purchasePrice: data?.purchasePrice || '',
         sellingPrice: data?.sellingPrice || '',
-        unit: data?.unit || 'piece' as 'piece' | 'weight',
+        unit: data?.unit || 'piece',
         stock: data?.stock || '0',
         minStock: data?.minStock || '10',
         image: data?.image || '',
+        imagePreview: data?.image || '',
+        imageFile: null,
     }
 }
 
 export default function AddProductForm({ onSave, onCancel, initialData }: AddProductFormProps) {
-    const [formState, setFormState] = useState(() => getInitialState(initialData))
+    const [formState, setFormState] = useState<ProductFormState>(() => getInitialState(initialData))
     const [errors, setErrors] = useState<Record<string, string>>({})
     const [isSellingPriceManual, setIsSellingPriceManual] = useState(Boolean(initialData?.sellingPrice))
+    const [isSaving, setIsSaving] = useState(false)
+
     const fileInputRef = useRef<HTMLInputElement>(null)
+    const previewObjectUrlRef = useRef<string | null>(null)
     const [formKey, setFormKey] = useState(0)
 
     const currentInitialJson = JSON.stringify(initialData ?? null)
     const prevInitialJson = useRef(currentInitialJson)
+
+    useEffect(() => {
+        return () => {
+            if (previewObjectUrlRef.current) {
+                URL.revokeObjectURL(previewObjectUrlRef.current)
+            }
+        }
+    }, [])
 
     useEffect(() => {
         if (prevInitialJson.current === currentInitialJson) {
@@ -114,8 +158,14 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
 
         const parsedInitialData = JSON.parse(currentInitialJson) as ProductFormData | null
 
+        if (previewObjectUrlRef.current) {
+            URL.revokeObjectURL(previewObjectUrlRef.current)
+            previewObjectUrlRef.current = null
+        }
+
         setFormState(getInitialState(parsedInitialData ?? undefined))
         setIsSellingPriceManual(Boolean(parsedInitialData?.sellingPrice))
+        setErrors({})
         setFormKey(prev => prev + 1)
 
         if (fileInputRef.current) {
@@ -135,7 +185,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
         })
     }, [])
 
-    const updateField = useCallback((field: string, value: string) => {
+    const updateField = useCallback((field: keyof ProductFormState, value: string) => {
         setFormState(prev => ({ ...prev, [field]: value }))
         clearFieldError(field)
     }, [clearFieldError])
@@ -187,7 +237,10 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
     }
 
     const getMarkupLabel = (): string => {
-        if (formState.category.toLowerCase().includes('пиво')) return '35%'
+        if (formState.category.toLowerCase().includes('пиво')) {
+            return '35%'
+        }
+
         return '30%'
     }
 
@@ -227,46 +280,87 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
         clearFieldError('barcode')
     }
 
-    const handleImageChange = (e: ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0]
+    const handleImageChange = (event: ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0]
 
-        if (file) {
-            if (file.size > 5 * 1024 * 1024) {
-                setErrors(prev => ({ ...prev, image: 'Размер файла не должен превышать 5MB' }))
-                return
-            }
-
-            if (!file.type.startsWith('image/')) {
-                setErrors(prev => ({ ...prev, image: 'Выберите изображение' }))
-                return
-            }
-
-            const reader = new FileReader()
-
-            reader.onloadend = () => {
-                const base64 = reader.result as string
-                updateField('image', base64)
-            }
-
-            reader.readAsDataURL(file)
+        if (!file) {
+            return
         }
+
+        if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+            setErrors(prev => ({
+                ...prev,
+                image: 'Выберите изображение JPG, PNG или WEBP',
+            }))
+
+            if (fileInputRef.current) {
+                fileInputRef.current.value = ''
+            }
+
+            return
+        }
+
+        if (file.size > MAX_IMAGE_SIZE_BYTES) {
+            setErrors(prev => ({
+                ...prev,
+                image: 'Размер файла не должен превышать 4 МБ',
+            }))
+
+            if (fileInputRef.current) {
+                fileInputRef.current.value = ''
+            }
+
+            return
+        }
+
+        if (previewObjectUrlRef.current) {
+            URL.revokeObjectURL(previewObjectUrlRef.current)
+        }
+
+        const previewUrl = URL.createObjectURL(file)
+        previewObjectUrlRef.current = previewUrl
+
+        setFormState(prev => ({
+            ...prev,
+            imageFile: file,
+            imagePreview: previewUrl,
+        }))
+
+        clearFieldError('image')
     }
 
     const handleRemoveImage = () => {
-        updateField('image', '')
+        if (previewObjectUrlRef.current) {
+            URL.revokeObjectURL(previewObjectUrlRef.current)
+            previewObjectUrlRef.current = null
+        }
+
+        setFormState(prev => ({
+            ...prev,
+            image: '',
+            imagePreview: '',
+            imageFile: null,
+        }))
 
         if (fileInputRef.current) {
             fileInputRef.current.value = ''
         }
+
+        clearFieldError('image')
     }
 
-    const handleSubmit = (e: FormEvent) => {
-        e.preventDefault()
+    const handleSubmit = async (event: FormEvent) => {
+        event.preventDefault()
 
         const newErrors: Record<string, string> = {}
 
-        if (!formState.name.trim()) newErrors.name = 'Введите название товара'
-        if (!formState.category) newErrors.category = 'Выберите категорию товара'
+        if (!formState.name.trim()) {
+            newErrors.name = 'Введите название товара'
+        }
+
+        if (!formState.category) {
+            newErrors.category = 'Выберите категорию товара'
+        }
 
         const finalBarcodes = formState.barcodeList
             .map(code => formatBarcodeInput(code))
@@ -301,18 +395,27 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
             return
         }
 
-        onSave({
-            name: formState.name,
-            category: formState.category,
-            barcode: serializeBarcodeList(formState.barcodeList),
-            purchasePrice: formState.purchasePrice,
-            sellingPrice: finalSellingPrice,
-            unit: formState.unit,
-            stock: formState.stock,
-            minStock: formState.minStock,
-            image: formState.image
-        })
+        try {
+            setIsSaving(true)
+
+            await onSave({
+                name: formState.name,
+                category: formState.category,
+                barcode: serializeBarcodeList(formState.barcodeList),
+                purchasePrice: formState.purchasePrice,
+                sellingPrice: finalSellingPrice,
+                unit: formState.unit,
+                stock: formState.stock,
+                minStock: formState.minStock,
+                image: formState.image,
+                imageFile: formState.imageFile,
+            })
+        } finally {
+            setIsSaving(false)
+        }
     }
+
+    const currentImagePreview = formState.imagePreview || formState.image
 
     return (
         <form key={formKey} onSubmit={handleSubmit} className="space-y-6">
@@ -321,21 +424,26 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                     Изображение товара
                 </label>
 
-                {formState.image ? (
+                {currentImagePreview ? (
                     <div className="relative w-full h-48 rounded-lg overflow-hidden bg-gray-100 mb-3">
                         <img
-                            src={formState.image}
+                            src={currentImagePreview}
                             alt="Предпросмотр"
                             className="w-full h-full object-cover"
                         />
+
                         <button
                             type="button"
                             onClick={handleRemoveImage}
                             className="absolute top-2 right-2 p-1.5 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors"
                         >
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                      d="M6 18L18 6M6 6l12 12"/>
+                                <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M6 18L18 6M6 6l12 12"
+                                />
                             </svg>
                         </button>
                     </div>
@@ -344,25 +452,34 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                         onClick={() => fileInputRef.current?.click()}
                         className="w-full h-48 border-2 border-dashed border-gray-300 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors"
                     >
-                        <svg className="w-12 h-12 text-gray-400 mb-2" fill="none" stroke="currentColor"
-                             viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                  d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                        <svg
+                            className="w-12 h-12 text-gray-400 mb-2"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                        >
+                            <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={1.5}
+                                d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                            />
                         </svg>
+
                         <p className="text-sm text-gray-500">Нажмите для загрузки</p>
-                        <p className="text-xs text-gray-400 mt-1">PNG, JPG до 5MB</p>
+                        <p className="text-xs text-gray-400 mt-1">JPG, PNG, WEBP до 4 МБ</p>
                     </div>
                 )}
 
                 <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/jpeg,image/png,image/webp"
                     onChange={handleImageChange}
                     className="hidden"
                 />
 
-                {formState.image && (
+                {currentImagePreview && (
                     <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
@@ -379,15 +496,17 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                     Название товара *
                 </label>
+
                 <input
                     type="text"
                     value={formState.name}
-                    onChange={(e) => updateField('name', e.target.value)}
+                    onChange={event => updateField('name', event.target.value)}
                     placeholder="Введите название товара"
                     className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                         errors.name ? 'border-red-500' : 'border-gray-300'
                     }`}
                 />
+
                 {errors.name && <p className="mt-1 text-sm text-red-500">{errors.name}</p>}
             </div>
 
@@ -395,6 +514,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                     Категория товара *
                 </label>
+
                 <CustomSelect
                     value={formState.category}
                     onChange={updateCategory}
@@ -402,6 +522,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                     placeholder="Выберите категорию"
                     error={errors.category}
                 />
+
                 {errors.category && <p className="mt-1 text-sm text-red-500">{errors.category}</p>}
             </div>
 
@@ -409,8 +530,8 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                     Штрихкоды товара
                     <span className="text-xs text-gray-500 ml-1">
-            можно добавить несколько
-        </span>
+                        можно добавить несколько
+                    </span>
                 </label>
 
                 <div className="space-y-2">
@@ -420,7 +541,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                                 <input
                                     type="text"
                                     value={barcode}
-                                    onChange={(e) => updateBarcodeAt(index, e.target.value)}
+                                    onChange={event => updateBarcodeAt(index, event.target.value)}
                                     placeholder={
                                         index === 0
                                             ? 'Основной штрихкод, например: 4601234567890'
@@ -480,10 +601,11 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                         Цена в закупке (₽) *
                     </label>
+
                     <input
                         type="number"
                         value={formState.purchasePrice}
-                        onChange={(e) => updatePurchasePrice(e.target.value)}
+                        onChange={event => updatePurchasePrice(event.target.value)}
                         placeholder="0.00"
                         step="0.01"
                         min="0"
@@ -491,29 +613,37 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                             errors.purchasePrice ? 'border-red-500' : 'border-gray-300'
                         }`}
                     />
-                    {errors.purchasePrice && <p className="mt-1 text-sm text-red-500">{errors.purchasePrice}</p>}
+
+                    {errors.purchasePrice && (
+                        <p className="mt-1 text-sm text-red-500">{errors.purchasePrice}</p>
+                    )}
                 </div>
 
                 <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                         Цена в продаже (₽)
                     </label>
+
                     <input
                         type="text"
                         inputMode="decimal"
                         value={formState.sellingPrice}
-                        onChange={(e) => updateSellingPrice(e.target.value)}
+                        onChange={event => updateSellingPrice(event.target.value)}
                         onBlur={handleSellingPriceBlur}
                         placeholder="Введите цену продажи"
                         className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                             errors.sellingPrice ? 'border-red-500' : 'border-gray-300'
                         }`}
                     />
-                    {errors.sellingPrice && <p className="mt-1 text-sm text-red-500">{errors.sellingPrice}</p>}
+
+                    {errors.sellingPrice && (
+                        <p className="mt-1 text-sm text-red-500">{errors.sellingPrice}</p>
+                    )}
+
                     {formState.purchasePrice && (
                         <span className="text-xs text-lime-600 ml-1">
-                                Минимальная наценка {getMarkupLabel()}, округление вверх
-                            </span>
+                            Минимальная наценка {getMarkupLabel()}, округление вверх
+                        </span>
                     )}
                 </div>
             </div>
@@ -523,10 +653,11 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                         Текущий остаток ({formState.unit === 'weight' ? 'кг' : 'шт.'})
                     </label>
+
                     <input
                         type="number"
                         value={formState.stock}
-                        onChange={(e) => updateField('stock', e.target.value)}
+                        onChange={event => updateField('stock', event.target.value)}
                         placeholder="0"
                         step={formState.unit === 'weight' ? '0.1' : '1'}
                         min="0"
@@ -538,16 +669,20 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                         Мин. остаток * ({formState.unit === 'weight' ? 'кг' : 'шт.'})
                     </label>
+
                     <input
                         type="number"
                         value={formState.minStock}
-                        onChange={(e) => updateField('minStock', e.target.value)}
+                        onChange={event => updateField('minStock', event.target.value)}
                         placeholder="10"
                         step={formState.unit === 'weight' ? '0.1' : '1'}
                         min="1"
                         className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
-                    <p className="mt-1 text-xs text-gray-500">При достижении появится уведомление</p>
+
+                    <p className="mt-1 text-xs text-gray-500">
+                        При достижении появится уведомление
+                    </p>
                 </div>
             </div>
 
@@ -555,6 +690,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                     Единица измерения *
                 </label>
+
                 <div className="flex gap-4">
                     <label className="flex items-center gap-2 cursor-pointer">
                         <input
@@ -565,8 +701,10 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                             onChange={() => updateField('unit', 'piece')}
                             className="w-4 h-4 text-blue-600"
                         />
+
                         <span className="text-gray-700">Штучно</span>
                     </label>
+
                     <label className="flex items-center gap-2 cursor-pointer">
                         <input
                             type="radio"
@@ -576,6 +714,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                             onChange={() => updateField('unit', 'weight')}
                             className="w-4 h-4 text-blue-600"
                         />
+
                         <span className="text-gray-700">Весовой</span>
                     </label>
                 </div>
@@ -584,34 +723,55 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
             {formState.name && formState.category && (
                 <div className="bg-gray-50 p-4 rounded-lg">
                     <h4 className="font-medium text-gray-700 mb-2">Предпросмотр:</h4>
+
                     <div className="space-y-1 text-sm">
-                        {formState.image && (
+                        {currentImagePreview && (
                             <div className="mb-2 w-20 h-20 rounded overflow-hidden">
                                 <img
-                                    src={formState.image}
+                                    src={currentImagePreview}
                                     alt={formState.name}
                                     className="w-full h-full object-cover"
                                 />
                             </div>
                         )}
-                        <p><span className="text-gray-500">Название:</span> {formState.name}</p>
-                        <p><span className="text-gray-500">Категория:</span> {formState.category}</p>
+
+                        <p>
+                            <span className="text-gray-500">Название:</span> {formState.name}
+                        </p>
+
+                        <p>
+                            <span className="text-gray-500">Категория:</span> {formState.category}
+                        </p>
+
                         {formState.barcodeList.some(Boolean) && (
                             <p>
                                 <span className="text-gray-500">Штрихкоды:</span>{' '}
                                 {formState.barcodeList.filter(Boolean).join(', ')}
                             </p>
                         )}
-                        <p><span className="text-gray-500">Закупка:</span> {formState.purchasePrice} ₽</p>
-                        <p><span className="text-gray-500">Продажа:</span> {formState.sellingPrice || '—'} ₽</p>
-                        <p><span
-                            className="text-gray-500">Тип:</span> {formState.unit === 'piece' ? 'Штучный' : 'Весовой'}
+
+                        <p>
+                            <span className="text-gray-500">Закупка:</span> {formState.purchasePrice} ₽
                         </p>
-                        <p><span
-                            className="text-gray-500">Остаток:</span> {formState.stock} {formState.unit === 'weight' ? 'кг' : 'шт.'}
+
+                        <p>
+                            <span className="text-gray-500">Продажа:</span>{' '}
+                            {formState.sellingPrice || '—'} ₽
                         </p>
-                        <p><span
-                            className="text-gray-500">Мин. остаток:</span> {formState.minStock} {formState.unit === 'weight' ? 'кг' : 'шт.'}
+
+                        <p>
+                            <span className="text-gray-500">Тип:</span>{' '}
+                            {formState.unit === 'piece' ? 'Штучный' : 'Весовой'}
+                        </p>
+
+                        <p>
+                            <span className="text-gray-500">Остаток:</span>{' '}
+                            {formState.stock} {formState.unit === 'weight' ? 'кг' : 'шт.'}
+                        </p>
+
+                        <p>
+                            <span className="text-gray-500">Мин. остаток:</span>{' '}
+                            {formState.minStock} {formState.unit === 'weight' ? 'кг' : 'шт.'}
                         </p>
                     </div>
                 </div>
@@ -621,15 +781,22 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 <button
                     type="button"
                     onClick={onCancel}
-                    className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    disabled={isSaving}
+                    className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                     Отмена
                 </button>
+
                 <button
                     type="submit"
-                    className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    disabled={isSaving}
+                    className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                    {initialData ? 'Сохранить изменения' : 'Добавить товар'}
+                    {isSaving
+                        ? 'Сохраняем...'
+                        : initialData
+                            ? 'Сохранить изменения'
+                            : 'Добавить товар'}
                 </button>
             </div>
         </form>

@@ -22,6 +22,32 @@ const PAGE_LIMIT = 20
 const FULL_SYNC_PAGE_LIMIT = 100
 const DEFAULT_PRODUCT_IMAGE = '/icons/products.jpg'
 
+async function uploadProductImage(file: File): Promise<string> {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const response = await fetch('/api/products/images', {
+        method: 'POST',
+        body: formData,
+    })
+
+    const data = await response.json()
+
+    if (!response.ok) {
+        throw new Error(data.message || 'Не удалось загрузить изображение')
+    }
+
+    return data.url as string
+}
+
+async function resolveProductImage(formData: ProductFormData): Promise<string> {
+    if (formData.imageFile) {
+        return uploadProductImage(formData.imageFile)
+    }
+
+    return formData.image || DEFAULT_PRODUCT_IMAGE
+}
+
 
 interface ProductFormData {
     name: string
@@ -33,6 +59,7 @@ interface ProductFormData {
     stock: string
     minStock: string
     image: string
+    imageFile?: File | null
 }
 
 interface ProductsApiResponse {
@@ -397,6 +424,8 @@ export default function Products() {
 
     const handleAddProduct = async (formData: ProductFormData) => {
         try {
+            const image = await resolveProductImage(formData)
+
             const response = await fetch('/api/products', {
                 method: 'POST',
                 headers: {
@@ -411,7 +440,7 @@ export default function Products() {
                     unit: formData.unit,
                     stock: formData.stock,
                     minStock: formData.minStock,
-                    image: formData.image || DEFAULT_PRODUCT_IMAGE,
+                    image,
                 }),
             })
 
@@ -481,6 +510,8 @@ export default function Products() {
         }
 
         try {
+            const image = await resolveProductImage(formData)
+
             const response = await fetch(`/api/products/${editingProduct.id}`, {
                 method: 'PUT',
                 headers: {
@@ -495,7 +526,7 @@ export default function Products() {
                     unit: formData.unit,
                     stock: formData.stock,
                     minStock: formData.minStock,
-                    image: formData.image || DEFAULT_PRODUCT_IMAGE,
+                    image,
                 }),
             })
 
