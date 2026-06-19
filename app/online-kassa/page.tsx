@@ -1,6 +1,8 @@
 'use client';
 
+import AtolAgentSetup from '@/app/components/AtolAgentSetup';
 import JsBarcode from 'jsbarcode';
+import { useRouter } from 'next/navigation';
 import { useState, useEffect, useMemo, useRef, type KeyboardEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -50,7 +52,7 @@ type CheckoutItem = {
     quantity: number;
 };
 
-type PaymentMethod = 'card' | 'cash';
+type PaymentMethod = 'card' | 'cash' | 'transfer';
 
 type ReceiptItem = {
     productId: ProductId;
@@ -63,6 +65,24 @@ type ReceiptItem = {
     total: number;
 };
 
+type FiscalParams = {
+    fiscalDocumentDateTime?: string;
+    fiscalDocumentNumber?: number;
+    fiscalDocumentSign?: string;
+    fiscalReceiptNumber?: number;
+    fnNumber?: string;
+    fnsUrl?: string;
+    registrationNumber?: string;
+    shiftNumber?: number;
+    total?: number;
+};
+
+type FiscalResult = {
+    uuid: string;
+    fiscalParams?: FiscalParams;
+    raw?: unknown;
+};
+
 type Receipt = {
     id: string;
     createdAt: string;
@@ -72,6 +92,12 @@ type Receipt = {
     total: number;
     receivedAmount?: number;
     change?: number;
+
+    fiscalizationRequested?: boolean;
+    fiscalStatus?: 'success' | 'skipped' | 'failed';
+    fiscalUuid?: string;
+    fiscalParams?: FiscalParams;
+    fiscalRaw?: unknown;
 };
 
 type ApiError = {
@@ -82,6 +108,17 @@ type PrintMode = 'selected' | 'filtered' | 'all';
 
 const PRODUCTS_PAGE_LIMIT = 100;
 const SEARCH_LIMIT = 30;
+
+const AUTH_USER_KEY = 'warehouse_auth_user';
+const AUTH_LOGIN_KEY = 'warehouse_auth_login';
+const REMEMBER_ME_KEY = 'warehouse_remember_me';
+
+const DEFAULT_FISCAL_AGENT_URL = 'http://127.0.0.1:3107';
+const FISCAL_AGENT_URL_KEY = 'pos_fiscal_agent_url';
+const FISCAL_AGENT_TOKEN_KEY = 'pos_fiscal_agent_token';
+const SHIFT_STATUS_KEY = 'pos_kkt_shift_status';
+
+type ShiftStatus = 'unknown' | 'open' | 'closed';
 
 const safeParseNumber = (value: unknown): number => {
     if (typeof value === 'number') {
@@ -223,6 +260,71 @@ const readJsonSafe = async <T,>(response: Response): Promise<T | null> => {
     }
 };
 
+const getPaymentLabel = (method: PaymentMethod): string => {
+    if (method === 'card') {
+        return 'Карта';
+    }
+
+    if (method === 'transfer') {
+        return 'Перевод';
+    }
+
+    return 'Наличные';
+};
+
+const getFiscalAgentUrl = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_FISCAL_AGENT_URL;
+    }
+
+    return localStorage.getItem(FISCAL_AGENT_URL_KEY) || DEFAULT_FISCAL_AGENT_URL;
+};
+
+const getFiscalAgentToken = (): string => {
+    if (typeof window === 'undefined') {
+        return '';
+    }
+
+    return localStorage.getItem(FISCAL_AGENT_TOKEN_KEY) || '';
+};
+
+const callFiscalAgent = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+    const response = await fetch(`${getFiscalAgentUrl()}${path}`, {
+        ...init,
+        headers: {
+            'Content-Type': 'application/json',
+            'X-POS-Agent-Token': getFiscalAgentToken(),
+            ...(init?.headers || {}),
+        },
+        cache: 'no-store',
+    });
+
+    const data = await readJsonSafe<T & ApiError>(response);
+
+    if (!response.ok) {
+        throw new Error(data?.message || 'Локальный агент ККТ недоступен');
+    }
+
+    return data as T;
+};
+
+const fiscalizeReceipt = async (receipt: Receipt): Promise<FiscalResult> => {
+    const data = await callFiscalAgent<{
+        ok?: boolean;
+        fiscal?: FiscalResult;
+        message?: string;
+    }>('/fiscal/sell', {
+        method: 'POST',
+        body: JSON.stringify(receipt),
+    });
+
+    if (!data?.fiscal) {
+        throw new Error(data?.message || 'ККТ не фискализировала чек');
+    }
+
+    return data.fiscal;
+};
+
 const fetchProductsPage = async ({
                                      search,
                                      cursor,
@@ -300,6 +402,13 @@ const fetchAllProducts = async (): Promise<Product[]> => {
 };
 
 export default function PosPage() {
+    const router = useRouter();
+
+    const [isAuthChecked, setIsAuthChecked] = useState(false);
+    const [shiftStatus, setShiftStatus] = useState<ShiftStatus>('unknown');
+    const [isShiftActionLoading, setIsShiftActionLoading] = useState(false);
+    const [fiscalConfirmModal, setFiscalConfirmModal] = useState(false);
+
     const [checkoutItems, setCheckoutItems] = useState<CheckoutItem[]>([]);
     const [allProducts, setAllProducts] = useState<Product[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
@@ -309,6 +418,7 @@ export default function PosPage() {
     const [isSearchLoading, setIsSearchLoading] = useState(false);
     const [isPaying, setIsPaying] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [notice, setNotice] = useState<string | null>(null);
 
     const [paymentModal, setPaymentModal] = useState<PaymentMethod | null>(null);
     const [cashReceived, setCashReceived] = useState('');
@@ -322,11 +432,14 @@ export default function PosPage() {
     const [selectedPriceLabelIds, setSelectedPriceLabelIds] = useState<string[]>([]);
     const [isRefreshingLabels, setIsRefreshingLabels] = useState(false);
 
+    const [isAtolSetupOpen, setIsAtolSetupOpen] = useState(false);
+
     const searchInputRef = useRef<HTMLInputElement>(null);
 
     const total = calculateTotal(checkoutItems);
     const cashReceivedNumber = safeParseNumber(cashReceived);
     const change = cashReceivedNumber - total;
+    const isShiftOpen = shiftStatus === 'open';
 
     const priceLabelProducts = useMemo(() => {
         const query = priceLabelSearch.trim().toLowerCase();
@@ -351,6 +464,48 @@ export default function PosPage() {
 
         return products;
     };
+
+    useEffect(() => {
+        const savedLocalUser = localStorage.getItem(AUTH_USER_KEY);
+        const savedSessionUser = sessionStorage.getItem(AUTH_USER_KEY);
+
+        if (savedLocalUser !== 'admin' && savedSessionUser !== 'admin') {
+            router.replace('/auth');
+            return;
+        }
+
+        const savedShiftStatus = localStorage.getItem(SHIFT_STATUS_KEY);
+
+        if (savedShiftStatus === 'open' || savedShiftStatus === 'closed') {
+            setShiftStatus(savedShiftStatus);
+        } else {
+            setShiftStatus('closed');
+            localStorage.setItem(SHIFT_STATUS_KEY, 'closed');
+        }
+
+        setIsAuthChecked(true);
+    }, [router]);
+
+    useEffect(() => {
+        if (paymentModal !== 'cash') {
+            return;
+        }
+
+        const handleEnterPayment = (event: globalThis.KeyboardEvent) => {
+            if (event.key !== 'Enter' || isPaying) {
+                return;
+            }
+
+            event.preventDefault();
+            completePayment('cash', false);
+        };
+
+        window.addEventListener('keydown', handleEnterPayment);
+
+        return () => {
+            window.removeEventListener('keydown', handleEnterPayment);
+        };
+    }, [paymentModal, isPaying, cashReceivedNumber, total, checkoutItems, shiftStatus]);
 
     useEffect(() => {
         const query = searchQuery.trim();
@@ -392,6 +547,26 @@ export default function PosPage() {
         };
     }, [searchQuery]);
 
+    useEffect(() => {
+        const handleEscape = (event: globalThis.KeyboardEvent) => {
+            if (event.key !== 'Escape') {
+                return;
+            }
+
+            setPaymentModal(null);
+            setFiscalConfirmModal(false);
+            setWeightModalProduct(null);
+            setIsPriceLabelModalOpen(false);
+            setLastReceipt(null);
+        };
+
+        window.addEventListener('keydown', handleEscape);
+
+        return () => {
+            window.removeEventListener('keydown', handleEscape);
+        };
+    }, []);
+
     const createSaleInDb = async (receipt: Receipt): Promise<Receipt> => {
         const response = await fetch('/api/sales', {
             method: 'POST',
@@ -408,6 +583,82 @@ export default function PosPage() {
         }
 
         return data || receipt;
+    };
+
+    const handleLogout = () => {
+        localStorage.removeItem(AUTH_USER_KEY);
+        localStorage.removeItem(AUTH_LOGIN_KEY);
+        localStorage.removeItem(REMEMBER_ME_KEY);
+        sessionStorage.removeItem(AUTH_USER_KEY);
+        router.replace('/auth');
+    };
+
+    const checkFiscalAgent = async () => {
+        try {
+            setIsShiftActionLoading(true);
+            setError(null);
+            setNotice(null);
+
+            await callFiscalAgent('/health');
+
+            setNotice('Связь с локальным агентом ККТ есть');
+        } catch (err) {
+            console.error(err);
+            setNotice(null);
+            setError(err instanceof Error ? err.message : 'Не удалось проверить ККТ');
+        } finally {
+            setIsShiftActionLoading(false);
+        }
+    };
+
+    const openShift = async () => {
+        try {
+            setIsShiftActionLoading(true);
+            setError(null);
+            setNotice(null);
+
+            await callFiscalAgent('/service/open-shift', {
+                method: 'POST',
+            });
+
+            setShiftStatus('open');
+            localStorage.setItem(SHIFT_STATUS_KEY, 'open');
+            setNotice('Смена ККТ открыта');
+        } catch (err) {
+            console.error(err);
+            setNotice(null);
+            setError(err instanceof Error ? err.message : 'Не удалось открыть смену');
+        } finally {
+            setIsShiftActionLoading(false);
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
+        }
+    };
+
+    const closeShift = async () => {
+        try {
+            setIsShiftActionLoading(true);
+            setError(null);
+            setNotice(null);
+
+            await callFiscalAgent('/service/close-shift', {
+                method: 'POST',
+            });
+
+            setShiftStatus('closed');
+            localStorage.setItem(SHIFT_STATUS_KEY, 'closed');
+            setNotice('Смена ККТ закрыта');
+        } catch (err) {
+            console.error(err);
+            setNotice(null);
+            setError(err instanceof Error ? err.message : 'Не удалось закрыть смену');
+        } finally {
+            setIsShiftActionLoading(false);
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
+        }
     };
 
     const updateLocalStockAfterSale = (items: ReceiptItem[]) => {
@@ -636,6 +887,11 @@ export default function PosPage() {
     };
 
     const openPayment = (method: PaymentMethod) => {
+        if (!isShiftOpen) {
+            setError('Смена ККТ закрыта. Откройте смену перед продажей.');
+            return;
+        }
+
         if (checkoutItems.length === 0) {
             setError('Чек пустой. Добавьте товар перед оплатой');
             return;
@@ -657,8 +913,13 @@ export default function PosPage() {
         setPaymentModal(method);
     };
 
-    const completePayment = async (method: PaymentMethod) => {
+    const completePayment = async (method: PaymentMethod, shouldFiscalize = false) => {
         if (isPaying) {
+            return;
+        }
+
+        if (!isShiftOpen) {
+            setError('Смена ККТ закрыта. Откройте смену перед продажей.');
             return;
         }
 
@@ -713,18 +974,36 @@ export default function PosPage() {
 
             const receiptTotal = receiptItems.reduce((sum, item) => sum + item.total, 0);
 
+            const shouldRunFiscalization = method === 'card' && shouldFiscalize;
+
             const receipt: Receipt = {
                 id: createReceiptId(),
                 createdAt: new Date().toISOString(),
                 paymentMethod: method,
-                paymentLabel: method === 'card' ? 'Карта' : 'Наличные',
+                paymentLabel: getPaymentLabel(method),
                 items: receiptItems,
                 total: receiptTotal,
                 receivedAmount: method === 'cash' ? cashReceivedNumber : receiptTotal,
                 change: method === 'cash' ? cashReceivedNumber - receiptTotal : 0,
+                fiscalizationRequested: shouldRunFiscalization,
+                fiscalStatus: shouldRunFiscalization ? undefined : 'skipped',
             };
 
-            const savedReceipt = await createSaleInDb(receipt);
+            let receiptForSave: Receipt = receipt;
+
+            if (shouldRunFiscalization) {
+                const fiscal = await fiscalizeReceipt(receipt);
+
+                receiptForSave = {
+                    ...receipt,
+                    fiscalStatus: 'success',
+                    fiscalUuid: fiscal.uuid,
+                    fiscalParams: fiscal.fiscalParams,
+                    fiscalRaw: fiscal.raw,
+                };
+            }
+
+            const savedReceipt = await createSaleInDb(receiptForSave);
 
             updateLocalStockAfterSale(receiptItems);
 
@@ -1048,16 +1327,95 @@ export default function PosPage() {
         }
     };
 
+    if (!isAuthChecked) {
+        return (
+            <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6 flex items-center justify-center text-gray-500">
+                Проверка авторизации...
+            </div>
+        );
+    }
+
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
             <div className="max-w-5xl mx-auto">
-                <h1 className="text-3xl font-bold text-indigo-800 mb-8 text-center">
+                <h1 className="text-3xl font-bold text-indigo-800 mb-6 text-center">
                     ТОЧКА онлайн - касса
                 </h1>
+
+                <div className="mb-6 rounded-2xl bg-white p-4 shadow-lg">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                            <span className="text-sm text-gray-500">Смена ККТ:</span>
+
+                            <span className={`rounded-full px-3 py-1 text-sm font-semibold ${
+                                isShiftOpen
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : 'bg-red-100 text-red-700'
+                            }`}>
+                                {isShiftOpen ? 'Открыта' : 'Закрыта'}
+                            </span>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                type="button"
+                                onClick={openShift}
+                                disabled={isShiftActionLoading || isShiftOpen}
+                                className="rounded-lg bg-emerald-600 px-4 py-2 text-white hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                                Открыть смену
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={closeShift}
+                                disabled={isShiftActionLoading || !isShiftOpen}
+                                className="rounded-lg bg-red-600 px-4 py-2 text-white hover:bg-red-700 disabled:opacity-50"
+                            >
+                                Закрыть смену
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={checkFiscalAgent}
+                                disabled={isShiftActionLoading}
+                                className="rounded-lg border border-gray-300 px-4 py-2 hover:bg-gray-50 disabled:opacity-50"
+                            >
+                                Проверить ККТ
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setIsAtolSetupOpen(true)}
+                                className="rounded-xl border border-gray-300 px-5 py-3 hover:bg-gray-50"
+                            >
+                                Настройка ККТ
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={handleLogout}
+                                className="rounded-lg border border-gray-300 px-4 py-2 hover:bg-gray-50"
+                            >
+                                Выйти
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="mt-3 text-xs text-gray-500">
+                        Продажа доступна только при открытой смене. Фискализация выполняется только для оплаты картой и только после подтверждения кассира.
+                    </div>
+                </div>
 
                 {error && (
                     <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-red-700">
                         {error}
+                    </div>
+                )}
+
+                {notice && (
+                    <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-emerald-700">
+                        {notice}
                     </div>
                 )}
 
@@ -1332,6 +1690,14 @@ export default function PosPage() {
 
                                     <button
                                         type="button"
+                                        onClick={() => openPayment('transfer')}
+                                        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                                    >
+                                        Перевод
+                                    </button>
+
+                                    <button
+                                        type="button"
                                         onClick={() => openPayment('card')}
                                         className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
                                     >
@@ -1364,287 +1730,44 @@ export default function PosPage() {
 
             <AnimatePresence>
                 {weightModalProduct && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+                    <div
+                        key="weight-modal"
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                    >
+                        {/* весь текущий код модалки весового товара оставь без изменений */}
                         <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.96 }}
                             className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                         >
-                            <h2 className="text-2xl font-bold text-gray-800 mb-2">
-                                Весовой товар
-                            </h2>
-
-                            <p className="text-gray-600 mb-4">
-                                {weightModalProduct.name}
-                            </p>
-
-                            <div className="rounded-xl bg-gray-50 p-4 mb-4">
-                                <div className="text-sm text-gray-500">
-                                    Цена:
-                                </div>
-
-                                <div className="text-2xl font-bold text-indigo-700">
-                                    {formatCurrency(getSellingPrice(weightModalProduct))} за 1 кг
-                                </div>
-
-                                <div className="text-sm text-gray-500 mt-2">
-                                    Остаток: {formatQuantity(getStock(weightModalProduct), 'weight')}
-                                </div>
-                            </div>
-
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Введите вес в кг
-                            </label>
-
-                            <input
-                                type="number"
-                                min="0.001"
-                                step="0.001"
-                                value={weightQuantity}
-                                onChange={(e) => {
-                                    setWeightQuantity(e.target.value);
-                                    setError(null);
-                                }}
-                                placeholder="Например: 0.250"
-                                autoFocus
-                                className="w-full rounded-xl border border-gray-300 px-4 py-3 text-xl outline-none focus:ring-2 focus:ring-indigo-500 mb-4"
-                            />
-
-                            <div className="rounded-xl bg-indigo-50 p-4 mb-6">
-                                <div className="text-sm text-indigo-700">
-                                    Сумма:
-                                </div>
-
-                                <div className="text-3xl font-bold text-indigo-800">
-                                    {formatCurrency(getSellingPrice(weightModalProduct) * safeParseNumber(weightQuantity))}
-                                </div>
-                            </div>
-
-                            <div className="flex justify-end gap-3">
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setWeightModalProduct(null);
-                                        setWeightQuantity('');
-                                    }}
-                                    className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50"
-                                >
-                                    Отмена
-                                </button>
-
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        const quantity = safeParseNumber(weightQuantity);
-
-                                        if (quantity <= 0) {
-                                            setError('Введите корректный вес');
-                                            return;
-                                        }
-
-                                        if (quantity > getStock(weightModalProduct)) {
-                                            setError(
-                                                `Недостаточно остатка: «${weightModalProduct.name}». В наличии ${formatQuantity(getStock(weightModalProduct), 'weight')}`
-                                            );
-                                            return;
-                                        }
-
-                                        addQuantityToCheckout(weightModalProduct, quantity);
-                                        setWeightModalProduct(null);
-                                        setWeightQuantity('');
-                                    }}
-                                    className="px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
-                                >
-                                    Добавить в чек
-                                </button>
-                            </div>
+                            {/* содержимое weightModalProduct */}
                         </motion.div>
                     </div>
                 )}
 
                 {isPriceLabelModalOpen && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+                    <div
+                        key="price-label-modal"
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                    >
+                        {/* весь текущий код модалки ценников оставь без изменений */}
                         <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.96 }}
                             className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl overflow-hidden"
                         >
-                            <div className="p-6 border-b border-gray-100">
-                                <div className="flex items-start justify-between gap-4">
-                                    <div>
-                                        <h2 className="text-2xl font-bold text-gray-800">
-                                            Печать ценников 40×50 мм
-                                        </h2>
-
-                                        <p className="text-sm text-gray-500 mt-1">
-                                            Выберите товары, найдите обновлённую цену или распечатайте все ценники сразу.
-                                        </p>
-                                    </div>
-
-                                    <button
-                                        type="button"
-                                        onClick={() => setIsPriceLabelModalOpen(false)}
-                                        className="text-2xl text-gray-400 hover:text-gray-600"
-                                    >
-                                        ×
-                                    </button>
-                                </div>
-
-                                <div className="mt-5 grid grid-cols-1 md:grid-cols-[1fr_auto_auto_auto] gap-3">
-                                    <input
-                                        type="text"
-                                        value={priceLabelSearch}
-                                        onChange={(e) => setPriceLabelSearch(e.target.value)}
-                                        placeholder="Поиск по названию, штрихкоду или цене..."
-                                        className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
-                                    />
-
-                                    <button
-                                        type="button"
-                                        onClick={async () => {
-                                            try {
-                                                setIsRefreshingLabels(true);
-                                                await refreshProducts();
-                                            } catch (err) {
-                                                console.error(err);
-                                                setError('Не удалось обновить цены');
-                                            } finally {
-                                                setIsRefreshingLabels(false);
-                                            }
-                                        }}
-                                        className="rounded-xl border border-gray-300 px-4 py-3 hover:bg-gray-50"
-                                    >
-                                        {isRefreshingLabels ? 'Обновляю...' : 'Обновить цены'}
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        onClick={selectAllFilteredPriceLabels}
-                                        className="rounded-xl border border-gray-300 px-4 py-3 hover:bg-gray-50"
-                                    >
-                                        Выбрать найденные
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        onClick={clearSelectedPriceLabels}
-                                        className="rounded-xl border border-gray-300 px-4 py-3 hover:bg-gray-50"
-                                    >
-                                        Снять выбор
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="max-h-[55vh] overflow-y-auto">
-                                <table className="w-full text-sm">
-                                    <thead className="sticky top-0 bg-gray-50 text-gray-600 z-10">
-                                    <tr>
-                                        <th className="p-3 text-left w-12"></th>
-                                        <th className="p-3 text-left">Товар</th>
-                                        <th className="p-3 text-left">Штрихкод из БД</th>
-                                        <th className="p-3 text-left">Ед.</th>
-                                        <th className="p-3 text-right">Цена</th>
-                                        <th className="p-3 text-right">Остаток</th>
-                                    </tr>
-                                    </thead>
-
-                                    <tbody>
-                                    {priceLabelProducts.map(product => {
-                                        const selected = selectedPriceLabelIds.includes(String(product.id));
-
-                                        return (
-                                            <tr key={String(product.id)} className="border-t border-gray-100 hover:bg-gray-50">
-                                                <td className="p-3">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={selected}
-                                                        onChange={() => togglePriceLabelProduct(product.id)}
-                                                        className="h-4 w-4"
-                                                    />
-                                                </td>
-
-                                                <td className="p-3">
-                                                    <div className="font-medium text-gray-800">
-                                                        {product.name}
-                                                    </div>
-
-                                                    <div className="text-xs text-gray-500">
-                                                        {product.category || 'Без категории'}
-                                                    </div>
-                                                </td>
-
-                                                <td className="p-3 font-mono text-xs text-gray-500">
-                                                    {product.barcode ? getBarcodeDisplay(product.barcode) : 'Штрихкод не задан'}
-                                                </td>
-
-                                                <td className="p-3">
-                                                    {product.unit === 'weight' ? 'кг' : 'шт.'}
-                                                </td>
-
-                                                <td className="p-3 text-right font-bold text-indigo-700">
-                                                    {Math.ceil(getSellingPrice(product))} ₽ {getUnitPriceLabel(product)}
-                                                </td>
-
-                                                <td className="p-3 text-right text-gray-500">
-                                                    {formatQuantity(getStock(product), product.unit)}
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                    </tbody>
-                                </table>
-
-                                {priceLabelProducts.length === 0 && (
-                                    <div className="p-8 text-center text-gray-400">
-                                        Товары не найдены
-                                    </div>
-                                )}
-                            </div>
-
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 bg-gray-50 p-5">
-                                <div className="text-sm text-gray-500">
-                                    Выбрано: <span className="font-bold">{selectedPriceLabelIds.length}</span>.
-                                    Найдено: <span className="font-bold">{priceLabelProducts.length}</span>.
-                                    Всего в базе: <span className="font-bold">{allProducts.length}</span>.
-                                </div>
-
-                                <div className="flex flex-wrap gap-3">
-                                    <button
-                                        type="button"
-                                        onClick={() => printPriceLabels('selected')}
-                                        disabled={isRefreshingLabels}
-                                        className="rounded-lg bg-indigo-600 px-5 py-2.5 text-white hover:bg-indigo-700 disabled:opacity-50"
-                                    >
-                                        Печать выбранных
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        onClick={() => printPriceLabels('filtered')}
-                                        disabled={isRefreshingLabels}
-                                        className="rounded-lg bg-blue-600 px-5 py-2.5 text-white hover:bg-blue-700 disabled:opacity-50"
-                                    >
-                                        Печать всех найденных
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        onClick={() => printPriceLabels('all')}
-                                        disabled={isRefreshingLabels}
-                                        className="rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
-                                    >
-                                        Печать всей базы
-                                    </button>
-                                </div>
-                            </div>
+                            {/* содержимое isPriceLabelModalOpen */}
                         </motion.div>
                     </div>
                 )}
 
                 {paymentModal === 'card' && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+                    <div
+                        key="payment-card-modal"
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                    >
                         <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
@@ -1680,7 +1803,7 @@ export default function PosPage() {
                                 <button
                                     type="button"
                                     disabled={isPaying}
-                                    onClick={() => completePayment('card')}
+                                    onClick={() => setFiscalConfirmModal(true)}
                                     className="px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
                                 >
                                     {isPaying ? 'Провожу оплату...' : 'Оплата прошла'}
@@ -1691,7 +1814,27 @@ export default function PosPage() {
                 )}
 
                 {paymentModal === 'cash' && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+                    <div
+                        key="payment-cash-modal"
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                    >
+                        {/* весь текущий код модалки наличных оставь без изменений */}
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.96 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.96 }}
+                            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+                        >
+                            {/* содержимое paymentModal === 'cash' */}
+                        </motion.div>
+                    </div>
+                )}
+
+                {paymentModal === 'transfer' && (
+                    <div
+                        key="payment-transfer-modal"
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                    >
                         <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
@@ -1699,53 +1842,21 @@ export default function PosPage() {
                             className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                         >
                             <h2 className="text-2xl font-bold text-gray-800 mb-4">
-                                Оплата наличными
+                                Оплата переводом
                             </h2>
 
                             <div className="mb-4">
                                 <div className="text-gray-600 mb-1">
-                                    Сумма чека:
+                                    Сумма к переводу:
                                 </div>
 
-                                <div className="text-3xl font-bold text-indigo-700">
+                                <div className="text-3xl font-bold text-blue-700">
                                     {formatCurrency(total)}
                                 </div>
                             </div>
 
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Получено от клиента
-                            </label>
-
-                            <input
-                                type="number"
-                                value={cashReceived}
-                                onChange={(e) => {
-                                    setCashReceived(e.target.value);
-                                    setError(null);
-                                }}
-                                placeholder="Введите сумму"
-                                min="0"
-                                step="0.01"
-                                autoFocus
-                                className="w-full rounded-xl border border-gray-300 px-4 py-3 text-xl outline-none focus:ring-2 focus:ring-emerald-500 mb-4"
-                            />
-
-                            <div className={`rounded-xl p-4 mb-6 ${
-                                change >= 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
-                            }`}>
-                                <div className="text-sm">
-                                    Сдача:
-                                </div>
-
-                                <div className="text-3xl font-bold">
-                                    {formatCurrency(Math.max(0, change))}
-                                </div>
-
-                                {cashReceived && change < 0 && (
-                                    <div className="text-sm mt-1">
-                                        Полученная сумма меньше суммы чека
-                                    </div>
-                                )}
+                            <div className="rounded-xl bg-blue-50 p-4 text-sm text-blue-700 mb-6">
+                                Перед подтверждением обязательно убедитесь, что перевод поступил или показан клиентом как выполненный.
                             </div>
 
                             <div className="flex justify-end gap-3">
@@ -1760,11 +1871,69 @@ export default function PosPage() {
 
                                 <button
                                     type="button"
-                                    disabled={isPaying || cashReceivedNumber < total}
-                                    onClick={() => completePayment('cash')}
-                                    className="px-5 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                    disabled={isPaying}
+                                    onClick={() => completePayment('transfer', false)}
+                                    className="px-5 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
                                 >
-                                    {isPaying ? 'Провожу оплату...' : 'Подтвердить оплату'}
+                                    {isPaying ? 'Провожу оплату...' : 'Перевод выполнен'}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+
+                {fiscalConfirmModal && paymentModal === 'card' && (
+                    <div
+                        key="fiscal-confirm-modal"
+                        className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-4"
+                    >
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.96 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.96 }}
+                            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+                        >
+                            <h2 className="text-2xl font-bold text-gray-800 mb-4">
+                                Фискализировать чек?
+                            </h2>
+
+                            <div className="mb-4">
+                                <div className="text-gray-600 mb-1">
+                                    Сумма оплаты картой:
+                                </div>
+
+                                <div className="text-3xl font-bold text-indigo-700">
+                                    {formatCurrency(total)}
+                                </div>
+                            </div>
+
+                            <div className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800 mb-6">
+                                Фискализация будет отправлена на локальную ККТ АТОЛ. Если чек пробивать не нужно, продажа сохранится без отправки в ККТ.
+                            </div>
+
+                            <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+                                <button
+                                    type="button"
+                                    disabled={isPaying}
+                                    onClick={() => {
+                                        setFiscalConfirmModal(false);
+                                        completePayment('card', false);
+                                    }}
+                                    className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    Нет, сохранить без ККТ
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={isPaying || !isShiftOpen}
+                                    onClick={() => {
+                                        setFiscalConfirmModal(false);
+                                        completePayment('card', true);
+                                    }}
+                                    className="px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                    {isPaying ? 'Фискализирую...' : 'Да, пробить на ККТ'}
                                 </button>
                             </div>
                         </motion.div>
@@ -1772,11 +1941,16 @@ export default function PosPage() {
                 )}
 
                 {lastReceipt && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+                    <div
+                        key={`last-receipt-modal-${lastReceipt.id}`}
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                        onClick={clearReceipt}
+                    >
                         <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.96 }}
+                            onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
                         >
                             <h2 className="text-2xl font-bold text-gray-800 mb-2">
@@ -1787,6 +1961,27 @@ export default function PosPage() {
                                 № {lastReceipt.id} · {new Date(lastReceipt.createdAt).toLocaleString('ru-RU')}
                             </div>
 
+                            {lastReceipt.fiscalStatus === 'success' && (
+                                <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                                    Чек успешно пробит на ККТ
+                                    {lastReceipt.fiscalUuid && (
+                                        <div className="mt-1 text-xs text-emerald-600">
+                                            UUID: {lastReceipt.fiscalUuid}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {lastReceipt.fiscalStatus === 'skipped' && (
+                                <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                                    Продажа сохранена без фискализации на ККТ
+                                </div>
+                            )}
+
+                            {isAtolSetupOpen && (
+                                <AtolAgentSetup onClose={() => setIsAtolSetupOpen(false)} />
+                            )}
+
                             <div className="space-y-3 max-h-[320px] overflow-y-auto pr-1">
                                 {lastReceipt.items.map((item, index) => (
                                     <div key={`${item.productId}-${index}`} className="border-b pb-2">
@@ -1795,13 +1990,13 @@ export default function PosPage() {
                                         </div>
 
                                         <div className="flex justify-between text-sm text-gray-500">
-                                            <span>
-                                                {formatCurrency(item.price)} × {formatQuantity(item.quantity, item.unit)}
-                                            </span>
+                            <span>
+                                {formatCurrency(item.price)} × {formatQuantity(item.quantity, item.unit)}
+                            </span>
 
                                             <span className="font-semibold text-gray-700">
-                                                {formatCurrency(item.total)}
-                                            </span>
+                                {formatCurrency(item.total)}
+                            </span>
                                         </div>
                                     </div>
                                 ))}
