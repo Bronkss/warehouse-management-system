@@ -1978,10 +1978,6 @@ export default function PosPage() {
                                 </div>
                             )}
 
-                            {isAtolSetupOpen && (
-                                <AtolAgentSetup onClose={() => setIsAtolSetupOpen(false)} />
-                            )}
-
                             <div className="space-y-3 max-h-[320px] overflow-y-auto pr-1">
                                 {lastReceipt.items.map((item, index) => (
                                     <div key={`${item.productId}-${index}`} className="border-b pb-2">
@@ -2041,6 +2037,10 @@ export default function PosPage() {
                     </div>
                 )}
             </AnimatePresence>
+
+            {isAtolSetupOpen && (
+                <AtolAgentSetup onClose={() => setIsAtolSetupOpen(false)} />
+            )}
         </div>
     );
 }
