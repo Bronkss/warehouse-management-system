@@ -74,7 +74,7 @@ interface ProductsApiError {
     message?: string
 }
 
-export const ALL_CATEGORIES = [
+const ALL_CATEGORIES = [
     'Бакалея',
     'Алкоголь',
     'Пиво',
@@ -111,7 +111,6 @@ export const ALL_CATEGORIES = [
 
     'Детское питание',
     'Товары для детей',
-
     'Зоотовары',
 
     'Бытовая химия',
@@ -139,7 +138,7 @@ export const ALL_CATEGORIES = [
     'Цветы',
 
     'Другое',
-]
+] as const
 
 export default function Products() {
     const { isOpen, open, close } = useModal()

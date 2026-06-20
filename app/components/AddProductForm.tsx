@@ -14,7 +14,6 @@ import {
     parseBarcodeList,
     serializeBarcodeList,
 } from '../utils/barcodes'
-import {ALL_CATEGORIES} from "@/app/products/page";
 
 interface ProductFormData {
     name: string
@@ -57,12 +56,37 @@ const ALLOWED_IMAGE_TYPES = new Set([
     'image/webp',
 ])
 
-export const CATEGORIES = [
+const CATEGORIES = [
     { value: '', label: 'Выберите категорию', disabled: true },
-    ...ALL_CATEGORIES.map(category => ({
-        value: category,
-        label: category,
-    })),
+
+    { value: 'Бакалея', label: 'Бакалея' },
+    { value: 'Алкоголь', label: 'Алкоголь' },
+    { value: 'Пиво', label: 'Пиво' },
+    { value: 'Табачные изделия', label: 'Табачные изделия' },
+
+    { value: 'Молочные продукты', label: 'Молочные продукты' },
+    { value: 'Хлебобулочные изделия', label: 'Хлебобулочные изделия' },
+    { value: 'Мясо и птица', label: 'Мясо и птица' },
+    { value: 'Колбасы и мясная охлажденная продукция', label: 'Колбасы и мясная охлажденная продукция' },
+    { value: 'Рыба и морепродукты', label: 'Рыба и морепродукты' },
+    { value: 'Овощи и фрукты', label: 'Овощи и фрукты' },
+
+    { value: 'Безалкогольные напитки', label: 'Безалкогольные напитки' },
+    { value: 'Энергетики', label: 'Энергетики' },
+
+    { value: 'Кондитерка и сладости', label: 'Кондитерка и сладости' },
+    { value: 'Мороженое', label: 'Мороженое' },
+    { value: 'Заморозка', label: 'Заморозка' },
+    { value: 'Консервы', label: 'Консервы' },
+    { value: 'Соусы и приправы', label: 'Соусы и приправы' },
+    { value: 'Чай и кофе', label: 'Чай и кофе' },
+    { value: 'Снэки', label: 'Снэки' },
+
+    { value: 'Бытовая химия', label: 'Бытовая химия' },
+    { value: 'Косметика и гигиена', label: 'Косметика и гигиена' },
+    { value: 'Товары для дома', label: 'Товары для дома' },
+
+    { value: 'Другое', label: 'Другое' },
 ]
 
 const normalizeNumberString = (value: string): string => {
