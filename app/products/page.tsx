@@ -639,9 +639,15 @@ export default function Products() {
         }
     }
 
+    const formatWeight = (value: number): string => {
+        return new Intl.NumberFormat('ru-RU', {
+            maximumFractionDigits: 3,
+        }).format(value)
+    }
+
     const formatStock = (product: Product): string => {
         if (product.unit === 'weight') {
-            return `${product.stock.toFixed(1)} кг`
+            return `${formatWeight(product.stock)} кг`
         }
 
         return `${product.stock} шт.`
@@ -976,7 +982,7 @@ export default function Products() {
 
                                                         <div className="flex justify-between mt-1">
                                                             <span className="text-xs text-gray-500">
-                                                                Мин: {product.minStock}{' '}
+                                                                Мин: {product.unit === 'weight' ? formatWeight(product.minStock) : product.minStock}{' '}
                                                                 {product.unit === 'weight' ? 'кг' : 'шт.'}
                                                             </span>
 

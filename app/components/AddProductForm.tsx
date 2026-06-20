@@ -93,6 +93,35 @@ const normalizeNumberString = (value: string): string => {
     return value.replace(',', '.').replace(/\s/g, '')
 }
 
+const normalizeQuantityString = (value: string): string => {
+    return value.replace(',', '.').replace(/\s/g, '')
+}
+
+const parseQuantity = (value: string): number => {
+    const parsed = parseFloat(normalizeQuantityString(value))
+    return Number.isFinite(parsed) ? parsed : 0
+}
+
+const formatQuantityInput = (value: string, unit: 'piece' | 'weight'): string => {
+    if (unit === 'piece') {
+        return value.replace(/\D/g, '')
+    }
+
+    const normalized = value
+        .replace(',', '.')
+        .replace(/\s/g, '')
+        .replace(/[^\d.]/g, '')
+
+    const [integerPart, ...decimalParts] = normalized.split('.')
+    const decimalPart = decimalParts.join('').slice(0, 3)
+
+    if (normalized.includes('.')) {
+        return `${integerPart}.${decimalPart}`
+    }
+
+    return integerPart
+}
+
 const parsePrice = (value: string): number => {
     const parsed = parseFloat(normalizeNumberString(value))
     return Number.isFinite(parsed) ? parsed : 0
@@ -237,6 +266,17 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
     const updateSellingPrice = (value: string) => {
         setIsSellingPriceManual(true)
         updateField('sellingPrice', value)
+    }
+
+    const updateQuantityField = (field: 'stock' | 'minStock', value: string) => {
+        const formatted = formatQuantityInput(value, formState.unit)
+
+        setFormState(prev => ({
+            ...prev,
+            [field]: formatted,
+        }))
+
+        clearFieldError(field)
     }
 
     const handleSellingPriceBlur = () => {
@@ -400,6 +440,29 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
             newErrors.sellingPrice = 'Введите корректную цену продажи'
         }
 
+        const stockValue = parseQuantity(formState.stock)
+        const minStockValue = parseQuantity(formState.minStock)
+
+        if (formState.unit === 'weight') {
+            const weightPattern = /^\d+(\.\d{1,3})?$/
+
+            if (!weightPattern.test(normalizeQuantityString(formState.stock)) || stockValue < 0) {
+                newErrors.stock = 'Введите остаток до 3 знаков после запятой, например 1.001'
+            }
+
+            if (!weightPattern.test(normalizeQuantityString(formState.minStock)) || minStockValue <= 0) {
+                newErrors.minStock = 'Введите минимальный остаток до 3 знаков после запятой'
+            }
+        } else {
+            if (!/^\d+$/.test(formState.stock) || stockValue < 0) {
+                newErrors.stock = 'Введите целое количество'
+            }
+
+            if (!/^\d+$/.test(formState.minStock) || minStockValue <= 0) {
+                newErrors.minStock = 'Введите целый минимальный остаток'
+            }
+        }
+
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors)
             return
@@ -415,8 +478,8 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 purchasePrice: formState.purchasePrice,
                 sellingPrice: finalSellingPrice,
                 unit: formState.unit,
-                stock: formState.stock,
-                minStock: formState.minStock,
+                stock: normalizeQuantityString(formState.stock),
+                minStock: normalizeQuantityString(formState.minStock),
                 image: formState.image,
                 imageFile: formState.imageFile,
             })
@@ -665,14 +728,17 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                     </label>
 
                     <input
-                        type="number"
+                        type="text"
+                        inputMode={formState.unit === 'weight' ? 'decimal' : 'numeric'}
                         value={formState.stock}
-                        onChange={event => updateField('stock', event.target.value)}
-                        placeholder="0"
-                        step={formState.unit === 'weight' ? '0.1' : '1'}
-                        min="0"
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        onChange={event => updateQuantityField('stock', event.target.value)}
+                        placeholder={formState.unit === 'weight' ? '0.000' : '0'}
+                        className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                            errors.stock ? 'border-red-500' : 'border-gray-300'
+                        }`}
                     />
+
+                    {errors.stock && <p className="mt-1 text-sm text-red-500">{errors.stock}</p>}
                 </div>
 
                 <div>
@@ -681,14 +747,17 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                     </label>
 
                     <input
-                        type="number"
+                        type="text"
+                        inputMode={formState.unit === 'weight' ? 'decimal' : 'numeric'}
                         value={formState.minStock}
-                        onChange={event => updateField('minStock', event.target.value)}
-                        placeholder="10"
-                        step={formState.unit === 'weight' ? '0.1' : '1'}
-                        min="1"
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        onChange={event => updateQuantityField('minStock', event.target.value)}
+                        placeholder={formState.unit === 'weight' ? '0.001' : '10'}
+                        className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                            errors.minStock ? 'border-red-500' : 'border-gray-300'
+                        }`}
                     />
+
+                    {errors.minStock && <p className="mt-1 text-sm text-red-500">{errors.minStock}</p>}
 
                     <p className="mt-1 text-xs text-gray-500">
                         При достижении появится уведомление
