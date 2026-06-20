@@ -92,7 +92,6 @@ type Receipt = {
     total: number;
     receivedAmount?: number;
     change?: number;
-
     fiscalizationRequested?: boolean;
     fiscalStatus?: 'success' | 'skipped' | 'failed';
     fiscalUuid?: string;
@@ -289,15 +288,21 @@ const getFiscalAgentToken = (): string => {
 };
 
 const callFiscalAgent = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-    const response = await fetch(`${getFiscalAgentUrl()}${path}`, {
-        ...init,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-POS-Agent-Token': getFiscalAgentToken(),
-            ...(init?.headers || {}),
-        },
-        cache: 'no-store',
-    });
+    let response: Response;
+
+    try {
+        response = await fetch(`${getFiscalAgentUrl()}${path}`, {
+            ...init,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-POS-Agent-Token': getFiscalAgentToken(),
+                ...(init?.headers || {}),
+            },
+            cache: 'no-store',
+        });
+    } catch {
+        throw new Error('Локальный агент ККТ недоступен. Проверьте, что он запущен на ПК кассы.');
+    }
 
     const data = await readJsonSafe<T & ApiError>(response);
 
@@ -487,6 +492,44 @@ export default function PosPage() {
     }, [router]);
 
     useEffect(() => {
+        if (!isAuthChecked) {
+            return;
+        }
+
+        let cancelled = false;
+
+        const loadFirstProductsPage = async () => {
+            try {
+                setIsLoading(true);
+
+                const page = await fetchProductsPage({
+                    limit: PRODUCTS_PAGE_LIMIT,
+                });
+
+                if (!cancelled) {
+                    setAllProducts(page.items.map(normalizeProduct));
+                }
+            } catch (err) {
+                console.error(err);
+
+                if (!cancelled) {
+                    setError(err instanceof Error ? err.message : 'Не удалось загрузить товары');
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsLoading(false);
+                }
+            }
+        };
+
+        void loadFirstProductsPage();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [isAuthChecked]);
+
+    useEffect(() => {
         if (paymentModal !== 'cash') {
             return;
         }
@@ -558,6 +601,7 @@ export default function PosPage() {
             setWeightModalProduct(null);
             setIsPriceLabelModalOpen(false);
             setLastReceipt(null);
+            setIsAtolSetupOpen(false);
         };
 
         window.addEventListener('keydown', handleEscape);
@@ -611,6 +655,30 @@ export default function PosPage() {
         }
     };
 
+    const repeatLastFiscalReceipt = async () => {
+        try {
+            setIsShiftActionLoading(true);
+            setError(null);
+            setNotice(null);
+
+            await callFiscalAgent('/service/repeat-last-receipt', {
+                method: 'POST',
+            });
+
+            setNotice('Копия последнего фискального чека отправлена на ККТ');
+        } catch (err) {
+            console.error(err);
+            setNotice(null);
+            setError(err instanceof Error ? err.message : 'Не удалось напечатать копию последнего чека');
+        } finally {
+            setIsShiftActionLoading(false);
+
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
+        }
+    };
+
     const openShift = async () => {
         try {
             setIsShiftActionLoading(true);
@@ -630,6 +698,7 @@ export default function PosPage() {
             setError(err instanceof Error ? err.message : 'Не удалось открыть смену');
         } finally {
             setIsShiftActionLoading(false);
+
             requestAnimationFrame(() => {
                 searchInputRef.current?.focus();
             });
@@ -655,6 +724,7 @@ export default function PosPage() {
             setError(err instanceof Error ? err.message : 'Не удалось закрыть смену');
         } finally {
             setIsShiftActionLoading(false);
+
             requestAnimationFrame(() => {
                 searchInputRef.current?.focus();
             });
@@ -931,6 +1001,7 @@ export default function PosPage() {
         try {
             setIsPaying(true);
             setError(null);
+            setNotice(null);
 
             const freshProducts = await refreshProducts();
 
@@ -973,7 +1044,6 @@ export default function PosPage() {
             });
 
             const receiptTotal = receiptItems.reduce((sum, item) => sum + item.total, 0);
-
             const shouldRunFiscalization = method === 'card' && shouldFiscalize;
 
             const receipt: Receipt = {
@@ -1009,6 +1079,7 @@ export default function PosPage() {
 
             setCheckoutItems([]);
             setPaymentModal(null);
+            setFiscalConfirmModal(false);
             setCashReceived('');
             setLastReceipt(savedReceipt);
 
@@ -1036,6 +1107,7 @@ export default function PosPage() {
         try {
             setIsRefreshingLabels(true);
             setError(null);
+            setNotice(null);
 
             await refreshProducts();
 
@@ -1070,7 +1142,7 @@ export default function PosPage() {
     };
 
     const renderBarcodeSvgFromDbValue = (barcodeFromDb: string): string => {
-        const barcode = String(barcodeFromDb || '').trim();
+        const barcode = getPrimaryBarcode(String(barcodeFromDb || '')).trim();
 
         if (!barcode) {
             return '';
@@ -1111,143 +1183,62 @@ export default function PosPage() {
                 const name = escapeHtml(product.name);
                 const price = Math.ceil(getSellingPrice(product));
                 const unitLabel = escapeHtml(getUnitPriceLabel(product));
-
-                const barcodeFromDb = String(product.barcode || '').trim();
-                const barcodeSvg = renderBarcodeSvgFromDbValue(barcodeFromDb);
+                const barcodeSvg = renderBarcodeSvgFromDbValue(product.barcode || '');
 
                 return `
-                <section class="label">
-                    <div class="label-name">${name}</div>
+                    <section class="label">
+                        <div class="label-name">${name}</div>
 
-                    <div class="label-price">
-                        ${price} ₽
-                        <span>${unitLabel}</span>
-                    </div>
+                        <div class="label-price">
+                            ${price} ₽
+                            <span>${unitLabel}</span>
+                        </div>
 
-                    <div class="label-barcode">
-                        ${barcodeSvg ? barcodeSvg : '<div class="no-barcode">Штрихкод не задан в БД</div>'}
-                    </div>
-                </section>
-            `;
+                        <div class="label-barcode">
+                            ${barcodeSvg ? barcodeSvg : '<div class="no-barcode">Штрихкод не задан в БД</div>'}
+                        </div>
+                    </section>
+                `;
             }).join('');
 
             return `
-            <main class="sheet">
-                ${labels}
-            </main>
-        `;
+                <main class="sheet">
+                    ${labels}
+                </main>
+            `;
         }).join('');
 
         return `
-        <!doctype html>
-        <html lang="ru">
-            <head>
-                <meta charset="utf-8" />
-                <title>Печать ценников</title>
+            <!doctype html>
+            <html lang="ru">
+                <head>
+                    <meta charset="utf-8" />
+                    <title>Печать ценников</title>
 
-                <style>
-                    @page {
-                        size: A4 portrait;
-                        margin: 5mm;
-                    }
+                    <style>
+                        @page {
+                            size: A4 portrait;
+                            margin: 5mm;
+                        }
 
-                    * {
-                        box-sizing: border-box;
-                    }
+                        * {
+                            box-sizing: border-box;
+                        }
 
-                    html,
-                    body {
-                        margin: 0;
-                        padding: 0;
-                        background: #ffffff;
-                        font-family: Arial, sans-serif;
-                    }
-
-                    .sheet {
-                        width: 200mm;
-                        height: 280mm;
-                        display: grid;
-                        grid-template-columns: repeat(4, 50mm);
-                        grid-template-rows: repeat(7, 40mm);
-                        page-break-after: always;
-                        break-after: page;
-                    }
-
-                    .sheet:last-child {
-                        page-break-after: auto;
-                        break-after: auto;
-                    }
-
-                    .label {
-                        width: 50mm;
-                        height: 40mm;
-                        padding: 2.5mm;
-                        display: flex;
-                        flex-direction: column;
-                        justify-content: space-between;
-                        overflow: hidden;
-                        border: 0.45mm solid #111827;
-                        background: #ffffff;
-                        break-inside: avoid;
-                        page-break-inside: avoid;
-                    }
-
-                    .label-name {
-                        height: 9mm;
-                        overflow: hidden;
-                        font-size: 10px;
-                        line-height: 1.15;
-                        font-weight: 700;
-                        text-align: center;
-                        color: #111827;
-                    }
-
-                    .label-price {
-                        text-align: center;
-                        font-size: 24px;
-                        line-height: 1;
-                        font-weight: 900;
-                        color: #000000;
-                    }
-
-                    .label-price span {
-                        display: block;
-                        margin-top: 1.5mm;
-                        font-size: 10px;
-                        line-height: 1;
-                        font-weight: 600;
-                    }
-
-                    .label-barcode {
-                        width: 100%;
-                        height: 11mm;
-                        display: flex;
-                        align-items: flex-end;
-                        justify-content: center;
-                    }
-
-                    .label-barcode svg {
-                        width: 42mm;
-                        height: 11mm;
-                    }
-
-                    .no-barcode {
-                        width: 100%;
-                        padding: 1.5mm;
-                        border: 0.35mm dashed #111827;
-                        font-size: 9px;
-                        color: #374151;
-                        text-align: center;
-                    }
-
-                    @media print {
                         html,
                         body {
-                            width: 210mm;
-                            min-height: 297mm;
+                            margin: 0;
+                            padding: 0;
+                            background: #ffffff;
+                            font-family: Arial, sans-serif;
                         }
 
                         .sheet {
+                            width: 200mm;
+                            height: 280mm;
+                            display: grid;
+                            grid-template-columns: repeat(4, 50mm);
+                            grid-template-rows: repeat(7, 40mm);
                             page-break-after: always;
                             break-after: page;
                         }
@@ -1256,33 +1247,135 @@ export default function PosPage() {
                             page-break-after: auto;
                             break-after: auto;
                         }
-                    }
-                </style>
-            </head>
 
-            <body>
-                ${sheets}
+                        .label {
+                            width: 50mm;
+                            height: 40mm;
+                            padding: 2.5mm;
+                            display: flex;
+                            flex-direction: column;
+                            justify-content: space-between;
+                            overflow: hidden;
+                            border: 0.45mm solid #111827;
+                            background: #ffffff;
+                            break-inside: avoid;
+                            page-break-inside: avoid;
+                        }
 
-                <script>
-                    window.onload = function () {
-                        window.focus();
-                        setTimeout(function () {
-                            window.print();
-                        }, 250);
-                    };
-                </script>
-            </body>
-        </html>
-    `;
+                        .label-name {
+                            height: 9mm;
+                            overflow: hidden;
+                            font-size: 10px;
+                            line-height: 1.15;
+                            font-weight: 700;
+                            text-align: center;
+                            color: #111827;
+                        }
+
+                        .label-price {
+                            text-align: center;
+                            font-size: 24px;
+                            line-height: 1;
+                            font-weight: 900;
+                            color: #000000;
+                        }
+
+                        .label-price span {
+                            display: block;
+                            margin-top: 1.5mm;
+                            font-size: 10px;
+                            line-height: 1;
+                            font-weight: 600;
+                        }
+
+                        .label-barcode {
+                            width: 100%;
+                            height: 11mm;
+                            display: flex;
+                            align-items: flex-end;
+                            justify-content: center;
+                        }
+
+                        .label-barcode svg {
+                            width: 42mm;
+                            height: 11mm;
+                        }
+
+                        .no-barcode {
+                            width: 100%;
+                            padding: 1.5mm;
+                            border: 0.35mm dashed #111827;
+                            font-size: 9px;
+                            color: #374151;
+                            text-align: center;
+                        }
+
+                        @media print {
+                            html,
+                            body {
+                                width: 210mm;
+                                min-height: 297mm;
+                            }
+
+                            .sheet {
+                                page-break-after: always;
+                                break-after: page;
+                            }
+
+                            .sheet:last-child {
+                                page-break-after: auto;
+                                break-after: auto;
+                            }
+                        }
+                    </style>
+                </head>
+
+                <body>
+                    ${sheets}
+
+                    <script>
+                        window.onload = function () {
+                            window.focus();
+                            setTimeout(function () {
+                                window.print();
+                            }, 250);
+                        };
+                    </script>
+                </body>
+            </html>
+        `;
     };
 
     const printPriceLabels = async (mode: PrintMode) => {
+        const printWindow = window.open('', '_blank', 'width=900,height=700');
+
+        if (!printWindow) {
+            setError('Браузер заблокировал окно печати. Разрешите всплывающие окна.');
+            return;
+        }
+
         try {
             setIsRefreshingLabels(true);
             setError(null);
+            setNotice(null);
+
+            printWindow.document.open();
+            printWindow.document.write(`
+                <!doctype html>
+                <html lang="ru">
+                    <head>
+                        <meta charset="utf-8" />
+                        <title>Подготовка ценников</title>
+                    </head>
+                    <body style="font-family: Arial, sans-serif; padding: 24px;">
+                        <h2>Подготовка ценников...</h2>
+                        <p>Пожалуйста, подождите.</p>
+                    </body>
+                </html>
+            `);
+            printWindow.document.close();
 
             const freshProducts = await refreshProducts();
-
             const query = priceLabelSearch.trim().toLowerCase();
 
             const freshFilteredProducts = query
@@ -1305,22 +1398,19 @@ export default function PosPage() {
                         : freshProducts;
 
             if (products.length === 0) {
+                printWindow.close();
                 setError('Нет товаров для печати ценников');
-                return;
-            }
-
-            const printWindow = window.open('', '_blank', 'width=900,height=700');
-
-            if (!printWindow) {
-                setError('Браузер заблокировал окно печати. Разрешите всплывающие окна.');
                 return;
             }
 
             printWindow.document.open();
             printWindow.document.write(buildPriceLabelsHtml(products));
             printWindow.document.close();
+
+            setNotice(`Ценники отправлены на печать: ${products.length}`);
         } catch (err) {
             console.error(err);
+            printWindow.close();
             setError('Не удалось сформировать ценники');
         } finally {
             setIsRefreshingLabels(false);
@@ -1386,8 +1476,17 @@ export default function PosPage() {
 
                             <button
                                 type="button"
+                                onClick={repeatLastFiscalReceipt}
+                                disabled={isShiftActionLoading}
+                                className="rounded-lg border border-gray-300 px-4 py-2 hover:bg-gray-50 disabled:opacity-50"
+                            >
+                                Копия последнего чека ККТ
+                            </button>
+
+                            <button
+                                type="button"
                                 onClick={() => setIsAtolSetupOpen(true)}
-                                className="rounded-xl border border-gray-300 px-5 py-3 hover:bg-gray-50"
+                                className="rounded-lg border border-indigo-300 px-4 py-2 text-indigo-700 hover:bg-indigo-50"
                             >
                                 Настройка ККТ
                             </button>
@@ -1733,15 +1832,130 @@ export default function PosPage() {
                     <div
                         key="weight-modal"
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                        onClick={() => {
+                            setWeightModalProduct(null);
+                            setWeightQuantity('');
+                        }}
                     >
-                        {/* весь текущий код модалки весового товара оставь без изменений */}
                         <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.96 }}
+                            onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                         >
-                            {/* содержимое weightModalProduct */}
+                            <h2 className="text-2xl font-bold text-gray-800 mb-2">
+                                Весовой товар
+                            </h2>
+
+                            <div className="mb-5 text-gray-600">
+                                {weightModalProduct.name}
+                            </div>
+
+                            <div className="mb-5 rounded-xl bg-indigo-50 p-4">
+                                <div className="text-sm text-indigo-700">
+                                    Цена за 1 кг:
+                                </div>
+
+                                <div className="text-3xl font-bold text-indigo-700">
+                                    {formatCurrency(getSellingPrice(weightModalProduct))}
+                                </div>
+
+                                <div className="mt-2 text-sm text-indigo-700">
+                                    Остаток: {formatQuantity(getStock(weightModalProduct), 'weight')}
+                                </div>
+                            </div>
+
+                            <label className="mb-2 block text-sm font-medium text-gray-700">
+                                Вес, кг
+                            </label>
+
+                            <input
+                                type="number"
+                                min="0.001"
+                                step="0.001"
+                                inputMode="decimal"
+                                autoFocus
+                                value={weightQuantity}
+                                onChange={(e) => {
+                                    setWeightQuantity(e.target.value);
+                                    setError(null);
+                                }}
+                                onKeyDown={(e) => {
+                                    if (e.key !== 'Enter') {
+                                        return;
+                                    }
+
+                                    const quantity = safeParseNumber(weightQuantity);
+
+                                    if (quantity <= 0) {
+                                        setError('Введите корректный вес');
+                                        return;
+                                    }
+
+                                    if (quantity > getStock(weightModalProduct)) {
+                                        setError(
+                                            `Недостаточно остатка: «${weightModalProduct.name}». В наличии ${formatQuantity(getStock(weightModalProduct), 'weight')}`
+                                        );
+                                        return;
+                                    }
+
+                                    addQuantityToCheckout(weightModalProduct, quantity);
+                                    setWeightModalProduct(null);
+                                    setWeightQuantity('');
+                                }}
+                                placeholder="Например 0.350"
+                                className="mb-5 w-full rounded-xl border border-gray-300 px-4 py-3 text-2xl font-bold outline-none focus:border-transparent focus:ring-2 focus:ring-indigo-500"
+                            />
+
+                            <div className="mb-6 rounded-xl bg-gray-50 p-4">
+                                <div className="text-sm text-gray-500">
+                                    Сумма:
+                                </div>
+
+                                <div className="text-3xl font-bold text-gray-800">
+                                    {formatCurrency(getSellingPrice(weightModalProduct) * safeParseNumber(weightQuantity))}
+                                </div>
+                            </div>
+
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setWeightModalProduct(null);
+                                        setWeightQuantity('');
+                                    }}
+                                    className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50"
+                                >
+                                    Отмена
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        const quantity = safeParseNumber(weightQuantity);
+
+                                        if (quantity <= 0) {
+                                            setError('Введите корректный вес');
+                                            return;
+                                        }
+
+                                        if (quantity > getStock(weightModalProduct)) {
+                                            setError(
+                                                `Недостаточно остатка: «${weightModalProduct.name}». В наличии ${formatQuantity(getStock(weightModalProduct), 'weight')}`
+                                            );
+                                            return;
+                                        }
+
+                                        addQuantityToCheckout(weightModalProduct, quantity);
+                                        setWeightModalProduct(null);
+                                        setWeightQuantity('');
+                                    }}
+                                    className="px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                                >
+                                    Добавить в чек
+                                </button>
+                            </div>
                         </motion.div>
                     </div>
                 )}
@@ -1750,15 +1964,192 @@ export default function PosPage() {
                     <div
                         key="price-label-modal"
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                        onClick={() => setIsPriceLabelModalOpen(false)}
                     >
-                        {/* весь текущий код модалки ценников оставь без изменений */}
                         <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.96 }}
+                            onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl overflow-hidden"
                         >
-                            {/* содержимое isPriceLabelModalOpen */}
+                            <div className="p-6 border-b border-gray-100">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <h2 className="text-2xl font-bold text-gray-800">
+                                            Печать ценников 40×50 мм
+                                        </h2>
+
+                                        <p className="text-sm text-gray-500 mt-1">
+                                            Выберите товары, найдите обновлённую цену или распечатайте все ценники сразу.
+                                        </p>
+                                    </div>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsPriceLabelModalOpen(false)}
+                                        className="text-2xl text-gray-400 hover:text-gray-600"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+
+                                <div className="mt-5 grid grid-cols-1 md:grid-cols-[1fr_auto_auto_auto] gap-3">
+                                    <input
+                                        type="text"
+                                        value={priceLabelSearch}
+                                        onChange={(e) => setPriceLabelSearch(e.target.value)}
+                                        placeholder="Поиск по названию, штрихкоду или цене..."
+                                        className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
+                                    />
+
+                                    <button
+                                        type="button"
+                                        onClick={async () => {
+                                            try {
+                                                setIsRefreshingLabels(true);
+                                                setError(null);
+                                                setNotice(null);
+
+                                                await refreshProducts();
+
+                                                setNotice('Цены для ценников обновлены');
+                                            } catch (err) {
+                                                console.error(err);
+                                                setError('Не удалось обновить цены');
+                                            } finally {
+                                                setIsRefreshingLabels(false);
+                                            }
+                                        }}
+                                        disabled={isRefreshingLabels}
+                                        className="rounded-xl border border-gray-300 px-4 py-3 hover:bg-gray-50 disabled:opacity-50"
+                                    >
+                                        {isRefreshingLabels ? 'Обновляю...' : 'Обновить цены'}
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={selectAllFilteredPriceLabels}
+                                        className="rounded-xl border border-gray-300 px-4 py-3 hover:bg-gray-50"
+                                    >
+                                        Выбрать найденные
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={clearSelectedPriceLabels}
+                                        className="rounded-xl border border-gray-300 px-4 py-3 hover:bg-gray-50"
+                                    >
+                                        Снять выбор
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="max-h-[55vh] overflow-y-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="sticky top-0 bg-gray-50 text-gray-600 z-10">
+                                    <tr>
+                                        <th className="p-3 text-left w-12"></th>
+                                        <th className="p-3 text-left">Товар</th>
+                                        <th className="p-3 text-left">Штрихкод из БД</th>
+                                        <th className="p-3 text-left">Ед.</th>
+                                        <th className="p-3 text-right">Цена</th>
+                                        <th className="p-3 text-right">Остаток</th>
+                                    </tr>
+                                    </thead>
+
+                                    <tbody>
+                                    {priceLabelProducts.map(product => {
+                                        const selected = selectedPriceLabelIds.includes(String(product.id));
+
+                                        return (
+                                            <tr
+                                                key={String(product.id)}
+                                                className="border-t border-gray-100 hover:bg-gray-50"
+                                            >
+                                                <td className="p-3">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selected}
+                                                        onChange={() => togglePriceLabelProduct(product.id)}
+                                                        className="h-4 w-4"
+                                                    />
+                                                </td>
+
+                                                <td className="p-3">
+                                                    <div className="font-medium text-gray-800">
+                                                        {product.name}
+                                                    </div>
+
+                                                    <div className="text-xs text-gray-500">
+                                                        {product.category || 'Без категории'}
+                                                    </div>
+                                                </td>
+
+                                                <td className="p-3 font-mono text-xs text-gray-500">
+                                                    {product.barcode ? getBarcodeDisplay(product.barcode) : 'Штрихкод не задан'}
+                                                </td>
+
+                                                <td className="p-3">
+                                                    {product.unit === 'weight' ? 'кг' : 'шт.'}
+                                                </td>
+
+                                                <td className="p-3 text-right font-bold text-indigo-700">
+                                                    {Math.ceil(getSellingPrice(product))} ₽ {getUnitPriceLabel(product)}
+                                                </td>
+
+                                                <td className="p-3 text-right text-gray-500">
+                                                    {formatQuantity(getStock(product), product.unit)}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                    </tbody>
+                                </table>
+
+                                {priceLabelProducts.length === 0 && (
+                                    <div className="p-8 text-center text-gray-400">
+                                        Товары не найдены
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 bg-gray-50 p-5">
+                                <div className="text-sm text-gray-500">
+                                    Выбрано: <span className="font-bold">{selectedPriceLabelIds.length}</span>.
+                                    Найдено: <span className="font-bold">{priceLabelProducts.length}</span>.
+                                    Всего загружено: <span className="font-bold">{allProducts.length}</span>.
+                                </div>
+
+                                <div className="flex flex-wrap gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => printPriceLabels('selected')}
+                                        disabled={isRefreshingLabels}
+                                        className="rounded-lg bg-indigo-600 px-5 py-2.5 text-white hover:bg-indigo-700 disabled:opacity-50"
+                                    >
+                                        Печать выбранных
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => printPriceLabels('filtered')}
+                                        disabled={isRefreshingLabels}
+                                        className="rounded-lg bg-blue-600 px-5 py-2.5 text-white hover:bg-blue-700 disabled:opacity-50"
+                                    >
+                                        Печать всех найденных
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => printPriceLabels('all')}
+                                        disabled={isRefreshingLabels}
+                                        className="rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
+                                    >
+                                        Печать всей базы
+                                    </button>
+                                </div>
+                            </div>
                         </motion.div>
                     </div>
                 )}
@@ -1859,7 +2250,7 @@ export default function PosPage() {
                                 />
                             </div>
 
-                            <div className="mb-5 flex flex-wrap gap-2">
+                            <div className="mb-4 flex flex-wrap gap-2">
                                 <button
                                     type="button"
                                     disabled={isPaying}
@@ -2100,13 +2491,13 @@ export default function PosPage() {
                                         </div>
 
                                         <div className="flex justify-between text-sm text-gray-500">
-                            <span>
-                                {formatCurrency(item.price)} × {formatQuantity(item.quantity, item.unit)}
-                            </span>
+                                            <span>
+                                                {formatCurrency(item.price)} × {formatQuantity(item.quantity, item.unit)}
+                                            </span>
 
                                             <span className="font-semibold text-gray-700">
-                                {formatCurrency(item.total)}
-                            </span>
+                                                {formatCurrency(item.total)}
+                                            </span>
                                         </div>
                                     </div>
                                 ))}
@@ -2138,7 +2529,18 @@ export default function PosPage() {
                                 )}
                             </div>
 
-                            <div className="mt-6 flex justify-end">
+                            <div className="mt-6 flex flex-wrap justify-end gap-3">
+                                {lastReceipt.fiscalStatus === 'success' && (
+                                    <button
+                                        type="button"
+                                        onClick={repeatLastFiscalReceipt}
+                                        disabled={isShiftActionLoading}
+                                        className="px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+                                    >
+                                        Копия чека ККТ
+                                    </button>
+                                )}
+
                                 <button
                                     type="button"
                                     onClick={clearReceipt}

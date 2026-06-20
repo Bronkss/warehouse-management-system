@@ -473,6 +473,31 @@ app.post('/service/close-shift', requireToken, async (req, res) => {
     }
 });
 
+app.post('/service/repeat-last-receipt', requireToken, async (req, res) => {
+    try {
+        const result = await runAtolCommands([
+            {
+                type: 'printLastReceiptCopy',
+            },
+        ]);
+
+        res.json({
+            ok: true,
+            message: 'Копия последнего чека отправлена на печать',
+            result,
+        });
+    } catch (error) {
+        console.error(error);
+
+        res.status(502).json({
+            ok: false,
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось напечатать копию последнего чека',
+        });
+    }
+});
+
 app.post('/fiscal/sell', requireToken, async (req, res) => {
     try {
         const receipt = req.body;
