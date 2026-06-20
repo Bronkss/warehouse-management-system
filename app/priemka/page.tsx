@@ -20,6 +20,8 @@ type ProductSuggestion = {
 }
 
 type PreviewRow = {
+    acceptanceItemId?: number | null
+    productId?: number | null
     rowId: string
     rowNumber: number
     status: ImportStatus
@@ -45,7 +47,7 @@ type PreviewRow = {
 
 type CommitResult = {
     acceptanceId: number
-    acceptanceNumber: string
+    acceptanceNumber?: string
     totalRows: number
     created: number
     updated: number
@@ -68,12 +70,35 @@ type AcceptanceHistoryItem = {
     id: number
     number: string
     sourceFileName: string | null
+    supplier: string | null
+    invoiceNumber: string | null
+    comment: string | null
     totalRows: number
     created: number
     updated: number
     skipped: number
+    errors: number
     status: string
     createdAt: string
+    updatedAt: string
+}
+
+type AcceptanceDetail = {
+    id: number
+    number: string
+    sourceFileName: string | null
+    supplier: string
+    invoiceNumber: string
+    comment: string
+    totalRows: number
+    created: number
+    updated: number
+    skipped: number
+    errors: string[]
+    status: string
+    createdAt: string
+    updatedAt: string
+    rows: PreviewRow[]
 }
 
 const ACTION_OPTIONS: { value: ImportAction; label: string }[] = [
@@ -83,7 +108,8 @@ const ACTION_OPTIONS: { value: ImportAction; label: string }[] = [
 ]
 
 const inputClass = 'h-8 w-full rounded-md border border-gray-300 px-2 text-xs outline-none focus:ring-1 focus:ring-blue-500'
-const selectClass = 'h-8 w-full rounded-md border border-gray-300 pr-5 text-xs outline-none focus:ring-1 focus:ring-blue-500 bg-white'
+const selectClass = 'h-8 w-full rounded-md border border-gray-300 px-2 pr-5 text-xs outline-none focus:ring-1 focus:ring-blue-500 bg-white'
+const labelClass = 'mb-1 block text-xs font-medium text-gray-500'
 
 function getStatusLabel(status: ImportStatus) {
     if (status === 'matched') return 'Совп.'
@@ -100,7 +126,48 @@ function getStatusClass(status: ImportStatus) {
 }
 
 function formatDate(value: string) {
+    if (!value) return '—'
     return new Date(value).toLocaleString('ru-RU')
+}
+
+function toNumber(value: string) {
+    const parsed = Number(String(value || '0').replace(',', '.'))
+    return Number.isFinite(parsed) ? parsed : 0
+}
+
+function calcSellingPrice(purchasePrice: string) {
+    return (Math.round(toNumber(purchasePrice) * 1.3 * 100) / 100).toFixed(2)
+}
+
+function createEmptyRow(rowNumber: number): PreviewRow {
+    return {
+        acceptanceItemId: null,
+        productId: null,
+        rowId: `manual-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        rowNumber,
+        status: 'new',
+        action: 'create',
+        matchType: 'manual',
+        matchScore: 0,
+        matchedProductId: null,
+        matchedProductName: '',
+        matchedProductBarcode: '',
+        suggestions: [],
+        error: null,
+        name: '',
+        category: '',
+        barcode: '',
+        purchasePrice: '0',
+        sellingPrice: '0',
+        unit: 'piece',
+        stock: '1',
+        minStock: '0',
+        image: '',
+    }
+}
+
+function renumberRows(rows: PreviewRow[]) {
+    return rows.map((row, index) => ({ ...row, rowNumber: index + 1 }))
 }
 
 export default function Page() {
@@ -108,13 +175,21 @@ export default function Page() {
     const [previewRows, setPreviewRows] = useState<PreviewRow[]>([])
     const [history, setHistory] = useState<AcceptanceHistoryItem[]>([])
 
+    const [supplier, setSupplier] = useState('')
+    const [invoiceNumber, setInvoiceNumber] = useState('')
+    const [comment, setComment] = useState('')
+    const [editingAcceptance, setEditingAcceptance] = useState<AcceptanceDetail | null>(null)
+
     const [isPreviewLoading, setIsPreviewLoading] = useState(false)
     const [isCommitLoading, setIsCommitLoading] = useState(false)
     const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+    const [isAcceptanceLoading, setIsAcceptanceLoading] = useState(false)
 
     const [error, setError] = useState<string | null>(null)
     const [commitResult, setCommitResult] = useState<CommitResult | null>(null)
     const [isResultModalOpen, setIsResultModalOpen] = useState(false)
+
+    const isEditMode = Boolean(editingAcceptance)
 
     const summary = useMemo(() => {
         return {
@@ -124,6 +199,14 @@ export default function Page() {
             skip: previewRows.filter(row => row.action === 'skip').length,
             review: previewRows.filter(row => row.status === 'review').length,
             error: previewRows.filter(row => row.status === 'error').length,
+            totalPurchase: previewRows.reduce((sum, row) => {
+                if (row.action === 'skip') return sum
+                return sum + toNumber(row.purchasePrice) * toNumber(row.stock)
+            }, 0),
+            totalSelling: previewRows.reduce((sum, row) => {
+                if (row.action === 'skip') return sum
+                return sum + toNumber(row.sellingPrice) * toNumber(row.stock)
+            }, 0),
         }
     }, [previewRows])
 
@@ -172,12 +255,24 @@ export default function Page() {
                 return {
                     ...row,
                     action: selected ? 'update' : row.action,
+                    productId: selected?.id ?? row.productId ?? null,
                     matchedProductId: selected?.id ?? null,
                     matchedProductName: selected?.name ?? '',
                     matchedProductBarcode: selected?.barcode ?? '',
                 }
             })
         )
+    }
+
+    const resetForm = () => {
+        setFile(null)
+        setPreviewRows([])
+        setSupplier('')
+        setInvoiceNumber('')
+        setComment('')
+        setEditingAcceptance(null)
+        setCommitResult(null)
+        setError(null)
     }
 
     const handlePreview = async (e: FormEvent) => {
@@ -192,6 +287,7 @@ export default function Page() {
             setIsPreviewLoading(true)
             setError(null)
             setCommitResult(null)
+            setEditingAcceptance(null)
             setPreviewRows([])
 
             const formData = new FormData()
@@ -217,6 +313,49 @@ export default function Page() {
         }
     }
 
+    const handleOpenAcceptance = async (id: number) => {
+        try {
+            setIsAcceptanceLoading(true)
+            setError(null)
+            setCommitResult(null)
+
+            const response = await fetch(`/api/products/import/history/${id}`)
+            const data: AcceptanceDetail | { message?: string } = await response.json()
+
+            if (!response.ok) {
+                throw new Error('message' in data ? data.message || 'Не удалось открыть приёмку' : 'Не удалось открыть приёмку')
+            }
+
+            const detail = data as AcceptanceDetail
+            setEditingAcceptance(detail)
+            setSupplier(detail.supplier || '')
+            setInvoiceNumber(detail.invoiceNumber || '')
+            setComment(detail.comment || '')
+            setFile(null)
+            setPreviewRows(detail.rows)
+        } catch (error) {
+            console.error(error)
+            setError(error instanceof Error ? error.message : 'Не удалось открыть приёмку')
+        } finally {
+            setIsAcceptanceLoading(false)
+        }
+    }
+
+    const addManualRow = () => {
+        setPreviewRows(prev => [...prev, createEmptyRow(prev.length + 1)])
+    }
+
+    const deleteRow = (rowId: string) => {
+        setPreviewRows(prev => renumberRows(prev.filter(row => row.rowId !== rowId)))
+    }
+
+    const applyMarkupToAll = () => {
+        setPreviewRows(prev => prev.map(row => ({
+            ...row,
+            sellingPrice: calcSellingPrice(row.purchasePrice),
+        })))
+    }
+
     const handleCommit = async () => {
         if (previewRows.length === 0) {
             setError('Нет строк для применения')
@@ -227,29 +366,43 @@ export default function Page() {
             setIsCommitLoading(true)
             setError(null)
 
-            const response = await fetch('/api/products/import/commit', {
-                method: 'POST',
+            const url = isEditMode
+                ? `/api/products/import/history/${editingAcceptance?.id}`
+                : '/api/products/import/commit'
+
+            const response = await fetch(url, {
+                method: isEditMode ? 'PUT' : 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    rows: previewRows,
-                    sourceFileName: file?.name || '',
+                    rows: renumberRows(previewRows),
+                    sourceFileName: file?.name || editingAcceptance?.sourceFileName || '',
+                    supplier,
+                    invoiceNumber,
+                    comment,
                 }),
             })
 
             const data = await response.json()
 
             if (!response.ok) {
-                throw new Error(data.message || 'Ошибка применения импорта')
+                throw new Error(data.message || 'Ошибка сохранения приёмки')
             }
 
-            setCommitResult(data)
+            setCommitResult({
+                ...data,
+                acceptanceNumber: data.acceptanceNumber || editingAcceptance?.number,
+            })
             setIsResultModalOpen(true)
             await loadHistory()
+
+            if (isEditMode && editingAcceptance?.id) {
+                await handleOpenAcceptance(editingAcceptance.id)
+            }
         } catch (error) {
             console.error(error)
-            setError(error instanceof Error ? error.message : 'Ошибка применения импорта')
+            setError(error instanceof Error ? error.message : 'Ошибка сохранения приёмки')
         } finally {
             setIsCommitLoading(false)
         }
@@ -258,41 +411,96 @@ export default function Page() {
     return (
         <System>
             <section className="relative z-0 w-full min-h-screen bg-gray-50 p-4">
-                <div className="mx-auto max-w-[1600px] space-y-4">
-                    <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-4">
+                <div className="mx-auto max-w-[1700px] space-y-4">
+                    <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-4">
                         <div className="rounded-2xl bg-white p-5 shadow-sm">
-                            <h1 className="text-2xl font-bold text-gray-900">
-                                Приёмка товара
-                            </h1>
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                                <div>
+                                    <div className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                                        {isEditMode ? `Редактирование ${editingAcceptance?.number}` : 'Новая приёмка'}
+                                    </div>
 
-                            <p className="mt-1 text-sm text-gray-500">
-                                Загрузите Excel-накладную, проверьте совпадения и примените импорт в БД.
-                            </p>
+                                    <h1 className="mt-2 text-2xl font-bold text-gray-900">
+                                        Приёмка товара
+                                    </h1>
 
-                            <form onSubmit={handlePreview} className="mt-5 flex flex-col md:flex-row gap-3">
-                                <input
-                                    type="file"
-                                    accept=".xlsx,.xls,.csv"
-                                    onChange={(e) => {
-                                        setFile(e.target.files?.[0] || null)
-                                        setPreviewRows([])
-                                        setCommitResult(null)
-                                        setError(null)
-                                    }}
-                                    className="block flex-1 text-sm text-gray-700 border border-gray-300 rounded-lg cursor-pointer bg-white focus:outline-none file:mr-4 file:py-2.5 file:px-4 file:border-0 file:bg-blue-600 file:text-white file:cursor-pointer hover:file:bg-blue-700"
-                                />
+                                    <p className="mt-1 text-sm text-gray-500">
+                                        Загрузите Excel-накладную, проверьте совпадения, измените закупку/продажу и сохраните приёмку в БД.
+                                    </p>
+                                </div>
 
-                                <button
-                                    type="submit"
-                                    disabled={isPreviewLoading || !file}
-                                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                    {isPreviewLoading && (
-                                        <span className="h-4 w-4 rounded-full border-2 border-white/40 border-t-white animate-spin" />
-                                    )}
-                                    {isPreviewLoading ? 'Анализ...' : 'Предпросмотр'}
-                                </button>
-                            </form>
+                                {isEditMode && (
+                                    <button
+                                        type="button"
+                                        onClick={resetForm}
+                                        className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100"
+                                    >
+                                        Новая приёмка
+                                    </button>
+                                )}
+                            </div>
+
+                            <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div>
+                                    <label className={labelClass}>Поставщик</label>
+                                    <input
+                                        type="text"
+                                        value={supplier}
+                                        onChange={(e) => setSupplier(e.target.value)}
+                                        placeholder="Например: ООО Поставщик"
+                                        className="h-10 w-full rounded-lg border border-gray-300 px-3 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className={labelClass}>Номер накладной</label>
+                                    <input
+                                        type="text"
+                                        value={invoiceNumber}
+                                        onChange={(e) => setInvoiceNumber(e.target.value)}
+                                        placeholder="№ документа"
+                                        className="h-10 w-full rounded-lg border border-gray-300 px-3 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className={labelClass}>Комментарий</label>
+                                    <input
+                                        type="text"
+                                        value={comment}
+                                        onChange={(e) => setComment(e.target.value)}
+                                        placeholder="Необязательно"
+                                        className="h-10 w-full rounded-lg border border-gray-300 px-3 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                                    />
+                                </div>
+                            </div>
+
+                            {!isEditMode && (
+                                <form onSubmit={handlePreview} className="mt-5 flex flex-col md:flex-row gap-3">
+                                    <input
+                                        type="file"
+                                        accept=".xlsx,.xls,.csv"
+                                        onChange={(e) => {
+                                            setFile(e.target.files?.[0] || null)
+                                            setPreviewRows([])
+                                            setCommitResult(null)
+                                            setError(null)
+                                        }}
+                                        className="block flex-1 text-sm text-gray-700 border border-gray-300 rounded-lg cursor-pointer bg-white focus:outline-none file:mr-4 file:py-2.5 file:px-4 file:border-0 file:bg-blue-600 file:text-white file:cursor-pointer hover:file:bg-blue-700"
+                                    />
+
+                                    <button
+                                        type="submit"
+                                        disabled={isPreviewLoading || !file}
+                                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        {isPreviewLoading && (
+                                            <span className="h-4 w-4 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                                        )}
+                                        {isPreviewLoading ? 'Анализ...' : 'Предпросмотр'}
+                                    </button>
+                                </form>
+                            )}
 
                             {error && (
                                 <div className="mt-4 rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-700">
@@ -302,7 +510,7 @@ export default function Page() {
                         </div>
 
                         <div className="rounded-2xl bg-white p-5 shadow-sm">
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between gap-2">
                                 <h2 className="text-lg font-semibold text-gray-900">
                                     История приёмок
                                 </h2>
@@ -316,10 +524,10 @@ export default function Page() {
                                 </button>
                             </div>
 
-                            <div className="mt-4 max-h-[210px] space-y-2 overflow-y-auto pr-1">
-                                {isHistoryLoading && (
+                            <div className="mt-4 max-h-[320px] space-y-2 overflow-y-auto pr-1">
+                                {(isHistoryLoading || isAcceptanceLoading) && (
                                     <div className="text-sm text-gray-500">
-                                        Загрузка истории...
+                                        Загрузка...
                                     </div>
                                 )}
 
@@ -332,12 +540,16 @@ export default function Page() {
                                 {history.map(item => (
                                     <div
                                         key={item.id}
-                                        className="rounded-xl border border-gray-100 bg-gray-50 p-3"
+                                        className={`rounded-xl border p-3 ${editingAcceptance?.id === item.id ? 'border-blue-200 bg-blue-50' : 'border-gray-100 bg-gray-50'}`}
                                     >
                                         <div className="flex items-center justify-between gap-2">
-                                            <div className="font-semibold text-gray-900">
+                                            <button
+                                                type="button"
+                                                onClick={() => handleOpenAcceptance(item.id)}
+                                                className="text-left font-semibold text-blue-700 hover:text-blue-800"
+                                            >
                                                 {item.number}
-                                            </div>
+                                            </button>
 
                                             <div className={`rounded-full px-2 py-0.5 text-xs ${
                                                 item.status === 'completed'
@@ -352,13 +564,19 @@ export default function Page() {
                                             {formatDate(item.createdAt)}
                                         </div>
 
+                                        {(item.supplier || item.invoiceNumber) && (
+                                            <div className="mt-1 truncate text-xs text-gray-500">
+                                                {item.supplier || 'Поставщик не указан'}{item.invoiceNumber ? ` · накл. ${item.invoiceNumber}` : ''}
+                                            </div>
+                                        )}
+
                                         {item.sourceFileName && (
                                             <div className="mt-1 truncate text-xs text-gray-500">
                                                 Файл: {item.sourceFileName}
                                             </div>
                                         )}
 
-                                        <div className="mt-2 grid grid-cols-4 gap-1 text-center text-xs">
+                                        <div className="mt-2 grid grid-cols-5 gap-1 text-center text-xs">
                                             <div className="rounded bg-white p-1">
                                                 <div className="text-gray-400">стр.</div>
                                                 <div className="font-bold">{item.totalRows}</div>
@@ -378,6 +596,11 @@ export default function Page() {
                                                 <div>проп.</div>
                                                 <div className="font-bold">{item.skipped}</div>
                                             </div>
+
+                                            <div className="rounded bg-red-50 p-1 text-red-700">
+                                                <div>ош.</div>
+                                                <div className="font-bold">{item.errors}</div>
+                                            </div>
                                         </div>
                                     </div>
                                 ))}
@@ -389,7 +612,7 @@ export default function Page() {
 
                     {previewRows.length > 0 && (
                         <>
-                            <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+                            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2">
                                 <div className="rounded-xl bg-white p-3 shadow-sm">
                                     <div className="text-xs text-gray-500">Всего</div>
                                     <div className="text-xl font-bold">{summary.total}</div>
@@ -419,49 +642,82 @@ export default function Page() {
                                     <div className="text-xs text-gray-500">Ошибки</div>
                                     <div className="text-xl font-bold text-red-700">{summary.error}</div>
                                 </div>
+
+                                <div className="rounded-xl bg-white p-3 shadow-sm">
+                                    <div className="text-xs text-gray-500">Закупка</div>
+                                    <div className="text-xl font-bold">{summary.totalPurchase.toFixed(2)}</div>
+                                </div>
+
+                                <div className="rounded-xl bg-white p-3 shadow-sm">
+                                    <div className="text-xs text-gray-500">Продажа</div>
+                                    <div className="text-xl font-bold">{summary.totalSelling.toFixed(2)}</div>
+                                </div>
                             </div>
 
                             <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
-                                <div className="flex items-center justify-between gap-4 border-b border-gray-100 p-4">
+                                <div className="flex flex-col gap-3 border-b border-gray-100 p-4 lg:flex-row lg:items-center lg:justify-between">
                                     <div>
                                         <h2 className="text-lg font-semibold text-gray-900">
-                                            Предпросмотр
+                                            {isEditMode ? 'Редактирование позиций приёмки' : 'Предпросмотр'}
                                         </h2>
 
                                         <p className="text-xs text-gray-500">
-                                            Компактная проверка строк перед записью в БД.
+                                            Цена продажи редактируется прямо в строке. При сохранении старая приёмка пересчитывается по разнице остатков.
                                         </p>
                                     </div>
 
-                                    <button
-                                        type="button"
-                                        onClick={handleCommit}
-                                        disabled={isCommitLoading}
-                                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-green-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                        {isCommitLoading && (
-                                            <span className="h-4 w-4 rounded-full border-2 border-white/40 border-t-white animate-spin" />
-                                        )}
-                                        {isCommitLoading ? 'Загрузка...' : 'Применить импорт'}
-                                    </button>
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={addManualRow}
+                                            className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100"
+                                        >
+                                            Добавить строку
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={applyMarkupToAll}
+                                            className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-700 transition-colors hover:bg-blue-100"
+                                        >
+                                            Продажа = закупка +30%
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={handleCommit}
+                                            disabled={isCommitLoading}
+                                            className="inline-flex items-center justify-center gap-2 rounded-lg bg-green-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                            {isCommitLoading && (
+                                                <span className="h-4 w-4 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                                            )}
+                                            {isCommitLoading
+                                                ? 'Сохранение...'
+                                                : isEditMode
+                                                    ? 'Сохранить изменения'
+                                                    : 'Применить импорт'}
+                                        </button>
+                                    </div>
                                 </div>
 
                                 <div className="max-h-[62vh] overflow-auto">
-                                    <table className="w-full min-w-[1180px] text-xs">
+                                    <table className="w-full min-w-[1320px] text-xs">
                                         <thead className="sticky top-0 z-10 bg-gray-100 text-gray-600 shadow-sm">
                                         <tr>
                                             <th className="w-12 p-2 text-left">№</th>
                                             <th className="w-24 p-2 text-left">Статус</th>
                                             <th className="w-36 p-2 text-left">Действие</th>
-                                            <th className="w-64 p-2 text-left">Товар из БД</th>
+                                            <th className="w-66 p-2 text-left">Товар из БД</th>
                                             <th className="w-72 p-2 text-left">Название</th>
                                             <th className="w-36 p-2 text-left">Категория</th>
                                             <th className="w-36 p-2 text-left">Штрихкод</th>
-                                            <th className="w-20 p-2 text-left">Зак.</th>
-                                            <th className="w-20 p-2 text-left">Прод.</th>
+                                            <th className="w-24 p-2 text-left">Закупка</th>
+                                            <th className="w-32 p-2 text-left">Продажа</th>
                                             <th className="w-20 p-2 text-left">Кол.</th>
                                             <th className="w-20 p-2 text-left">Ед.</th>
                                             <th className="w-20 p-2 text-left">Мин.</th>
+                                            <th className="w-20 p-2 text-left"></th>
                                         </tr>
                                         </thead>
 
@@ -520,7 +776,7 @@ export default function Page() {
                                                     </select>
 
                                                     {row.matchedProductName && (
-                                                        <div className="mt-1 max-w-[250px] truncate text-[11px] text-gray-400">
+                                                        <div className="mt-1 max-w-[270px] truncate text-[11px] text-gray-400">
                                                             {row.matchedProductName}
                                                         </div>
                                                     )}
@@ -564,12 +820,23 @@ export default function Page() {
                                                 </td>
 
                                                 <td className="p-2">
-                                                    <input
-                                                        type="number"
-                                                        value={row.sellingPrice}
-                                                        onChange={(e) => updateRow(row.rowId, 'sellingPrice', e.target.value)}
-                                                        className={inputClass}
-                                                    />
+                                                    <div className="flex gap-1">
+                                                        <input
+                                                            type="number"
+                                                            value={row.sellingPrice}
+                                                            onChange={(e) => updateRow(row.rowId, 'sellingPrice', e.target.value)}
+                                                            className={inputClass}
+                                                        />
+
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => updateRow(row.rowId, 'sellingPrice', calcSellingPrice(row.purchasePrice))}
+                                                            className="h-8 shrink-0 rounded-md border border-blue-200 bg-blue-50 px-2 text-[11px] text-blue-700 hover:bg-blue-100"
+                                                            title="Рассчитать продажу: закупка +30%"
+                                                        >
+                                                            +30%
+                                                        </button>
+                                                    </div>
                                                 </td>
 
                                                 <td className="p-2">
@@ -600,6 +867,16 @@ export default function Page() {
                                                         className={inputClass}
                                                     />
                                                 </td>
+
+                                                <td className="p-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => deleteRow(row.rowId)}
+                                                        className="rounded-md bg-red-50 px-2 py-1 text-[11px] text-red-700 hover:bg-red-100"
+                                                    >
+                                                        Удалить
+                                                    </button>
+                                                </td>
                                             </tr>
                                         ))}
                                         </tbody>
@@ -615,11 +892,11 @@ export default function Page() {
                         <div className="w-full max-w-xl overflow-hidden rounded-2xl bg-white shadow-2xl">
                             <div className="border-b border-green-100 bg-green-50 px-6 py-5">
                                 <h2 className="text-xl font-bold text-green-800">
-                                    Приёмка применена
+                                    {isEditMode ? 'Приёмка обновлена' : 'Приёмка применена'}
                                 </h2>
 
                                 <p className="mt-1 text-sm text-green-700">
-                                    Номер приёмки: <span className="font-bold">{commitResult.acceptanceNumber}</span>
+                                    Номер приёмки: <span className="font-bold">{commitResult.acceptanceNumber || commitResult.acceptanceId}</span>
                                 </p>
                             </div>
 
@@ -674,9 +951,7 @@ export default function Page() {
                                     type="button"
                                     onClick={() => {
                                         setIsResultModalOpen(false)
-                                        setCommitResult(null)
-                                        setPreviewRows([])
-                                        setFile(null)
+                                        resetForm()
                                     }}
                                     className="rounded-lg bg-blue-600 px-5 py-2 text-white transition-colors hover:bg-blue-700"
                                 >

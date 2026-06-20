@@ -1,158 +1,181 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
-import {
-    generateBarcode,
-    parseNumber,
-    type ImportAction,
-    type ProductUnit,
-} from '../_utils'
 
 export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-type CommitRow = {
-    rowId: string
-    rowNumber: number
-    status?: string
-    action: ImportAction
+type ProductUnit = 'piece' | 'weight'
+type ImportAction = 'update' | 'create' | 'skip'
+type ImportStatus = 'matched' | 'review' | 'new' | 'error'
+
+type IncomingRow = {
+    rowId?: string
+    rowNumber?: number
+    status?: ImportStatus
+    action?: ImportAction
     matchType?: string
-    matchScore?: number
-    matchedProductId: number | null
+    matchScore?: number | string
+    matchedProductId?: number | string | null
     matchedProductName?: string
     matchedProductBarcode?: string
+    productId?: number | string | null
+    name?: string
+    category?: string
+    barcode?: string
+    purchasePrice?: number | string
+    sellingPrice?: number | string
+    unit?: ProductUnit
+    stock?: number | string
+    minStock?: number | string
+    image?: string
+    error?: string | null
+}
 
+type ProductDbRow = {
+    id: number
     name: string
     category: string
     barcode: string
-    purchasePrice: string
-    sellingPrice: string
+    purchase_price: string
+    selling_price: string
     unit: ProductUnit
     stock: string
-    minStock: string
+    min_stock: string
     image: string
 }
 
-async function generateUniqueBarcode(client: any): Promise<string> {
-    for (let i = 0; i < 20; i++) {
-        const barcode = generateBarcode()
-
-        const result = await client.query(
-            `
-            SELECT id
-            FROM products
-            WHERE barcode = $1
-            LIMIT 1
-            `,
-            [barcode]
-        )
-
-        if (result.rows.length === 0) {
-            return barcode
-        }
-    }
-
-    throw new Error('Не удалось сгенерировать уникальный штрихкод')
+function normalizeText(value: unknown) {
+    return String(value ?? '').trim()
 }
 
-function validateCommitRow(row: CommitRow): string | null {
-    if (row.action === 'skip') {
-        return null
-    }
-
-    if (!row.name.trim()) {
-        return `Строка ${row.rowNumber}: не указано название`
-    }
-
-    if (!row.category.trim()) {
-        return `Строка ${row.rowNumber}: не указана категория`
-    }
-
-    if (parseNumber(row.purchasePrice) <= 0) {
-        return `Строка ${row.rowNumber}: некорректная цена закупки`
-    }
-
-    if (parseNumber(row.sellingPrice) <= 0) {
-        return `Строка ${row.rowNumber}: некорректная цена продажи`
-    }
-
-    if (parseNumber(row.stock) <= 0) {
-        return `Строка ${row.rowNumber}: некорректное количество`
-    }
-
-    if (row.action === 'update' && !row.matchedProductId) {
-        return `Строка ${row.rowNumber}: не выбран товар из базы для обновления`
-    }
-
-    return null
+function toNumber(value: unknown, fallback = 0) {
+    if (value === null || value === undefined || value === '') return fallback
+    const normalized = String(value).replace(',', '.').replace(/\s/g, '')
+    const parsed = Number(normalized)
+    return Number.isFinite(parsed) ? parsed : fallback
 }
 
-function createAcceptanceNumber(id: number): string {
-    const datePart = new Date()
-        .toISOString()
-        .slice(0, 10)
-        .replaceAll('-', '')
-
-    return `PR-${datePart}-${String(id).padStart(6, '0')}`
+function toNullableId(value: unknown) {
+    const parsed = Number(value)
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null
 }
 
-async function insertAcceptanceItem(
-    client: any,
-    params: {
-        acceptanceId: number
-        row: CommitRow
-        result: string
-        productId: number | null
-        productName: string
-        barcode: string
-        error: string | null
+function normalizeUnit(value: unknown): ProductUnit {
+    return value === 'weight' ? 'weight' : 'piece'
+}
+
+function normalizeAction(value: unknown): ImportAction {
+    if (value === 'create' || value === 'skip') return value
+    return 'update'
+}
+
+function normalizeStatus(value: unknown): ImportStatus {
+    if (value === 'review' || value === 'new' || value === 'error') return value
+    return 'matched'
+}
+
+function makeAcceptanceNumber(id: number) {
+    const date = new Date()
+    const y = date.getFullYear()
+    const m = String(date.getMonth() + 1).padStart(2, '0')
+    const d = String(date.getDate()).padStart(2, '0')
+    return `ACC-${y}${m}${d}-${String(id).padStart(6, '0')}`
+}
+
+function makeAutoBarcode(id: number, rowNumber: number) {
+    return `AUTO-${id}-${rowNumber}-${Date.now()}`
+}
+
+function productSnapshot(row: ProductDbRow | null) {
+    if (!row) return null
+
+    return {
+        id: Number(row.id),
+        name: row.name,
+        category: row.category,
+        barcode: row.barcode,
+        purchasePrice: Number(row.purchase_price ?? 0),
+        sellingPrice: Number(row.selling_price ?? 0),
+        unit: row.unit,
+        stock: Number(row.stock ?? 0),
+        minStock: Number(row.min_stock ?? 0),
+        image: row.image ?? '',
     }
-) {
-    const purchasePrice = parseNumber(params.row.purchasePrice)
-    const sellingPrice = Math.ceil(parseNumber(params.row.sellingPrice))
-    const quantity = parseNumber(params.row.stock)
-    const minStock = parseNumber(params.row.minStock) > 0
-        ? parseNumber(params.row.minStock)
-        : 10
+}
+
+async function insertAcceptanceItem(client: any, params: {
+    acceptanceId: number
+    row: IncomingRow
+    rowNumber: number
+    action: ImportAction
+    status: ImportStatus
+    productId: number | null
+    matchedProductId: number | null
+    matchedProductName: string
+    matchedProductBarcode: string
+    productBefore: ProductDbRow | null
+    productAfter: ProductDbRow | null
+    appliedQuantity: number
+    createdProduct: boolean
+    error: string | null
+}) {
+    const { row } = params
 
     await client.query(
-        `
-        INSERT INTO product_acceptance_items (
+        `INSERT INTO product_acceptance_items (
             acceptance_id,
             row_number,
+            status,
             action,
-            result,
+            match_type,
+            match_score,
             product_id,
-            product_name,
-            imported_name,
+            matched_product_id,
+            matched_product_name,
+            matched_product_barcode,
+            product_before,
+            product_after,
+            name,
             category,
             barcode,
             purchase_price,
             selling_price,
-            quantity,
             unit,
+            quantity,
             min_stock,
-            match_type,
-            match_score,
+            image,
+            applied_quantity,
+            created_product,
             error
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-        `,
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18,
+            $19, $20, $21, $22, $23, $24
+        )`,
         [
             params.acceptanceId,
-            params.row.rowNumber,
-            params.row.action,
-            params.result,
+            params.rowNumber,
+            params.status,
+            params.action,
+            normalizeText(row.matchType),
+            toNumber(row.matchScore, 0),
             params.productId,
-            params.productName || null,
-            params.row.name.trim(),
-            params.row.category.trim(),
-            params.barcode || params.row.barcode || null,
-            purchasePrice,
-            sellingPrice,
-            quantity,
-            params.row.unit,
-            minStock,
-            params.row.matchType || null,
-            params.row.matchScore || 0,
+            params.matchedProductId,
+            params.matchedProductName,
+            params.matchedProductBarcode,
+            JSON.stringify(productSnapshot(params.productBefore)),
+            JSON.stringify(productSnapshot(params.productAfter)),
+            normalizeText(row.name),
+            normalizeText(row.category),
+            normalizeText(row.barcode),
+            toNumber(row.purchasePrice, 0),
+            toNumber(row.sellingPrice, 0),
+            normalizeUnit(row.unit),
+            toNumber(row.stock, 0),
+            toNumber(row.minStock, 0),
+            normalizeText(row.image),
+            params.appliedQuantity,
+            params.createdProduct,
             params.error,
         ]
     )
@@ -163,180 +186,156 @@ export async function POST(request: NextRequest) {
 
     try {
         const body = await request.json()
-        const rows = Array.isArray(body.rows) ? body.rows as CommitRow[] : []
-        const sourceFileName = String(body.sourceFileName || '').trim()
+        const rows: IncomingRow[] = Array.isArray(body.rows) ? body.rows : []
+        const sourceFileName = normalizeText(body.sourceFileName)
+        const supplier = normalizeText(body.supplier)
+        const invoiceNumber = normalizeText(body.invoiceNumber)
+        const comment = normalizeText(body.comment)
 
         if (rows.length === 0) {
-            return NextResponse.json(
-                { message: 'Нет строк для импорта' },
-                { status: 400 }
-            )
+            return NextResponse.json({ message: 'Нет строк для применения' }, { status: 400 })
         }
+
+        await client.query('BEGIN')
+
+        const headerResult = await client.query(
+            `INSERT INTO product_acceptances (
+                number,
+                source_file_name,
+                supplier,
+                invoice_number,
+                comment,
+                status
+            ) VALUES ($5, $1, $2, $3, $4, 'completed')
+            RETURNING id`,
+            [sourceFileName || null, supplier || null, invoiceNumber || null, comment || null, `TEMP-${Date.now()}-${Math.random()}`]
+        )
+
+        const acceptanceId = Number(headerResult.rows[0].id)
+        const acceptanceNumber = makeAcceptanceNumber(acceptanceId)
+
+        await client.query(
+            'UPDATE product_acceptances SET number = $1 WHERE id = $2',
+            [acceptanceNumber, acceptanceId]
+        )
 
         let created = 0
         let updated = 0
         let skipped = 0
         const errors: string[] = []
 
-        await client.query('BEGIN')
+        for (let index = 0; index < rows.length; index++) {
+            const row = rows[index]
+            const rowNumber = Number(row.rowNumber || index + 1)
+            const action = normalizeAction(row.action)
+            const status = normalizeStatus(row.status)
+            const quantity = toNumber(row.stock, 0)
+            const purchasePrice = toNumber(row.purchasePrice, 0)
+            const sellingPrice = toNumber(row.sellingPrice, 0)
+            const unit = normalizeUnit(row.unit)
 
-        const acceptanceResult = await client.query<{ id: number }>(
-            `
-            INSERT INTO product_acceptances (
-                source_file_name,
-                total_rows,
-                status
-            )
-            VALUES ($1, $2, $3)
-            RETURNING id
-            `,
-            [
-                sourceFileName || null,
-                rows.length,
-                'processing',
-            ]
-        )
-
-        const acceptanceId = acceptanceResult.rows[0].id
-        const acceptanceNumber = createAcceptanceNumber(acceptanceId)
-
-        await client.query(
-            `
-            UPDATE product_acceptances
-            SET number = $1
-            WHERE id = $2
-            `,
-            [acceptanceNumber, acceptanceId]
-        )
-
-        for (const row of rows) {
-            const validationError = validateCommitRow(row)
-
-            if (validationError) {
-                skipped += 1
-                errors.push(validationError)
-
-                await insertAcceptanceItem(client, {
-                    acceptanceId,
-                    row,
-                    result: 'error',
-                    productId: null,
-                    productName: '',
-                    barcode: row.barcode,
-                    error: validationError,
-                })
-
-                continue
-            }
-
-            if (row.action === 'skip') {
-                skipped += 1
-
-                await insertAcceptanceItem(client, {
-                    acceptanceId,
-                    row,
-                    result: 'skipped',
-                    productId: row.matchedProductId,
-                    productName: row.matchedProductName || '',
-                    barcode: row.barcode,
-                    error: null,
-                })
-
-                continue
-            }
-
-            const purchasePrice = parseNumber(row.purchasePrice)
-            const sellingPrice = Math.ceil(parseNumber(row.sellingPrice))
-            const stock = parseNumber(row.stock)
-            const minStock = parseNumber(row.minStock) > 0 ? parseNumber(row.minStock) : 10
-
-            if (row.action === 'update') {
-                const result = await client.query<{ id: number; name: string; barcode: string }>(
-                    `
-                    UPDATE products
-                    SET stock = stock + $1
-                    WHERE id = $2
-                    RETURNING id, name, barcode
-                    `,
-                    [
-                        stock,
-                        row.matchedProductId,
-                    ]
-                )
-
-                if (result.rows.length === 0) {
-                    const message = `Строка ${row.rowNumber}: товар из базы не найден`
-
-                    skipped += 1
-                    errors.push(message)
-
+            try {
+                if (action === 'skip') {
+                    skipped++
                     await insertAcceptanceItem(client, {
                         acceptanceId,
                         row,
-                        result: 'error',
-                        productId: row.matchedProductId,
-                        productName: row.matchedProductName || '',
-                        barcode: row.barcode,
-                        error: message,
+                        rowNumber,
+                        action,
+                        status,
+                        productId: null,
+                        matchedProductId: toNullableId(row.matchedProductId),
+                        matchedProductName: normalizeText(row.matchedProductName),
+                        matchedProductBarcode: normalizeText(row.matchedProductBarcode),
+                        productBefore: null,
+                        productAfter: null,
+                        appliedQuantity: 0,
+                        createdProduct: false,
+                        error: null,
                     })
-
                     continue
                 }
 
-                updated += 1
-
-                await insertAcceptanceItem(client, {
-                    acceptanceId,
-                    row,
-                    result: 'updated',
-                    productId: result.rows[0].id,
-                    productName: result.rows[0].name,
-                    barcode: result.rows[0].barcode,
-                    error: null,
-                })
-
-                continue
-            }
-
-            if (row.action === 'create') {
-                let finalBarcode = String(row.barcode || '').trim()
-
-                if (finalBarcode) {
-                    const existingByBarcode = await client.query(
-                        `
-                        SELECT id
-                        FROM products
-                        WHERE barcode = $1
-                        LIMIT 1
-                        `,
-                        [finalBarcode]
-                    )
-
-                    if (existingByBarcode.rows.length > 0) {
-                        const message = `Строка ${row.rowNumber}: товар со штрихкодом ${finalBarcode} уже существует`
-
-                        skipped += 1
-                        errors.push(message)
-
-                        await insertAcceptanceItem(client, {
-                            acceptanceId,
-                            row,
-                            result: 'error',
-                            productId: null,
-                            productName: '',
-                            barcode: finalBarcode,
-                            error: message,
-                        })
-
-                        continue
-                    }
-                } else {
-                    finalBarcode = await generateUniqueBarcode(client)
+                if (quantity <= 0) {
+                    throw new Error('Количество должно быть больше 0')
                 }
 
-                const createdResult = await client.query<{ id: number; name: string; barcode: string }>(
-                    `
-                    INSERT INTO products (
+                if (action === 'update') {
+                    const productId = toNullableId(row.matchedProductId) ?? toNullableId(row.productId)
+
+                    if (!productId) {
+                        throw new Error('Для обновления нужно выбрать товар из БД')
+                    }
+
+                    const beforeResult = await client.query(
+                        'SELECT * FROM products WHERE id = $1 FOR UPDATE',
+                        [productId]
+                    )
+
+                    if (beforeResult.rowCount === 0) {
+                        throw new Error(`Товар ID ${productId} не найден`)
+                    }
+
+                    const productBefore = beforeResult.rows[0]
+
+                    const afterResult = await client.query(
+                        `UPDATE products
+                         SET
+                            stock = COALESCE(stock, 0) + $1,
+                            purchase_price = $2,
+                            selling_price = $3,
+                            unit = $4,
+                            min_stock = $5,
+                            name = COALESCE(NULLIF($6, ''), name),
+                            category = COALESCE(NULLIF($7, ''), category),
+                            barcode = COALESCE(NULLIF($8, ''), barcode),
+                            image = COALESCE(NULLIF($9, ''), image)
+                         WHERE id = $10
+                         RETURNING *`,
+                        [
+                            quantity,
+                            purchasePrice,
+                            sellingPrice,
+                            unit,
+                            toNumber(row.minStock, 0),
+                            normalizeText(row.name),
+                            normalizeText(row.category),
+                            normalizeText(row.barcode),
+                            normalizeText(row.image),
+                            productId,
+                        ]
+                    )
+
+                    updated++
+                    await insertAcceptanceItem(client, {
+                        acceptanceId,
+                        row,
+                        rowNumber,
+                        action,
+                        status,
+                        productId,
+                        matchedProductId: productId,
+                        matchedProductName: normalizeText(row.matchedProductName) || productBefore.name,
+                        matchedProductBarcode: normalizeText(row.matchedProductBarcode) || productBefore.barcode,
+                        productBefore,
+                        productAfter: afterResult.rows[0],
+                        appliedQuantity: quantity,
+                        createdProduct: false,
+                        error: null,
+                    })
+                    continue
+                }
+
+                const name = normalizeText(row.name)
+
+                if (!name) {
+                    throw new Error('Для создания товара нужно указать название')
+                }
+
+                const barcode = normalizeText(row.barcode) || makeAutoBarcode(acceptanceId, rowNumber)
+
+                const afterResult = await client.query(
+                    `INSERT INTO products (
                         name,
                         category,
                         barcode,
@@ -346,36 +345,59 @@ export async function POST(request: NextRequest) {
                         stock,
                         min_stock,
                         image
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    RETURNING id, name, barcode
-                    `,
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    RETURNING *`,
                     [
-                        row.name.trim(),
-                        row.category.trim(),
-                        finalBarcode,
+                        name,
+                        normalizeText(row.category),
+                        barcode,
                         purchasePrice,
                         sellingPrice,
-                        row.unit,
-                        stock,
-                        minStock,
-                        row.image || '/icons/products.jpg',
+                        unit,
+                        quantity,
+                        toNumber(row.minStock, 0),
+                        normalizeText(row.image),
                     ]
                 )
 
-                created += 1
+                const createdProduct = afterResult.rows[0]
+                created++
 
                 await insertAcceptanceItem(client, {
                     acceptanceId,
-                    row: {
-                        ...row,
-                        barcode: finalBarcode,
-                    },
-                    result: 'created',
-                    productId: createdResult.rows[0].id,
-                    productName: createdResult.rows[0].name,
-                    barcode: createdResult.rows[0].barcode,
+                    row: { ...row, barcode },
+                    rowNumber,
+                    action,
+                    status,
+                    productId: Number(createdProduct.id),
+                    matchedProductId: null,
+                    matchedProductName: '',
+                    matchedProductBarcode: '',
+                    productBefore: null,
+                    productAfter: createdProduct,
+                    appliedQuantity: quantity,
+                    createdProduct: true,
                     error: null,
+                })
+            } catch (error) {
+                const message = `Строка ${rowNumber}: ${error instanceof Error ? error.message : 'ошибка обработки'}`
+                errors.push(message)
+
+                await insertAcceptanceItem(client, {
+                    acceptanceId,
+                    row,
+                    rowNumber,
+                    action,
+                    status: 'error',
+                    productId: null,
+                    matchedProductId: toNullableId(row.matchedProductId),
+                    matchedProductName: normalizeText(row.matchedProductName),
+                    matchedProductBarcode: normalizeText(row.matchedProductBarcode),
+                    productBefore: null,
+                    productAfter: null,
+                    appliedQuantity: 0,
+                    createdProduct: false,
+                    error: message,
                 })
             }
         }
@@ -383,24 +405,18 @@ export async function POST(request: NextRequest) {
         const finalStatus = errors.length > 0 ? 'completed_with_errors' : 'completed'
 
         await client.query(
-            `
-            UPDATE product_acceptances
-            SET
-                created_count = $1,
-                updated_count = $2,
-                skipped_count = $3,
-                errors = $4::jsonb,
-                status = $5
-            WHERE id = $6
-            `,
-            [
-                created,
-                updated,
-                skipped,
-                JSON.stringify(errors),
-                finalStatus,
-                acceptanceId,
-            ]
+            `UPDATE product_acceptances
+             SET
+                total_rows = $1,
+                created_count = $2,
+                updated_count = $3,
+                skipped_count = $4,
+                error_count = $5,
+                errors = $6::jsonb,
+                status = $7,
+                updated_at = NOW()
+             WHERE id = $8`,
+            [rows.length, created, updated, skipped, errors.length, JSON.stringify(errors), finalStatus, acceptanceId]
         )
 
         await client.query('COMMIT')
@@ -414,15 +430,12 @@ export async function POST(request: NextRequest) {
             skipped,
             errors,
         })
-    } catch (error: any) {
+    } catch (error) {
         await client.query('ROLLBACK')
-
         console.error('POST /api/products/import/commit error:', error)
 
         return NextResponse.json(
-            {
-                message: error?.message || 'Ошибка применения импорта',
-            },
+            { message: error instanceof Error ? error.message : 'Ошибка применения импорта' },
             { status: 500 }
         )
     } finally {
