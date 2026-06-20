@@ -1153,10 +1153,9 @@ export default function PosPage() {
 
             JsBarcode(svg, barcode, {
                 format: 'CODE128',
-                width: 1.2,
-                height: 34,
-                displayValue: true,
-                fontSize: 9,
+                width: 0.85,
+                height: 22,
+                displayValue: false,
                 margin: 0,
             });
 
@@ -1168,6 +1167,8 @@ export default function PosPage() {
     };
 
     const buildPriceLabelsHtml = (products: Product[]): string => {
+        const LABELS_PER_SHEET = 21;
+
         const chunkProducts = (items: Product[], size: number): Product[][] => {
             const chunks: Product[][] = [];
 
@@ -1178,24 +1179,32 @@ export default function PosPage() {
             return chunks;
         };
 
-        const sheets = chunkProducts(products, 28).map(sheetProducts => {
+        const formatPriceForLabel = (value: number): string => {
+            const rounded = Math.ceil(value);
+
+            return new Intl.NumberFormat('ru-RU', {
+                maximumFractionDigits: 0,
+            }).format(rounded);
+        };
+
+        const sheets = chunkProducts(products, LABELS_PER_SHEET).map(sheetProducts => {
             const labels = sheetProducts.map(product => {
                 const name = escapeHtml(product.name);
-                const price = Math.ceil(getSellingPrice(product));
-                const unitLabel = escapeHtml(getUnitPriceLabel(product));
+                const price = formatPriceForLabel(getSellingPrice(product));
+                const unitLabel = escapeHtml(product.unit === 'weight' ? 'за кг' : 'за шт');
                 const barcodeSvg = renderBarcodeSvgFromDbValue(product.barcode || '');
 
                 return `
                     <section class="label">
                         <div class="label-name">${name}</div>
 
-                        <div class="label-price">
-                            ${price} ₽
-                            <span>${unitLabel}</span>
+                        <div class="label-price-row">
+                            <div class="label-price">${price} ₽</div>
+                            <div class="label-unit">${unitLabel}</div>
                         </div>
 
                         <div class="label-barcode">
-                            ${barcodeSvg ? barcodeSvg : '<div class="no-barcode">Штрихкод не задан в БД</div>'}
+                            ${barcodeSvg ? barcodeSvg : '<div class="no-barcode">ШК нет</div>'}
                         </div>
                     </section>
                 `;
@@ -1213,7 +1222,7 @@ export default function PosPage() {
             <html lang="ru">
                 <head>
                     <meta charset="utf-8" />
-                    <title>Печать ценников</title>
+                    <title>Печать ценников 58×40 мм</title>
 
                     <style>
                         @page {
@@ -1223,6 +1232,8 @@ export default function PosPage() {
 
                         * {
                             box-sizing: border-box;
+                            -webkit-print-color-adjust: exact;
+                            print-color-adjust: exact;
                         }
 
                         html,
@@ -1230,15 +1241,18 @@ export default function PosPage() {
                             margin: 0;
                             padding: 0;
                             background: #ffffff;
+                            color: #000000;
                             font-family: Arial, sans-serif;
                         }
 
                         .sheet {
-                            width: 200mm;
-                            height: 280mm;
+                            width: 174mm;
+                            min-height: 280mm;
+                            margin: 0 auto;
                             display: grid;
-                            grid-template-columns: repeat(4, 50mm);
-                            grid-template-rows: repeat(7, 40mm);
+                            grid-template-columns: repeat(3, 58mm);
+                            grid-auto-rows: 40mm;
+                            align-content: start;
                             page-break-after: always;
                             break-after: page;
                         }
@@ -1249,64 +1263,76 @@ export default function PosPage() {
                         }
 
                         .label {
-                            width: 50mm;
+                            width: 58mm;
                             height: 40mm;
-                            padding: 2.5mm;
+                            padding: 2mm 2.4mm 1.4mm;
                             display: flex;
                             flex-direction: column;
                             justify-content: space-between;
                             overflow: hidden;
-                            border: 0.45mm solid #111827;
+                            border: 0.35mm solid #111111;
                             background: #ffffff;
                             break-inside: avoid;
                             page-break-inside: avoid;
                         }
 
                         .label-name {
-                            height: 9mm;
+                            min-height: 11.5mm;
+                            max-height: 12.8mm;
                             overflow: hidden;
-                            font-size: 10px;
-                            line-height: 1.15;
-                            font-weight: 700;
-                            text-align: center;
-                            color: #111827;
-                        }
-
-                        .label-price {
-                            text-align: center;
-                            font-size: 24px;
-                            line-height: 1;
+                            display: -webkit-box;
+                            -webkit-box-orient: vertical;
+                            -webkit-line-clamp: 2;
+                            font-size: 14px;
+                            line-height: 1.08;
                             font-weight: 900;
+                            letter-spacing: -0.15px;
+                            text-align: center;
                             color: #000000;
                         }
 
-                        .label-price span {
-                            display: block;
-                            margin-top: 1.5mm;
-                            font-size: 10px;
+                        .label-price-row {
+                            text-align: center;
+                            color: #000000;
+                        }
+
+                        .label-price {
+                            font-size: 31px;
+                            line-height: 0.95;
+                            font-weight: 900;
+                            letter-spacing: -0.8px;
+                            white-space: nowrap;
+                        }
+
+                        .label-unit {
+                            margin-top: 1mm;
+                            font-size: 12px;
                             line-height: 1;
-                            font-weight: 600;
+                            font-weight: 800;
                         }
 
                         .label-barcode {
                             width: 100%;
-                            height: 11mm;
+                            height: 6.8mm;
                             display: flex;
                             align-items: flex-end;
                             justify-content: center;
+                            overflow: hidden;
                         }
 
                         .label-barcode svg {
-                            width: 42mm;
-                            height: 11mm;
+                            width: 34mm;
+                            height: 6.5mm;
+                            display: block;
                         }
 
                         .no-barcode {
-                            width: 100%;
-                            padding: 1.5mm;
-                            border: 0.35mm dashed #111827;
-                            font-size: 9px;
-                            color: #374151;
+                            width: 18mm;
+                            padding: 0.8mm 0;
+                            border: 0.25mm dashed #111111;
+                            font-size: 7px;
+                            line-height: 1;
+                            color: #333333;
                             text-align: center;
                         }
 
@@ -1574,7 +1600,7 @@ export default function PosPage() {
                                 className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
                             >
                                 <AiOutlinePrinter size={20} />
-                                {isRefreshingLabels ? 'Обновляю цены...' : 'Печать ценников 40×50'}
+                                {isRefreshingLabels ? 'Обновляю цены...' : 'Печать ценников 58×40'}
                             </button>
 
                             <div className="text-xs text-gray-500">
@@ -1977,11 +2003,11 @@ export default function PosPage() {
                                 <div className="flex items-start justify-between gap-4">
                                     <div>
                                         <h2 className="text-2xl font-bold text-gray-800">
-                                            Печать ценников 40×50 мм
+                                            Печать ценников 58×40 мм
                                         </h2>
 
                                         <p className="text-sm text-gray-500 mt-1">
-                                            Выберите товары, найдите обновлённую цену или распечатайте все ценники сразу.
+                                            Выберите товары, найдите обновлённую цену или распечатайте ценники 58×40 мм.
                                         </p>
                                     </div>
 
