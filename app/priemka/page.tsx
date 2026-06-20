@@ -136,7 +136,7 @@ function toNumber(value: string) {
 }
 
 function calcSellingPrice(purchasePrice: string) {
-    return (Math.round(toNumber(purchasePrice) * 1.3 * 100) / 100).toFixed(2)
+    return Math.round(toNumber(purchasePrice) * 1.3)
 }
 
 function createEmptyRow(rowNumber: number): PreviewRow {
