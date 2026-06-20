@@ -61,8 +61,9 @@ function money(value: number) {
     return new Intl.NumberFormat('ru-RU', {
         style: 'currency',
         currency: 'RUB',
-        maximumFractionDigits: 2,
-    }).format(value || 0)
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+    }).format(Math.round(value || 0))
 }
 
 function escapeHtml(value: string) {
@@ -88,9 +89,18 @@ function calcSellingPrice(purchasePrice: string, category: string, name?: string
     }
 
     const markup = isBeerProduct(category, name) ? 1.35 : 1.3
-    const result = Math.round(price * markup * 100) / 100
 
-    return String(result)
+    return String(Math.round(price * markup))
+}
+
+function normalizeIntegerPrice(value: string | number) {
+    const price = parseNumber(value)
+
+    if (!Number.isFinite(price) || price <= 0) {
+        return ''
+    }
+
+    return String(Math.round(price))
 }
 
 function normalizeProductsResponse(data: unknown): Product[] {
@@ -301,7 +311,7 @@ export default function ProductMovementForm({ mode }: Props) {
             ? String(overrides.purchasePrice ?? acceptancePurchasePrice ?? product.purchasePrice ?? '')
             : String(product.purchasePrice || 0)
 
-        const sellingPrice = isAcceptance
+        const rawSellingPrice = isAcceptance
             ? String(
                 overrides.sellingPrice ??
                 acceptanceSellingPrice ??
@@ -309,6 +319,10 @@ export default function ProductMovementForm({ mode }: Props) {
                 ''
             )
             : String(product.sellingPrice || 0)
+
+        const sellingPrice = isAcceptance
+            ? normalizeIntegerPrice(rawSellingPrice)
+            : rawSellingPrice
 
         if (isAcceptance) {
             const purchasePriceNumber = parseNumber(purchasePrice)
@@ -418,7 +432,7 @@ export default function ProductMovementForm({ mode }: Props) {
                 : String(product.purchasePrice || 0)
 
             const sellingPrice = isAcceptance
-                ? calcSellingPrice(purchasePrice, category, product.name)
+                ? normalizeIntegerPrice(acceptanceSellingPrice || calcSellingPrice(purchasePrice, category, product.name))
                 : String(product.sellingPrice || 0)
 
             addProductToItems(product, {
@@ -477,6 +491,20 @@ export default function ProductMovementForm({ mode }: Props) {
                     : item
             )
         )
+    }
+
+    const updateItemSellingPrice = (productId: number, sellingPrice: string) => {
+        setItems(prev =>
+            prev.map(item =>
+                item.product.id === productId
+                    ? { ...item, sellingPrice }
+                    : item
+            )
+        )
+    }
+
+    const normalizeItemSellingPrice = (productId: number, sellingPrice: string) => {
+        updateItemSellingPrice(productId, normalizeIntegerPrice(sellingPrice))
     }
 
     const removeItem = (productId: number) => {
@@ -965,10 +993,13 @@ export default function ProductMovementForm({ mode }: Props) {
                                 <td className="p-4">
                                     <input
                                         value={acceptanceSellingPrice}
-                                        readOnly
-                                        type="number"
-                                        placeholder="Авто"
-                                        className={`${tableInputClass} bg-gray-100`}
+                                        onChange={(e) => setAcceptanceSellingPrice(e.target.value)}
+                                        onBlur={(e) => setAcceptanceSellingPrice(normalizeIntegerPrice(e.target.value))}
+                                        onKeyDown={handleDraftKeyDown}
+                                        type="text"
+                                        inputMode="numeric"
+                                        placeholder="Продажа"
+                                        className={tableInputClass}
                                     />
 
                                     <div className="mt-2 text-sm text-gray-500">
@@ -1054,9 +1085,11 @@ export default function ProductMovementForm({ mode }: Props) {
                                         <td className="p-4">
                                             <input
                                                 value={item.sellingPrice}
-                                                readOnly
-                                                type="number"
-                                                className={`${tableInputClass} bg-gray-100`}
+                                                onChange={(e) => updateItemSellingPrice(item.product.id, e.target.value)}
+                                                onBlur={(e) => normalizeItemSellingPrice(item.product.id, e.target.value)}
+                                                type="text"
+                                                inputMode="numeric"
+                                                className={tableInputClass}
                                             />
                                         </td>
                                     </>
