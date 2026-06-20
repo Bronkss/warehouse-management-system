@@ -3,7 +3,7 @@
 import * as React from 'react'
 import System from '@/app/system/page'
 
-type PaymentMethod = 'card' | 'cash'
+type PaymentMethod = 'card' | 'cash' | 'transfer'
 
 type ReceiptItem = {
     productId: string | number
@@ -109,6 +109,18 @@ export default function Page() {
 
     const totalRevenue = filteredReceipts.reduce((sum, receipt) => sum + receipt.total, 0)
 
+    const cardRevenue = filteredReceipts
+        .filter(receipt => receipt.paymentMethod === 'card')
+        .reduce((sum, receipt) => sum + receipt.total, 0)
+
+    const cashRevenue = filteredReceipts
+        .filter(receipt => receipt.paymentMethod === 'cash')
+        .reduce((sum, receipt) => sum + receipt.total, 0)
+
+    const transferRevenue = filteredReceipts
+        .filter(receipt => receipt.paymentMethod === 'transfer')
+        .reduce((sum, receipt) => sum + receipt.total, 0)
+
     const totalItems = filteredReceipts.reduce((sum, receipt) => {
         return sum + receipt.items.reduce((itemSum, item) => itemSum + item.quantity, 0)
     }, 0)
@@ -145,7 +157,7 @@ export default function Page() {
                     </div>
                 )}
 
-                <div className="sales-stats grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div className="sales-stats grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
                     <div className="sales-stat-card rounded-2xl bg-white shadow p-5">
                         <div className="text-sm text-gray-500">
                             Чеков
@@ -175,6 +187,36 @@ export default function Page() {
                             {formatCurrency(totalRevenue)}
                         </div>
                     </div>
+
+                    <div className="sales-stat-card rounded-2xl bg-white shadow p-5">
+                        <div className="text-sm text-gray-500">
+                            Картой
+                        </div>
+
+                        <div className="sales-stat-value text-3xl font-bold text-indigo-700">
+                            {formatCurrency(cardRevenue)}
+                        </div>
+                    </div>
+
+                    <div className="sales-stat-card rounded-2xl bg-white shadow p-5">
+                        <div className="text-sm text-gray-500">
+                            Наличными
+                        </div>
+
+                        <div className="sales-stat-value text-3xl font-bold text-emerald-700">
+                            {formatCurrency(cashRevenue)}
+                        </div>
+                    </div>
+
+                    <div className="sales-stat-card rounded-2xl bg-white shadow p-5">
+                        <div className="text-sm text-gray-500">
+                            Переводами
+                        </div>
+
+                        <div className="sales-stat-value text-3xl font-bold text-blue-700">
+                            {formatCurrency(transferRevenue)}
+                        </div>
+                    </div>
                 </div>
 
                 <div className="sales-filters rounded-2xl bg-white shadow p-5 mb-6">
@@ -195,6 +237,7 @@ export default function Page() {
                             <option value="all">Все оплаты</option>
                             <option value="card">Карта</option>
                             <option value="cash">Наличные</option>
+                            <option value="transfer">Перевод</option>
                         </select>
 
                         <input

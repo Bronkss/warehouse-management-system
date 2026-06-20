@@ -1818,14 +1818,128 @@ export default function PosPage() {
                         key="payment-cash-modal"
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
                     >
-                        {/* весь текущий код модалки наличных оставь без изменений */}
                         <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.96 }}
                             className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                         >
-                            {/* содержимое paymentModal === 'cash' */}
+                            <h2 className="mb-4 text-2xl font-bold text-gray-800">
+                                Оплата наличными
+                            </h2>
+
+                            <div className="mb-5 rounded-xl bg-emerald-50 p-4">
+                                <div className="mb-1 text-sm text-emerald-700">
+                                    Сумма к оплате:
+                                </div>
+
+                                <div className="text-4xl font-bold text-emerald-700">
+                                    {formatCurrency(total)}
+                                </div>
+                            </div>
+
+                            <div className="mb-4">
+                                <label className="mb-2 block text-sm font-medium text-gray-700">
+                                    Получено от клиента
+                                </label>
+
+                                <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    inputMode="decimal"
+                                    autoFocus
+                                    value={cashReceived}
+                                    onChange={(e) => {
+                                        setCashReceived(e.target.value);
+                                        setError(null);
+                                    }}
+                                    placeholder="Введите сумму"
+                                    className="w-full rounded-xl border border-gray-300 px-4 py-3 text-2xl font-bold outline-none focus:border-transparent focus:ring-2 focus:ring-emerald-500"
+                                />
+                            </div>
+
+                            <div className="mb-5 flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    disabled={isPaying}
+                                    onClick={() => {
+                                        setCashReceived(String(total));
+                                        setError(null);
+                                    }}
+                                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    Без сдачи
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={isPaying}
+                                    onClick={() => {
+                                        setCashReceived(String(Math.ceil(total / 100) * 100));
+                                        setError(null);
+                                    }}
+                                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    Округлить до 100 ₽
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={isPaying}
+                                    onClick={() => {
+                                        setCashReceived('');
+                                        setError(null);
+                                    }}
+                                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    Очистить
+                                </button>
+                            </div>
+
+                            <div className={`mb-6 rounded-xl p-4 ${
+                                cashReceived && change >= 0
+                                    ? 'bg-blue-50 text-blue-700'
+                                    : 'bg-gray-50 text-gray-500'
+                            }`}>
+                                <div className="text-sm">
+                                    Сдача:
+                                </div>
+
+                                <div className="text-3xl font-bold">
+                                    {cashReceived ? formatCurrency(Math.max(0, change)) : formatCurrency(0)}
+                                </div>
+
+                                {cashReceived && change < 0 && (
+                                    <div className="mt-2 text-sm text-red-600">
+                                        Полученная сумма меньше суммы чека
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    disabled={isPaying}
+                                    onClick={() => {
+                                        setPaymentModal(null);
+                                        setCashReceived('');
+                                        setError(null);
+                                    }}
+                                    className="rounded-lg border border-gray-300 px-5 py-2 hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    Отмена
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={isPaying || cashReceivedNumber < total}
+                                    onClick={() => completePayment('cash', false)}
+                                    className="rounded-lg bg-emerald-600 px-5 py-2 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                >
+                                    {isPaying ? 'Провожу оплату...' : 'Оплата получена'}
+                                </button>
+                            </div>
                         </motion.div>
                     </div>
                 )}
