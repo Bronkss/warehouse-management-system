@@ -14,6 +14,7 @@ import {
     parseBarcodeList,
     serializeBarcodeList,
 } from '../utils/barcodes'
+import {ALL_CATEGORIES} from "@/app/products/page";
 
 interface ProductFormData {
     name: string
@@ -56,27 +57,12 @@ const ALLOWED_IMAGE_TYPES = new Set([
     'image/webp',
 ])
 
-const CATEGORIES = [
+export const CATEGORIES = [
     { value: '', label: 'Выберите категорию', disabled: true },
-    { value: 'Бакалея', label: 'Бакалея' },
-    { value: 'Алкоголь', label: 'Алкоголь' },
-    { value: 'Сигареты', label: 'Сигареты' },
-    { value: 'Молочные продукты', label: 'Молочные продукты' },
-    { value: 'Хлебобулочные изделия', label: 'Хлебобулочные изделия' },
-    { value: 'Мясо и птица', label: 'Мясо и птица' },
-    { value: 'Рыба и морепродукты', label: 'Рыба и морепродукты' },
-    { value: 'Овощи и фрукты', label: 'Овощи и фрукты' },
-    { value: 'Напитки', label: 'Напитки' },
-    { value: 'Кондитерские изделия', label: 'Кондитерские изделия' },
-    { value: 'Замороженные продукты', label: 'Замороженные продукты' },
-    { value: 'Консервы', label: 'Консервы' },
-    { value: 'Соусы и приправы', label: 'Соусы и приправы' },
-    { value: 'Чай и кофе', label: 'Чай и кофе' },
-    { value: 'Снэки', label: 'Снэки' },
-    { value: 'Бытовая химия', label: 'Бытовая химия' },
-    { value: 'Косметика и гигиена', label: 'Косметика и гигиена' },
-    { value: 'Товары для дома', label: 'Товары для дома' },
-    { value: 'Другое', label: 'Другое' },
+    ...ALL_CATEGORIES.map(category => ({
+        value: category,
+        label: category,
+    })),
 ]
 
 const normalizeNumberString = (value: string): string => {
