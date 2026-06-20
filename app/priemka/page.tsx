@@ -135,8 +135,8 @@ function toNumber(value: string) {
     return Number.isFinite(parsed) ? parsed : 0
 }
 
-function calcSellingPrice(purchasePrice: string) {
-    return Math.round(toNumber(purchasePrice) * 1.3)
+const calcSellingPrice = (purchasePrice: string) => {
+    return String(Math.round(toNumber(purchasePrice) * 1.3))
 }
 
 function createEmptyRow(rowNumber: number): PreviewRow {
