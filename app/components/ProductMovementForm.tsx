@@ -34,8 +34,24 @@ type MovementItem = {
     sellingPrice: string
 }
 
+type AcceptanceCommitResult = {
+    acceptanceId?: number
+    acceptanceNumber?: string
+    number?: string
+    totalRows?: number
+    created?: number
+    updated?: number
+    skipped?: number
+    errors?: string[]
+    message?: string
+}
+
 type Props = {
     mode: MovementMode
+    supplier?: string
+    invoiceNumber?: string
+    comment?: string
+    onAcceptanceSaved?: (result: AcceptanceCommitResult) => void | Promise<void>
 }
 
 type AddOverrides = {
@@ -153,7 +169,65 @@ function findBestProduct(products: Product[], query: string) {
     return exact || products[0] || null
 }
 
-export default function ProductMovementForm({ mode }: Props) {
+function buildManualAcceptanceRows(rows: MovementItem[]) {
+    return rows.map((item, index) => ({
+        productId: item.product.id,
+        rowId: `manual-${item.product.id}-${index + 1}`,
+        rowNumber: index + 1,
+        status: 'matched',
+        action: 'update',
+        matchType: 'manual',
+        matchScore: 1,
+        matchedProductId: item.product.id,
+        matchedProductName: item.product.name,
+        matchedProductBarcode: item.product.barcode || '',
+        suggestions: [],
+        error: null,
+        name: item.product.name,
+        category: item.category || item.product.category || '',
+        barcode: item.product.barcode || '',
+        purchasePrice: String(item.purchasePrice || item.product.purchasePrice || 0),
+        sellingPrice: normalizeIntegerPrice(item.sellingPrice || item.product.sellingPrice || 0),
+        unit: item.product.unit,
+        stock: String(item.quantity || 0),
+        minStock: String(item.product.minStock || 0),
+        image: item.product.image || '',
+    }))
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null
+}
+
+function getResponseMessage(value: unknown) {
+    if (!isRecord(value)) return ''
+    const message = value.message
+    return typeof message === 'string' ? message : ''
+}
+
+function parseAcceptanceCommitResult(value: unknown): AcceptanceCommitResult | null {
+    if (!isRecord(value)) return null
+
+    return {
+        acceptanceId: typeof value.acceptanceId === 'number' ? value.acceptanceId : undefined,
+        acceptanceNumber: typeof value.acceptanceNumber === 'string' ? value.acceptanceNumber : undefined,
+        number: typeof value.number === 'string' ? value.number : undefined,
+        totalRows: typeof value.totalRows === 'number' ? value.totalRows : undefined,
+        created: typeof value.created === 'number' ? value.created : undefined,
+        updated: typeof value.updated === 'number' ? value.updated : undefined,
+        skipped: typeof value.skipped === 'number' ? value.skipped : undefined,
+        errors: Array.isArray(value.errors) ? value.errors.filter((item): item is string => typeof item === 'string') : undefined,
+        message: typeof value.message === 'string' ? value.message : undefined,
+    }
+}
+
+export default function ProductMovementForm({
+                                                mode,
+                                                supplier: externalSupplier,
+                                                invoiceNumber: externalInvoiceNumber,
+                                                comment: externalComment,
+                                                onAcceptanceSaved,
+                                            }: Props) {
     const isShipment = mode === 'shipment'
     const isAcceptance = mode === 'acceptance'
 
@@ -174,6 +248,20 @@ export default function ProductMovementForm({ mode }: Props) {
 
     const [shipper, setShipper] = useState('')
     const [consignee, setConsignee] = useState('')
+
+    const [manualSupplier, setManualSupplier] = useState('')
+    const [manualInvoiceNumber, setManualInvoiceNumber] = useState('')
+    const [manualComment, setManualComment] = useState('')
+
+    const effectiveSupplier = externalSupplier ?? manualSupplier
+    const effectiveInvoiceNumber = externalInvoiceNumber ?? manualInvoiceNumber
+    const effectiveComment = externalComment ?? manualComment
+
+    const shouldShowAcceptanceDocumentFields =
+        isAcceptance &&
+        externalSupplier === undefined &&
+        externalInvoiceNumber === undefined &&
+        externalComment === undefined
 
     useEffect(() => {
         const query = searchQuery.trim()
@@ -705,6 +793,259 @@ export default function ProductMovementForm({ mode }: Props) {
         `
     }
 
+
+    const buildAcceptanceDocumentsHtml = (documentNumber: string, rows: MovementItem[]) => {
+        const date = new Date().toLocaleDateString('ru-RU')
+        const purchaseTotal = rows.reduce((sum, item) => sum + parseNumber(item.quantity) * parseNumber(item.purchasePrice), 0)
+        const sellingTotal = rows.reduce((sum, item) => sum + parseNumber(item.quantity) * parseNumber(item.sellingPrice), 0)
+
+        const fullRowsHtml = rows.map((item, index) => {
+            const qty = parseNumber(item.quantity)
+            const purchasePrice = parseNumber(item.purchasePrice)
+            const sellingPrice = parseNumber(item.sellingPrice)
+
+            return `
+                <tr>
+                    <td>${index + 1}</td>
+                    <td>${escapeHtml(item.product.name)}</td>
+                    <td>${escapeHtml(item.product.barcode || '-')}</td>
+                    <td>${escapeHtml(item.category || item.product.category || '-')}</td>
+                    <td>${unitLabel(item.product.unit)}</td>
+                    <td>${qty}</td>
+                    <td>${money(purchasePrice)}</td>
+                    <td>${money(qty * purchasePrice)}</td>
+                    <td>${money(sellingPrice)}</td>
+                    <td>${money(qty * sellingPrice)}</td>
+                </tr>
+            `
+        }).join('')
+
+        const sellerRowsHtml = rows.map((item, index) => {
+            const qty = parseNumber(item.quantity)
+            const sellingPrice = parseNumber(item.sellingPrice)
+
+            return `
+                <tr>
+                    <td>${index + 1}</td>
+                    <td>${escapeHtml(item.product.name)}</td>
+                    <td>${escapeHtml(item.product.barcode || '-')}</td>
+                    <td>${escapeHtml(item.category || item.product.category || '-')}</td>
+                    <td>${unitLabel(item.product.unit)}</td>
+                    <td>${qty}</td>
+                    <td>${money(sellingPrice)}</td>
+                </tr>
+            `
+        }).join('')
+
+        return `
+            <!doctype html>
+            <html lang="ru">
+            <head>
+                <meta charset="utf-8" />
+                <title>Приёмка ${escapeHtml(documentNumber)}</title>
+                <style>
+                    * { box-sizing: border-box; }
+                    body {
+                        font-family: Arial, sans-serif;
+                        color: #111827;
+                        margin: 24px;
+                        font-size: 12px;
+                    }
+                    h1 {
+                        text-align: center;
+                        font-size: 20px;
+                        margin: 0 0 14px;
+                    }
+                    .doc-label {
+                        text-align: center;
+                        color: #6b7280;
+                        font-size: 12px;
+                        margin: -8px 0 14px;
+                    }
+                    .meta {
+                        display: grid;
+                        grid-template-columns: 1fr 1fr;
+                        gap: 8px 24px;
+                        margin-bottom: 16px;
+                    }
+                    .line {
+                        border-bottom: 1px solid #111827;
+                        min-height: 22px;
+                        padding-top: 4px;
+                    }
+                    table {
+                        width: 100%;
+                        border-collapse: collapse;
+                        margin-top: 10px;
+                    }
+                    th, td {
+                        border: 1px solid #111827;
+                        padding: 5px;
+                        text-align: left;
+                        vertical-align: top;
+                    }
+                    th { background: #f3f4f6; }
+                    .total {
+                        margin-top: 10px;
+                        text-align: right;
+                        font-size: 15px;
+                        font-weight: 700;
+                    }
+                    .comment {
+                        margin-top: 12px;
+                    }
+                    .signatures {
+                        display: grid;
+                        grid-template-columns: 1fr 1fr;
+                        gap: 40px;
+                        margin-top: 40px;
+                    }
+                    .signature-line {
+                        border-top: 1px solid #111827;
+                        padding-top: 6px;
+                        text-align: center;
+                    }
+                    .page-break {
+                        page-break-before: always;
+                        break-before: page;
+                    }
+                    @media print {
+                        body { margin: 10mm; }
+                        .page-break { page-break-before: always; break-before: page; }
+                    }
+                </style>
+            </head>
+            <body>
+                <section>
+                    <h1>Акт приёмки товара № ${escapeHtml(documentNumber)}</h1>
+                    <div class="doc-label">Документ для администрации</div>
+
+                    <div class="meta">
+                        <div>
+                            <strong>Дата:</strong>
+                            <div class="line">${date}</div>
+                        </div>
+                        <div>
+                            <strong>Номер документа:</strong>
+                            <div class="line">${escapeHtml(documentNumber)}</div>
+                        </div>
+                        <div>
+                            <strong>Поставщик:</strong>
+                            <div class="line">${escapeHtml(effectiveSupplier || '-')}</div>
+                        </div>
+                        <div>
+                            <strong>Номер накладной:</strong>
+                            <div class="line">${escapeHtml(effectiveInvoiceNumber || '-')}</div>
+                        </div>
+                    </div>
+
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>№</th>
+                                <th>Товар</th>
+                                <th>Штрихкод</th>
+                                <th>Категория</th>
+                                <th>Ед.</th>
+                                <th>Кол-во</th>
+                                <th>Закупка</th>
+                                <th>Сумма закупки</th>
+                                <th>Продажа</th>
+                                <th>Сумма продажи</th>
+                            </tr>
+                        </thead>
+                        <tbody>${fullRowsHtml}</tbody>
+                    </table>
+
+                    <div class="total">Итого закупка: ${money(purchaseTotal)}</div>
+                    <div class="total">Итого продажа: ${money(sellingTotal)}</div>
+
+                    ${effectiveComment ? `<div class="comment"><strong>Комментарий:</strong> ${escapeHtml(effectiveComment)}</div>` : ''}
+
+                    <div class="signatures">
+                        <div class="signature-line">Принял</div>
+                        <div class="signature-line">Проверил</div>
+                    </div>
+                </section>
+
+                <section class="page-break">
+                    <h1>Приёмка товара № ${escapeHtml(documentNumber)}</h1>
+                    <div class="doc-label">Документ для продавцов</div>
+
+                    <div class="meta">
+                        <div>
+                            <strong>Дата:</strong>
+                            <div class="line">${date}</div>
+                        </div>
+                        <div>
+                            <strong>Номер документа:</strong>
+                            <div class="line">${escapeHtml(documentNumber)}</div>
+                        </div>
+                    </div>
+
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>№</th>
+                                <th>Товар</th>
+                                <th>Штрихкод</th>
+                                <th>Категория</th>
+                                <th>Ед.</th>
+                                <th>Кол-во</th>
+                                <th>Цена продажи</th>
+                            </tr>
+                        </thead>
+                        <tbody>${sellerRowsHtml}</tbody>
+                    </table>
+
+                    <div class="total">Итого продажа: ${money(sellingTotal)}</div>
+
+                    <div class="signatures">
+                        <div class="signature-line">Передал</div>
+                        <div class="signature-line">Продавец</div>
+                    </div>
+                </section>
+            </body>
+            </html>
+        `
+    }
+
+    const printAcceptanceDocuments = (documentNumber: string, rows: MovementItem[]) => {
+        const iframe = document.createElement('iframe')
+
+        iframe.style.position = 'fixed'
+        iframe.style.right = '0'
+        iframe.style.bottom = '0'
+        iframe.style.width = '0'
+        iframe.style.height = '0'
+        iframe.style.border = '0'
+
+        document.body.appendChild(iframe)
+
+        const iframeWindow = iframe.contentWindow
+        const iframeDocument = iframe.contentDocument || iframeWindow?.document
+
+        if (!iframeWindow || !iframeDocument) {
+            document.body.removeChild(iframe)
+            alert('Не удалось открыть печать')
+            return
+        }
+
+        iframeDocument.open()
+        iframeDocument.write(buildAcceptanceDocumentsHtml(documentNumber, rows))
+        iframeDocument.close()
+
+        iframeWindow.focus()
+
+        setTimeout(() => {
+            iframeWindow.print()
+
+            setTimeout(() => {
+                document.body.removeChild(iframe)
+            }, 1000)
+        }, 300)
+    }
+
     const printWaybill = (documentNumber: string, rows: MovementItem[]) => {
         const iframe = document.createElement('iframe')
 
@@ -741,6 +1082,107 @@ export default function ProductMovementForm({ mode }: Props) {
         }, 300)
     }
 
+    const handleShipmentCommit = async (snapshot: MovementItem[]) => {
+        const response = await fetch('/api/shipment', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                items: snapshot.map(item => ({
+                    productId: item.product.id,
+                    quantity: parseNumber(item.quantity),
+                    category: item.category,
+                    purchasePrice: parseNumber(item.purchasePrice),
+                    sellingPrice: parseNumber(item.sellingPrice),
+                })),
+            }),
+        })
+
+        const text = await response.text()
+        const data = text ? JSON.parse(text) as { number?: string; message?: string } : null
+
+        if (!response.ok) {
+            console.error('Shipment API error:', {
+                status: response.status,
+                statusText: response.statusText,
+                data,
+                text,
+            })
+
+            throw new Error(
+                data?.message ||
+                text ||
+                `Ошибка API ${response.status}: ${response.statusText}`
+            )
+        }
+
+        if (!data?.number) {
+            throw new Error('API не вернул номер документа')
+        }
+
+        printWaybill(data.number, snapshot)
+
+        return data
+    }
+
+    const handleAcceptanceCommit = async (snapshot: MovementItem[]) => {
+        const response = await fetch('/api/products/import/commit', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                rows: buildManualAcceptanceRows(snapshot),
+                sourceFileName: 'Ручная приёмка',
+                supplier: effectiveSupplier,
+                invoiceNumber: effectiveInvoiceNumber,
+                comment: effectiveComment || 'Создано через ручную приёмку',
+            }),
+        })
+
+        const text = await response.text()
+        const rawData: unknown = text ? JSON.parse(text) : null
+        const data = parseAcceptanceCommitResult(rawData)
+
+        if (!response.ok) {
+            console.error('Manual acceptance API error:', {
+                status: response.status,
+                statusText: response.statusText,
+                data: rawData,
+                text,
+            })
+
+            throw new Error(
+                getResponseMessage(rawData) ||
+                text ||
+                `Ошибка API ${response.status}: ${response.statusText}`
+            )
+        }
+
+        if (!data) {
+            throw new Error('API не вернул данные по приёмке')
+        }
+
+        const documentNumber = data.acceptanceNumber || data.number || String(data.acceptanceId || '')
+
+        if (!documentNumber) {
+            throw new Error('API не вернул номер документа приёмки')
+        }
+
+        window.dispatchEvent(new CustomEvent('acceptance-history-updated', {
+            detail: data,
+        }))
+
+        await onAcceptanceSaved?.(data)
+
+        printAcceptanceDocuments(documentNumber, snapshot)
+
+        alert(`Приёмка сохранена в историю и отправлена на печать. Номер: ${documentNumber}`)
+
+        return data
+    }
+
     const handleCommit = async () => {
         const validationError = validateItems()
 
@@ -755,57 +1197,10 @@ export default function ProductMovementForm({ mode }: Props) {
             setIsCommitLoading(true)
             setError(null)
 
-            const response = await fetch(isShipment ? '/api/shipment' : '/api/acceptance', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    items: snapshot.map(item => ({
-                        productId: item.product.id,
-                        quantity: parseNumber(item.quantity),
-                        category: item.category,
-                        purchasePrice: parseNumber(item.purchasePrice),
-                        sellingPrice: parseNumber(item.sellingPrice),
-                    })),
-                }),
-            })
-
-            const text = await response.text()
-
-            let data: any = null
-
-            if (text) {
-                try {
-                    data = JSON.parse(text)
-                } catch {
-                    data = null
-                }
-            }
-
-            if (!response.ok) {
-                console.error('Operation API error:', {
-                    status: response.status,
-                    statusText: response.statusText,
-                    data,
-                    text,
-                })
-
-                throw new Error(
-                    data?.message ||
-                    text ||
-                    `Ошибка API ${response.status}: ${response.statusText}`
-                )
-            }
-
-            if (!data?.number) {
-                throw new Error('API не вернул номер документа')
-            }
-
             if (isShipment) {
-                printWaybill(data.number, snapshot)
+                await handleShipmentCommit(snapshot)
             } else {
-                alert(`Приёмка применена. Номер: ${data.number}`)
+                await handleAcceptanceCommit(snapshot)
             }
 
             setItems([])
@@ -843,6 +1238,31 @@ export default function ProductMovementForm({ mode }: Props) {
                     Вводите товар прямо в первой строке таблицы. Нажмите Enter, чтобы добавить найденный товар.
                 </p>
             </div>
+
+            {shouldShowAcceptanceDocumentFields && (
+                <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <input
+                        value={manualSupplier}
+                        onChange={(e) => setManualSupplier(e.target.value)}
+                        placeholder="Поставщик"
+                        className={inputClass}
+                    />
+
+                    <input
+                        value={manualInvoiceNumber}
+                        onChange={(e) => setManualInvoiceNumber(e.target.value)}
+                        placeholder="Номер накладной"
+                        className={inputClass}
+                    />
+
+                    <input
+                        value={manualComment}
+                        onChange={(e) => setManualComment(e.target.value)}
+                        placeholder="Комментарий"
+                        className={inputClass}
+                    />
+                </div>
+            )}
 
             {isShipment && (
                 <div className="mt-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -1145,7 +1565,7 @@ export default function ProductMovementForm({ mode }: Props) {
                         ? 'Применение...'
                         : isShipment
                             ? 'Списать и распечатать ТТН'
-                            : 'Добавить на остаток'}
+                            : 'Сохранить и распечатать приёмку'}
                 </button>
             </div>
         </div>
