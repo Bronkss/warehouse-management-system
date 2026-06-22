@@ -104,6 +104,9 @@ type ApiError = {
 };
 
 type PrintMode = 'selected' | 'filtered' | 'all';
+type PrintLayout = 'a4' | 'thermal';
+
+type PriceLabelQuantityMap = Record<string, number>;
 
 const PRODUCTS_PAGE_LIMIT = 100;
 const SEARCH_LIMIT = 30;
@@ -226,6 +229,43 @@ const formatQuantity = (quantity: number, unit?: string): string => {
 
 const getUnitPriceLabel = (product: Product): string => {
     return product.unit === 'weight' ? 'за 1 кг' : 'за 1 шт.';
+};
+
+const getProductCategory = (product: Product): string => {
+    const category = String(product.category || '').trim();
+
+    return category || 'Без категории';
+};
+
+const normalizeSearchText = (value: unknown): string => {
+    return String(value ?? '').trim().toLowerCase();
+};
+
+const doesProductMatchPriceLabelSearch = (product: Product, rawQuery: string): boolean => {
+    const query = normalizeSearchText(rawQuery);
+
+    if (!query) {
+        return true;
+    }
+
+    const tokens = query.split(/\s+/).filter(Boolean);
+    const searchableText = normalizeSearchText([
+        product.name,
+        getProductCategory(product),
+        getSellingPrice(product),
+        product.unit === 'weight' ? 'кг весовой' : 'шт штука',
+    ].join(' '));
+
+    return tokens.every(token => {
+        return (
+            searchableText.includes(token) ||
+            hasBarcodeSearchMatch(product.barcode, token)
+        );
+    });
+};
+
+const doesProductMatchPriceLabelCategory = (product: Product, categoryFilter: string): boolean => {
+    return categoryFilter === 'all' || getProductCategory(product) === categoryFilter;
 };
 
 const escapeHtml = (value: unknown): string => {
@@ -434,7 +474,9 @@ export default function PosPage() {
 
     const [isPriceLabelModalOpen, setIsPriceLabelModalOpen] = useState(false);
     const [priceLabelSearch, setPriceLabelSearch] = useState('');
+    const [priceLabelCategoryFilter, setPriceLabelCategoryFilter] = useState('all');
     const [selectedPriceLabelIds, setSelectedPriceLabelIds] = useState<string[]>([]);
+    const [priceLabelQuantities, setPriceLabelQuantities] = useState<PriceLabelQuantityMap>({});
     const [isRefreshingLabels, setIsRefreshingLabels] = useState(false);
 
     const [isAtolSetupOpen, setIsAtolSetupOpen] = useState(false);
@@ -446,21 +488,40 @@ export default function PosPage() {
     const change = cashReceivedNumber - total;
     const isShiftOpen = shiftStatus === 'open';
 
+    const priceLabelCategories = useMemo(() => {
+        const categories = allProducts.map(getProductCategory);
+
+        return Array.from(new Set<string>(categories)).sort((a, b) =>
+            a.localeCompare(b, 'ru')
+        );
+    }, [allProducts]);
+
     const priceLabelProducts = useMemo(() => {
-        const query = priceLabelSearch.trim().toLowerCase();
-
-        if (!query) {
-            return allProducts;
-        }
-
         return allProducts.filter(product => {
             return (
-                product.name.toLowerCase().includes(query) ||
-                hasBarcodeSearchMatch(product.barcode, query) ||
-                String(getSellingPrice(product)).includes(query)
+                doesProductMatchPriceLabelCategory(product, priceLabelCategoryFilter) &&
+                doesProductMatchPriceLabelSearch(product, priceLabelSearch)
             );
         });
-    }, [allProducts, priceLabelSearch]);
+    }, [allProducts, priceLabelSearch, priceLabelCategoryFilter]);
+
+    const getPriceLabelQuantity = (productId: ProductId): number => {
+        const quantity = priceLabelQuantities[String(productId)];
+
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+            return 1;
+        }
+
+        return Math.min(999, Math.floor(quantity));
+    };
+
+    const selectedPriceLabelPrintCount = selectedPriceLabelIds.reduce((sum, productId) => {
+        return sum + getPriceLabelQuantity(productId);
+    }, 0);
+
+    const filteredPriceLabelPrintCount = priceLabelProducts.reduce((sum, product) => {
+        return sum + getPriceLabelQuantity(product.id);
+    }, 0);
 
     const refreshProducts = async (): Promise<Product[]> => {
         const products = await fetchAllProducts();
@@ -1113,6 +1174,7 @@ export default function PosPage() {
 
             setIsPriceLabelModalOpen(true);
             setPriceLabelSearch('');
+            setPriceLabelCategoryFilter('all');
         } catch (err) {
             console.error(err);
             setError('Не удалось обновить товары для печати ценников');
@@ -1141,6 +1203,33 @@ export default function PosPage() {
         setSelectedPriceLabelIds([]);
     };
 
+    const updatePriceLabelQuantity = (productId: ProductId, rawValue: string) => {
+        const id = String(productId);
+        const parsedQuantity = Math.floor(safeParseNumber(rawValue));
+        const safeQuantity = Math.min(999, Math.max(1, parsedQuantity || 1));
+
+        setPriceLabelQuantities(prev => ({
+            ...prev,
+            [id]: safeQuantity,
+        }));
+
+        setSelectedPriceLabelIds(prev => {
+            if (prev.includes(id)) {
+                return prev;
+            }
+
+            return [...prev, id];
+        });
+    };
+
+    const expandProductsForPriceLabels = (products: Product[]): Product[] => {
+        return products.flatMap(product => {
+            const quantity = getPriceLabelQuantity(product.id);
+
+            return Array.from({ length: quantity }, () => product);
+        });
+    };
+
     const renderBarcodeSvgFromDbValue = (barcodeFromDb: string): string => {
         const barcode = getPrimaryBarcode(String(barcodeFromDb || '')).trim();
 
@@ -1166,7 +1255,7 @@ export default function PosPage() {
         }
     };
 
-    const buildPriceLabelsHtml = (products: Product[]): string => {
+    const buildA4PriceLabelsHtml = (products: Product[]): string => {
         const LABELS_PER_SHEET = 21;
 
         const chunkProducts = (items: Product[], size: number): Product[][] => {
@@ -1372,8 +1461,193 @@ export default function PosPage() {
         `;
     };
 
-    const printPriceLabels = async (mode: PrintMode) => {
-        const printWindow = window.open('', '_blank', 'width=900,height=700');
+    const buildThermalPriceLabelsHtml = (products: Product[]): string => {
+        const formatPriceForLabel = (value: number): string => {
+            const rounded = Math.ceil(value);
+
+            return new Intl.NumberFormat('ru-RU', {
+                maximumFractionDigits: 0,
+            }).format(rounded);
+        };
+
+        const labels = products.map(product => {
+            const name = escapeHtml(product.name);
+            const price = formatPriceForLabel(getSellingPrice(product));
+            const unitLabel = escapeHtml(product.unit === 'weight' ? 'за кг' : 'за шт');
+            const barcodeSvg = renderBarcodeSvgFromDbValue(product.barcode || '');
+
+            return `
+                <section class="label-page">
+                    <div class="label">
+                        <div class="label-name">${name}</div>
+
+                        <div class="label-price-row">
+                            <div class="label-price">${price} ₽</div>
+                            <div class="label-unit">${unitLabel}</div>
+                        </div>
+
+                        <div class="label-barcode">
+                            ${barcodeSvg ? barcodeSvg : '<div class="no-barcode">ШК нет</div>'}
+                        </div>
+                    </div>
+                </section>
+            `;
+        }).join('');
+
+        return `
+            <!doctype html>
+            <html lang="ru">
+                <head>
+                    <meta charset="utf-8" />
+                    <title>Печать термоэтикеток XPrinter 58×40 мм</title>
+
+                    <style>
+                        @page {
+                            size: 58mm 40mm;
+                            margin: 0;
+                        }
+
+                        * {
+                            box-sizing: border-box;
+                            -webkit-print-color-adjust: exact;
+                            print-color-adjust: exact;
+                        }
+
+                        html,
+                        body {
+                            width: 58mm;
+                            margin: 0;
+                            padding: 0;
+                            background: #ffffff;
+                            color: #000000;
+                            font-family: Arial, sans-serif;
+                        }
+
+                        .label-page {
+                            width: 58mm;
+                            height: 40mm;
+                            margin: 0;
+                            padding: 0;
+                            display: block;
+                            overflow: hidden;
+                            break-after: page;
+                            page-break-after: always;
+                            break-inside: avoid;
+                            page-break-inside: avoid;
+                        }
+
+                        .label-page:last-child {
+                            break-after: auto;
+                            page-break-after: auto;
+                        }
+
+                        .label {
+                            width: 58mm;
+                            height: 40mm;
+                            padding: 2mm 2.4mm 1.4mm;
+                            display: flex;
+                            flex-direction: column;
+                            justify-content: space-between;
+                            overflow: hidden;
+                            border: none;
+                            outline: none;
+                            background: #ffffff;
+                        }
+
+                        .label-name {
+                            min-height: 11.5mm;
+                            max-height: 12.8mm;
+                            overflow: hidden;
+                            display: -webkit-box;
+                            -webkit-box-orient: vertical;
+                            -webkit-line-clamp: 2;
+                            font-size: 14px;
+                            line-height: 1.08;
+                            font-weight: 900;
+                            letter-spacing: -0.15px;
+                            text-align: center;
+                            color: #000000;
+                        }
+
+                        .label-price-row {
+                            text-align: center;
+                            color: #000000;
+                        }
+
+                        .label-price {
+                            font-size: 31px;
+                            line-height: 0.95;
+                            font-weight: 900;
+                            letter-spacing: -0.8px;
+                            white-space: nowrap;
+                        }
+
+                        .label-unit {
+                            margin-top: 1mm;
+                            font-size: 12px;
+                            line-height: 1;
+                            font-weight: 800;
+                        }
+
+                        .label-barcode {
+                            width: 100%;
+                            height: 6.8mm;
+                            display: flex;
+                            align-items: flex-end;
+                            justify-content: center;
+                            overflow: hidden;
+                        }
+
+                        .label-barcode svg {
+                            width: 34mm;
+                            height: 6.5mm;
+                            display: block;
+                        }
+
+                        .no-barcode {
+                            width: 18mm;
+                            padding: 0.8mm 0;
+                            border: none;
+                            font-size: 7px;
+                            line-height: 1;
+                            color: #333333;
+                            text-align: center;
+                        }
+
+                        @media print {
+                            html,
+                            body {
+                                width: 58mm;
+                                margin: 0;
+                                padding: 0;
+                            }
+
+                            .label-page {
+                                width: 58mm;
+                                height: 40mm;
+                            }
+                        }
+                    </style>
+                </head>
+
+                <body>
+                    ${labels}
+
+                    <script>
+                        window.onload = function () {
+                            window.focus();
+                            setTimeout(function () {
+                                window.print();
+                            }, 250);
+                        };
+                    </script>
+                </body>
+            </html>
+        `;
+    };
+
+    const printPriceLabels = async (mode: PrintMode, layout: PrintLayout = 'a4') => {
+        const printWindow = window.open('', '_blank', layout === 'thermal' ? 'width=420,height=650' : 'width=900,height=700');
 
         if (!printWindow) {
             setError('Браузер заблокировал окно печати. Разрешите всплывающие окна.');
@@ -1385,16 +1659,18 @@ export default function PosPage() {
             setError(null);
             setNotice(null);
 
+            const isThermalPrint = layout === 'thermal';
+
             printWindow.document.open();
             printWindow.document.write(`
                 <!doctype html>
                 <html lang="ru">
                     <head>
                         <meta charset="utf-8" />
-                        <title>Подготовка ценников</title>
+                        <title>${isThermalPrint ? 'Подготовка термоэтикеток' : 'Подготовка ценников'}</title>
                     </head>
                     <body style="font-family: Arial, sans-serif; padding: 24px;">
-                        <h2>Подготовка ценников...</h2>
+                        <h2>${isThermalPrint ? 'Подготовка термоэтикеток...' : 'Подготовка ценников...'}</h2>
                         <p>Пожалуйста, подождите.</p>
                     </body>
                 </html>
@@ -1402,19 +1678,14 @@ export default function PosPage() {
             printWindow.document.close();
 
             const freshProducts = await refreshProducts();
-            const query = priceLabelSearch.trim().toLowerCase();
+            const freshFilteredProducts = freshProducts.filter(product => {
+                return (
+                    doesProductMatchPriceLabelCategory(product, priceLabelCategoryFilter) &&
+                    doesProductMatchPriceLabelSearch(product, priceLabelSearch)
+                );
+            });
 
-            const freshFilteredProducts = query
-                ? freshProducts.filter(product => {
-                    return (
-                        product.name.toLowerCase().includes(query) ||
-                        hasBarcodeSearchMatch(product.barcode, query) ||
-                        String(getSellingPrice(product)).includes(query)
-                    );
-                })
-                : freshProducts;
-
-            const products =
+            const baseProducts =
                 mode === 'selected'
                     ? freshProducts.filter(product =>
                         selectedPriceLabelIds.includes(String(product.id))
@@ -1423,6 +1694,8 @@ export default function PosPage() {
                         ? freshFilteredProducts
                         : freshProducts;
 
+            const products = expandProductsForPriceLabels(baseProducts);
+
             if (products.length === 0) {
                 printWindow.close();
                 setError('Нет товаров для печати ценников');
@@ -1430,10 +1703,14 @@ export default function PosPage() {
             }
 
             printWindow.document.open();
-            printWindow.document.write(buildPriceLabelsHtml(products));
+            printWindow.document.write(
+                isThermalPrint
+                    ? buildThermalPriceLabelsHtml(products)
+                    : buildA4PriceLabelsHtml(products)
+            );
             printWindow.document.close();
 
-            setNotice(`Ценники отправлены на печать: ${products.length}`);
+            setNotice(`${isThermalPrint ? 'Термоэтикетки XPrinter' : 'Ценники A4'} отправлены на печать: ${products.length}. Товаров: ${baseProducts.length}`);
         } catch (err) {
             console.error(err);
             printWindow.close();
@@ -1600,7 +1877,7 @@ export default function PosPage() {
                                 className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
                             >
                                 <AiOutlinePrinter size={20} />
-                                {isRefreshingLabels ? 'Обновляю цены...' : 'Печать ценников 58×40'}
+                                {isRefreshingLabels ? 'Обновляю цены...' : 'Печать ценников / термоэтикеток 58×40'}
                             </button>
 
                             <div className="text-xs text-gray-500">
@@ -1997,17 +2274,17 @@ export default function PosPage() {
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.96 }}
                             onClick={(e) => e.stopPropagation()}
-                            className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl overflow-hidden"
+                            className="flex max-h-[92vh] w-full max-w-6xl flex-col rounded-2xl bg-white shadow-2xl overflow-hidden"
                         >
                             <div className="p-6 border-b border-gray-100">
                                 <div className="flex items-start justify-between gap-4">
                                     <div>
                                         <h2 className="text-2xl font-bold text-gray-800">
-                                            Печать ценников 58×40 мм
+                                            Печать ценников и термоэтикеток 58×40 мм
                                         </h2>
 
                                         <p className="text-sm text-gray-500 mt-1">
-                                            Выберите товары, найдите обновлённую цену или распечатайте ценники 58×40 мм.
+                                            Выберите товары, укажите количество ценников и печатайте на лист A4 или на XPrinter в одну колонку без принудительного A4.
                                         </p>
                                     </div>
 
@@ -2020,14 +2297,27 @@ export default function PosPage() {
                                     </button>
                                 </div>
 
-                                <div className="mt-5 grid grid-cols-1 md:grid-cols-[1fr_auto_auto_auto] gap-3">
+                                <div className="mt-5 grid grid-cols-1 gap-3 xl:grid-cols-[minmax(280px,1fr)_260px_auto_auto_auto]">
                                     <input
                                         type="text"
                                         value={priceLabelSearch}
                                         onChange={(e) => setPriceLabelSearch(e.target.value)}
-                                        placeholder="Поиск по названию, штрихкоду или цене..."
+                                        placeholder="Поиск по названию, категории, штрихкоду или цене..."
                                         className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
                                     />
+
+                                    <select
+                                        value={priceLabelCategoryFilter}
+                                        onChange={(e) => setPriceLabelCategoryFilter(e.target.value)}
+                                        className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
+                                    >
+                                        <option value="all">Все категории</option>
+                                        {priceLabelCategories.map(category => (
+                                            <option key={category} value={category}>
+                                                {category}
+                                            </option>
+                                        ))}
+                                    </select>
 
                                     <button
                                         type="button"
@@ -2071,7 +2361,7 @@ export default function PosPage() {
                                 </div>
                             </div>
 
-                            <div className="max-h-[55vh] overflow-y-auto">
+                            <div className="min-h-0 flex-1 overflow-y-auto">
                                 <table className="w-full text-sm">
                                     <thead className="sticky top-0 bg-gray-50 text-gray-600 z-10">
                                     <tr>
@@ -2080,7 +2370,7 @@ export default function PosPage() {
                                         <th className="p-3 text-left">Штрихкод из БД</th>
                                         <th className="p-3 text-left">Ед.</th>
                                         <th className="p-3 text-right">Цена</th>
-                                        <th className="p-3 text-right">Остаток</th>
+                                        <th className="p-3 text-center w-36">Кол-во ценников</th>
                                     </tr>
                                     </thead>
 
@@ -2124,8 +2414,16 @@ export default function PosPage() {
                                                     {Math.ceil(getSellingPrice(product))} ₽ {getUnitPriceLabel(product)}
                                                 </td>
 
-                                                <td className="p-3 text-right text-gray-500">
-                                                    {formatQuantity(getStock(product), product.unit)}
+                                                <td className="p-3 text-center">
+                                                    <input
+                                                        type="number"
+                                                        min="1"
+                                                        max="999"
+                                                        step="1"
+                                                        value={getPriceLabelQuantity(product.id)}
+                                                        onChange={(e) => updatePriceLabelQuantity(product.id, e.target.value)}
+                                                        className="w-24 rounded-lg border border-gray-300 px-3 py-2 text-center font-bold outline-none focus:ring-2 focus:ring-indigo-500"
+                                                    />
                                                 </td>
                                             </tr>
                                         );
@@ -2140,40 +2438,123 @@ export default function PosPage() {
                                 )}
                             </div>
 
-                            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 bg-gray-50 p-5">
-                                <div className="text-sm text-gray-500">
-                                    Выбрано: <span className="font-bold">{selectedPriceLabelIds.length}</span>.
-                                    Найдено: <span className="font-bold">{priceLabelProducts.length}</span>.
-                                    Всего загружено: <span className="font-bold">{allProducts.length}</span>.
+                            <div className="flex-none border-t border-gray-100 bg-slate-50 p-5">
+                                <div className="mb-4 flex flex-wrap gap-2 text-sm text-gray-600">
+                                    <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
+                                        Выбрано товаров: <span className="font-bold text-gray-900">{selectedPriceLabelIds.length}</span>
+                                    </span>
+
+                                    <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
+                                        Ценников выбранных: <span className="font-bold text-gray-900">{selectedPriceLabelPrintCount}</span>
+                                    </span>
+
+                                    <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
+                                        Найдено товаров: <span className="font-bold text-gray-900">{priceLabelProducts.length}</span>
+                                    </span>
+
+                                    <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
+                                        Ценников найденных: <span className="font-bold text-gray-900">{filteredPriceLabelPrintCount}</span>
+                                    </span>
+
+                                    <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
+                                        Всего в базе: <span className="font-bold text-gray-900">{allProducts.length}</span>
+                                    </span>
                                 </div>
 
-                                <div className="flex flex-wrap gap-3">
-                                    <button
-                                        type="button"
-                                        onClick={() => printPriceLabels('selected')}
-                                        disabled={isRefreshingLabels}
-                                        className="rounded-lg bg-indigo-600 px-5 py-2.5 text-white hover:bg-indigo-700 disabled:opacity-50"
-                                    >
-                                        Печать выбранных
-                                    </button>
+                                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                                    <div className="rounded-2xl border border-indigo-100 bg-white p-4 shadow-sm">
+                                        <div className="flex items-start gap-3">
+                                            <div className="rounded-xl bg-indigo-50 p-2 text-indigo-600">
+                                                <AiOutlinePrinter size={22} />
+                                            </div>
 
-                                    <button
-                                        type="button"
-                                        onClick={() => printPriceLabels('filtered')}
-                                        disabled={isRefreshingLabels}
-                                        className="rounded-lg bg-blue-600 px-5 py-2.5 text-white hover:bg-blue-700 disabled:opacity-50"
-                                    >
-                                        Печать всех найденных
-                                    </button>
+                                            <div>
+                                                <div className="font-bold text-gray-900">
+                                                    Лист A4
+                                                </div>
 
-                                    <button
-                                        type="button"
-                                        onClick={() => printPriceLabels('all')}
-                                        disabled={isRefreshingLabels}
-                                        className="rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
-                                    >
-                                        Печать всей базы
-                                    </button>
+                                                <div className="text-xs text-gray-500">
+                                                    Обычная печать на лист: 58×40 мм, сетка в несколько колонок.
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => printPriceLabels('selected', 'a4')}
+                                                disabled={isRefreshingLabels || selectedPriceLabelIds.length === 0}
+                                                className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                Выбранные
+                                            </button>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => printPriceLabels('filtered', 'a4')}
+                                                disabled={isRefreshingLabels || priceLabelProducts.length === 0}
+                                                className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                Найденные
+                                            </button>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => printPriceLabels('all', 'a4')}
+                                                disabled={isRefreshingLabels || allProducts.length === 0}
+                                                className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                Вся база
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-2xl border border-emerald-100 bg-white p-4 shadow-sm">
+                                        <div className="flex items-start gap-3">
+                                            <div className="rounded-xl bg-emerald-50 p-2 text-emerald-600">
+                                                <AiOutlinePrinter size={22} />
+                                            </div>
+
+                                            <div>
+                                                <div className="font-bold text-gray-900">
+                                                    XPrinter 58×40
+                                                </div>
+
+                                                <div className="text-xs text-gray-500">
+                                                    Термоэтикетки: одна этикетка 58×40 мм на одну страницу, без A4.
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => printPriceLabels('selected', 'thermal')}
+                                                disabled={isRefreshingLabels || selectedPriceLabelIds.length === 0}
+                                                className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                Выбранные
+                                            </button>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => printPriceLabels('filtered', 'thermal')}
+                                                disabled={isRefreshingLabels || priceLabelProducts.length === 0}
+                                                className="rounded-xl bg-teal-600 px-4 py-3 text-sm font-semibold text-white hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                Найденные
+                                            </button>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => printPriceLabels('all', 'thermal')}
+                                                disabled={isRefreshingLabels || allProducts.length === 0}
+                                                className="rounded-xl bg-slate-700 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                Вся база
+                                            </button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </motion.div>
