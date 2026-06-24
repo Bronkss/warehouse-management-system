@@ -98,22 +98,38 @@ export const shipmentDraftStore = createStore<ShipmentDraftStoreState>()(
 
 let hydratePromise: Promise<void> | null = null
 
-export function hydrateShipmentDraftStore() {
+export function hydrateShipmentDraftStore(): Promise<void> {
     if (typeof window === 'undefined') {
         return Promise.resolve()
     }
 
-    if (!hydratePromise) {
-        hydratePromise = shipmentDraftStore.persist
-            .rehydrate()
+    if (hydratePromise) {
+        return hydratePromise
+    }
+
+    try {
+        const rehydrateResult = shipmentDraftStore.persist.rehydrate()
+
+        hydratePromise = Promise.resolve(rehydrateResult)
             .then(() => undefined)
             .catch((error) => {
                 hydratePromise = null
-                console.warn('Не удалось восстановить Zustand/IndexedDB черновики отгрузки', error)
+                console.warn(
+                    'Не удалось восстановить Zustand/IndexedDB черновики отгрузки',
+                    error
+                )
             })
-    }
 
-    return hydratePromise
+        return hydratePromise
+    } catch (error) {
+        hydratePromise = null
+        console.warn(
+            'Не удалось запустить восстановление Zustand/IndexedDB черновиков отгрузки',
+            error
+        )
+
+        return Promise.resolve()
+    }
 }
 
 export async function readShipmentState<T>(key: string): Promise<T | null> {

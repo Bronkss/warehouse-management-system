@@ -100,22 +100,38 @@ export const acceptanceDraftStore = createStore<AcceptanceDraftStoreState>()(
 
 let hydratePromise: Promise<void> | null = null
 
-export function hydrateAcceptanceDraftStore() {
+export function hydrateAcceptanceDraftStore(): Promise<void> {
     if (typeof window === 'undefined') {
         return Promise.resolve()
     }
 
-    if (!hydratePromise) {
-        hydratePromise = acceptanceDraftStore.persist
-            .rehydrate()
+    if (hydratePromise) {
+        return hydratePromise
+    }
+
+    try {
+        const rehydrateResult = acceptanceDraftStore.persist.rehydrate()
+
+        hydratePromise = Promise.resolve(rehydrateResult)
             .then(() => undefined)
             .catch((error) => {
                 hydratePromise = null
-                console.warn('Не удалось восстановить Zustand/IndexedDB черновики приёмки', error)
+                console.warn(
+                    'Не удалось восстановить Zustand/IndexedDB черновики приёмки',
+                    error
+                )
             })
-    }
 
-    return hydratePromise
+        return hydratePromise
+    } catch (error) {
+        hydratePromise = null
+        console.warn(
+            'Не удалось запустить восстановление Zustand/IndexedDB черновиков приёмки',
+            error
+        )
+
+        return Promise.resolve()
+    }
 }
 
 export async function readPersistentState<T>(key: string): Promise<T | null> {
