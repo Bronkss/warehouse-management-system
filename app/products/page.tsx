@@ -22,6 +22,16 @@ const PAGE_LIMIT = 20
 const FULL_SYNC_PAGE_LIMIT = 100
 const DEFAULT_PRODUCT_IMAGE = '/icons/products.jpg'
 
+const UPDATE_MODAL_STORAGE_KEY = 'warehouse_updates_modal_v1_2026_06_24'
+
+const UPDATE_ITEMS = [
+    'Починил поле поиска: при поиске товаров и очистке поиска больше не слетает отображение категорий товаров.',
+    'Добавлены изменения в страницу “Приёмка”: теперь в ручной приёмке прогресс добавления сохраняется при переходе на другие страницы приложения и даже после полного закрытия браузера.',
+    'Добавлены изменения в страницу “Отгрузки”: теперь прогресс также сохраняется автоматически.',
+    'Добавлена новая страница “Доставки”: теперь можно смотреть всю историю доставок и текущие доставки со статусом “Новый”.',
+    'Скрыл неработающий функционал страниц: “Списания”, “Инвентаризация”, “Поставщики” и “Статистика”. Они появятся в будущих обновлениях.',
+]
+
 async function uploadProductImage(file: File): Promise<string> {
     const formData = new FormData()
     formData.append('file', file)
@@ -143,6 +153,8 @@ const ALL_CATEGORIES = [
 export default function Products() {
     const { isOpen, open, close } = useModal()
 
+    const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false)
+
     const [selectedCategory, setSelectedCategory] = useState<string>('')
     const [searchQuery, setSearchQuery] = useState<string>('')
     const [debouncedSearchQuery, setDebouncedSearchQuery] = useState<string>('')
@@ -189,6 +201,23 @@ export default function Products() {
         setHasMore(false)
         setError(null)
     }, [])
+
+    useEffect(() => {
+        const isAlreadyRead = localStorage.getItem(UPDATE_MODAL_STORAGE_KEY)
+
+        if (!isAlreadyRead) {
+            const timer = window.setTimeout(() => {
+                setIsUpdateModalOpen(true)
+            }, 450)
+
+            return () => window.clearTimeout(timer)
+        }
+    }, [])
+
+    const handleAcceptUpdates = () => {
+        localStorage.setItem(UPDATE_MODAL_STORAGE_KEY, 'read')
+        setIsUpdateModalOpen(false)
+    }
 
     const startFullIndexedDbSync = useCallback(() => {
         if (didStartFullSyncRef.current) {
@@ -341,9 +370,11 @@ export default function Products() {
                 setHasMore(payload.hasMore)
                 setError(null)
 
-                void saveProductsToIndexedDb(payload.items).catch(error => {
-                    console.warn('IndexedDB save products page error:', error)
-                })
+                if (!search) {
+                    void saveProductsToIndexedDb(payload.items).catch(error => {
+                        console.warn('IndexedDB save products page error:', error)
+                    })
+                }
 
                 if (mode === 'replace' && !search) {
                     startFullIndexedDbSync()
@@ -392,26 +423,114 @@ export default function Products() {
     )
 
     useEffect(() => {
+        const currentSearch = debouncedSearchQuery.trim()
+        let cancelled = false
         const controller = new AbortController()
 
-        fetchProducts({
-            mode: 'replace',
-            search: debouncedSearchQuery,
-            cursor: null,
-            signal: controller.signal,
-        })
+        async function runSearchOrRestore() {
+            if (currentSearch) {
+                try {
+                    setIsLoading(true)
+                    setError(null)
+                    setNextCursor(null)
+                    setHasMore(false)
 
-        return () => controller.abort()
-    }, [debouncedSearchQuery, fetchProducts])
+                    const indexedDbProducts = await searchProductsInIndexedDb(
+                        currentSearch,
+                        Number.MAX_SAFE_INTEGER
+                    )
+
+                    if (cancelled) {
+                        return
+                    }
+
+                    setProducts(indexedDbProducts)
+                    setError(null)
+                } catch (error) {
+                    if (cancelled) {
+                        return
+                    }
+
+                    console.error('IndexedDB search products error:', error)
+                    setProducts([])
+                    setNextCursor(null)
+                    setHasMore(false)
+                    setError(
+                        error instanceof Error
+                            ? error.message
+                            : 'Ошибка поиска товаров в IndexedDB'
+                    )
+                } finally {
+                    if (!cancelled) {
+                        setIsLoading(false)
+                    }
+                }
+
+                return
+            }
+
+            /**
+             * Важный момент:
+             * когда пользователь очистил input, мы НЕ должны заново показывать только
+             * первую страницу из API. Сначала возвращаем всю локальную базу из IndexedDB.
+             * Если IndexedDB уже содержит полную базу, на экране сразу снова будет 875 товаров.
+             */
+            try {
+                setIsLoading(true)
+                setError(null)
+
+                const indexedDbProducts = await getAllProductsFromIndexedDb()
+
+                if (cancelled) {
+                    return
+                }
+
+                if (indexedDbProducts.length > PAGE_LIMIT) {
+                    setProducts(indexedDbProducts)
+                    setIndexedDbLoadedCount(indexedDbProducts.length)
+                    setNextCursor(null)
+                    setHasMore(false)
+                    setIsLoading(false)
+
+                    startFullIndexedDbSync()
+                    return
+                }
+            } catch (indexedDbError) {
+                console.warn('IndexedDB restore all products error:', indexedDbError)
+            }
+
+            if (cancelled) {
+                return
+            }
+
+            fetchProducts({
+                mode: 'replace',
+                search: '',
+                cursor: null,
+                signal: controller.signal,
+            })
+        }
+
+        void runSearchOrRestore()
+
+        return () => {
+            cancelled = true
+            controller.abort()
+        }
+    }, [debouncedSearchQuery, fetchProducts, startFullIndexedDbSync])
 
     const handleLoadMore = useCallback(() => {
+        if (debouncedSearchQuery.trim()) {
+            return
+        }
+
         if (!hasMore || !nextCursor || isLoadingMore) {
             return
         }
 
         fetchProducts({
             mode: 'append',
-            search: debouncedSearchQuery,
+            search: '',
             cursor: nextCursor,
         })
     }, [debouncedSearchQuery, fetchProducts, hasMore, isLoadingMore, nextCursor])
@@ -819,24 +938,29 @@ export default function Products() {
                             </div>
                         )}
 
-                        {error && (
-                            <div className="text-center py-12">
-                                <p className="text-red-500 text-lg mb-4">{error}</p>
+                    {/*    {error && (*/}
+                    {/*    <div className="text-center py-12">*/}
+                    {/*        <p className="text-red-500 text-lg mb-4">{error}</p>*/}
 
-                                <button
-                                    onClick={() =>
-                                        fetchProducts({
-                                            mode: 'replace',
-                                            search: debouncedSearchQuery,
-                                            cursor: null,
-                                        })
-                                    }
-                                    className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
-                                >
-                                    Повторить
-                                </button>
-                            </div>
-                        )}
+                    {/*        <button*/}
+                    {/*            onClick={() => {*/}
+                    {/*                if (debouncedSearchQuery.trim()) {*/}
+                    {/*                    void searchProductsFromIndexedDbOnly(debouncedSearchQuery)*/}
+                    {/*                    return*/}
+                    {/*                }*/}
+
+                    {/*                fetchProducts({*/}
+                    {/*                    mode: 'replace',*/}
+                    {/*                    search: '',*/}
+                    {/*                    cursor: null,*/}
+                    {/*                })*/}
+                    {/*            }}*/}
+                    {/*            className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"*/}
+                    {/*        >*/}
+                    {/*            Повторить*/}
+                    {/*        </button>*/}
+                    {/*    </div>*/}
+                    {/*)}*/}
 
                         {!isLoading && !error && hasProducts && (
                             <>
@@ -1082,7 +1206,102 @@ export default function Products() {
                 />
             </Modal>
 
+            {isUpdateModalOpen && (
+                <div className="updates-modal-overlay fixed inset-0 z-[130] flex items-center justify-center bg-gray-950/55 px-3 py-4 backdrop-blur-[2px]">
+                    <div className="updates-modal-card flex max-h-[calc(100dvh-32px)] w-full max-w-[620px] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+                        <div className="border-b border-gray-100 bg-white px-5 py-5 sm:px-6">
+                            <div className="flex items-start gap-4">
+                                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-blue-600 text-xl text-white shadow-sm">
+                                    ✓
+                                </div>
+
+                                <div className="min-w-0">
+                                    <div className="text-xs font-bold uppercase tracking-[0.14em] text-blue-600">
+                                        Обновление системы
+                                    </div>
+
+                                    <h2 className="mt-1 text-xl font-bold text-gray-900 sm:text-2xl">
+                                        Что нового в системе
+                                    </h2>
+
+                                    <p className="mt-2 text-sm leading-6 text-gray-500">
+                                        Добавлены улучшения по товарам, приёмке, отгрузкам и доставкам.
+                                        Ниже коротко, что изменилось.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-6">
+                            <div className="space-y-2.5">
+                                {UPDATE_ITEMS.map((item, index) => (
+                                    <div
+                                        key={item}
+                                        className="flex gap-3 rounded-xl border border-gray-100 bg-gray-50 p-3.5"
+                                    >
+                                        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
+                                            {index + 1}
+                                        </div>
+
+                                        <p className="text-sm leading-6 text-gray-700">
+                                            {item}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3">
+                                <p className="text-sm leading-6 text-blue-800">
+                                    После нажатия кнопки <span className="font-bold">«Ознакомился(лась)»</span>{' '}
+                                    это окно больше не будет показываться на этом устройстве.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="border-t border-gray-100 bg-white px-5 py-4 sm:px-6">
+                            <button
+                                type="button"
+                                onClick={handleAcceptUpdates}
+                                className="flex w-full items-center justify-center rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-blue-700 active:bg-blue-800"
+                            >
+                                Ознакомился(лась)
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <style jsx>{`
+                .updates-modal-overlay {
+                    animation: updatesFadeIn 0.18s ease-out;
+                }
+
+                .updates-modal-card {
+                    animation: updatesSlideUp 0.22s ease-out;
+                }
+
+                @keyframes updatesFadeIn {
+                    from {
+                        opacity: 0;
+                    }
+
+                    to {
+                        opacity: 1;
+                    }
+                }
+
+                @keyframes updatesSlideUp {
+                    from {
+                        opacity: 0;
+                        transform: translateY(16px) scale(0.98);
+                    }
+
+                    to {
+                        opacity: 1;
+                        transform: translateY(0) scale(1);
+                    }
+                }
+                
                 @media (max-width: 767px) {
                     .products-page {
                         width: 100%;

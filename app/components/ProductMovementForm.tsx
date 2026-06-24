@@ -1,6 +1,13 @@
 'use client'
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
+import {
+    clearPersistentState,
+    MANUAL_ACCEPTANCE_MOVEMENT_DRAFT_KEY,
+    readPersistentState,
+    SHIPMENT_MOVEMENT_DRAFT_KEY,
+    writePersistentState,
+} from '@/app/lib/acceptanceStateManager'
 
 type ProductUnit = 'piece' | 'weight'
 type MovementMode = 'acceptance' | 'shipment'
@@ -34,6 +41,22 @@ type MovementItem = {
     sellingPrice: string
 }
 
+type Props = {
+    mode: MovementMode
+    supplier?: string
+    invoiceNumber?: string
+    comment?: string
+    onAcceptanceSaved?: (result: AcceptanceCommitResult) => void | Promise<void>
+    onShipmentSaved?: (result: OperationApiResult) => void | Promise<void>
+}
+
+type AddOverrides = {
+    quantity?: string
+    category?: string
+    purchasePrice?: string
+    sellingPrice?: string
+}
+
 type AcceptanceCommitResult = {
     acceptanceId?: number
     acceptanceNumber?: string
@@ -46,19 +69,27 @@ type AcceptanceCommitResult = {
     message?: string
 }
 
-type Props = {
-    mode: MovementMode
-    supplier?: string
-    invoiceNumber?: string
-    comment?: string
-    onAcceptanceSaved?: (result: AcceptanceCommitResult) => void | Promise<void>
+type OperationApiResult = {
+    id?: number
+    shipmentId?: number
+    number?: string
+    shipmentNumber?: string
+    updated?: number
+    message?: string
 }
 
-type AddOverrides = {
-    quantity?: string
-    category?: string
-    purchasePrice?: string
-    sellingPrice?: string
+type MovementDraftState = {
+    searchQuery: string
+    quantity: string
+    items: MovementItem[]
+    acceptanceCategory: string
+    acceptancePurchasePrice: string
+    acceptanceSellingPrice: string
+    manualSupplier: string
+    manualInvoiceNumber: string
+    manualComment: string
+    shipper: string
+    consignee: string
 }
 
 const inputClass = 'w-full rounded-xl border border-gray-300 px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500'
@@ -169,6 +200,7 @@ function findBestProduct(products: Product[], query: string) {
     return exact || products[0] || null
 }
 
+
 function buildManualAcceptanceRows(rows: MovementItem[]) {
     return rows.map((item, index) => ({
         productId: item.product.id,
@@ -195,38 +227,13 @@ function buildManualAcceptanceRows(rows: MovementItem[]) {
     }))
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null
-}
-
-function getResponseMessage(value: unknown) {
-    if (!isRecord(value)) return ''
-    const message = value.message
-    return typeof message === 'string' ? message : ''
-}
-
-function parseAcceptanceCommitResult(value: unknown): AcceptanceCommitResult | null {
-    if (!isRecord(value)) return null
-
-    return {
-        acceptanceId: typeof value.acceptanceId === 'number' ? value.acceptanceId : undefined,
-        acceptanceNumber: typeof value.acceptanceNumber === 'string' ? value.acceptanceNumber : undefined,
-        number: typeof value.number === 'string' ? value.number : undefined,
-        totalRows: typeof value.totalRows === 'number' ? value.totalRows : undefined,
-        created: typeof value.created === 'number' ? value.created : undefined,
-        updated: typeof value.updated === 'number' ? value.updated : undefined,
-        skipped: typeof value.skipped === 'number' ? value.skipped : undefined,
-        errors: Array.isArray(value.errors) ? value.errors.filter((item): item is string => typeof item === 'string') : undefined,
-        message: typeof value.message === 'string' ? value.message : undefined,
-    }
-}
-
 export default function ProductMovementForm({
                                                 mode,
                                                 supplier: externalSupplier,
                                                 invoiceNumber: externalInvoiceNumber,
                                                 comment: externalComment,
                                                 onAcceptanceSaved,
+                                                onShipmentSaved,
                                             }: Props) {
     const isShipment = mode === 'shipment'
     const isAcceptance = mode === 'acceptance'
@@ -263,19 +270,84 @@ export default function ProductMovementForm({
         externalInvoiceNumber === undefined &&
         externalComment === undefined
 
+    const draftStorageKey = isAcceptance
+        ? MANUAL_ACCEPTANCE_MOVEMENT_DRAFT_KEY
+        : SHIPMENT_MOVEMENT_DRAFT_KEY
+
+    const [isDraftHydrated, setIsDraftHydrated] = useState(false)
+
+    useEffect(() => {
+        let isMounted = true
+
+        setIsDraftHydrated(false)
+
+        const restoreDraft = async () => {
+            const draft = await readPersistentState<MovementDraftState>(draftStorageKey)
+
+            if (!isMounted) return
+
+            if (draft) {
+                setSearchQuery(draft.searchQuery || '')
+                setQuantity(draft.quantity || '1')
+                setItems(Array.isArray(draft.items) ? draft.items : [])
+                setAcceptanceCategory(draft.acceptanceCategory || '')
+                setAcceptancePurchasePrice(draft.acceptancePurchasePrice || '')
+                setAcceptanceSellingPrice(draft.acceptanceSellingPrice || '')
+                setManualSupplier(draft.manualSupplier || '')
+                setManualInvoiceNumber(draft.manualInvoiceNumber || '')
+                setManualComment(draft.manualComment || '')
+                setShipper(draft.shipper || '')
+                setConsignee(draft.consignee || '')
+            }
+
+            setIsDraftHydrated(true)
+        }
+
+        void restoreDraft()
+
+        return () => {
+            isMounted = false
+        }
+    }, [draftStorageKey])
+
+    useEffect(() => {
+        if (!isDraftHydrated) return
+
+        writePersistentState<MovementDraftState>(draftStorageKey, {
+            searchQuery,
+            quantity,
+            items,
+            acceptanceCategory,
+            acceptancePurchasePrice,
+            acceptanceSellingPrice,
+            manualSupplier,
+            manualInvoiceNumber,
+            manualComment,
+            shipper,
+            consignee,
+        })
+    }, [
+        acceptanceCategory,
+        acceptancePurchasePrice,
+        acceptanceSellingPrice,
+        consignee,
+        draftStorageKey,
+        isDraftHydrated,
+        items,
+        manualComment,
+        manualInvoiceNumber,
+        manualSupplier,
+        quantity,
+        searchQuery,
+        shipper,
+    ])
+
     useEffect(() => {
         const query = searchQuery.trim()
 
         if (query.length < 2) {
             setSuggestions([])
             setSelectedProduct(null)
-
-            if (isAcceptance) {
-                setAcceptanceCategory('')
-                setAcceptancePurchasePrice('')
-                setAcceptanceSellingPrice('')
-            }
-
             return
         }
 
@@ -335,7 +407,11 @@ export default function ProductMovementForm({
     }, [searchQuery, isAcceptance])
 
     useEffect(() => {
-        if (!isAcceptance) {
+        if (!isAcceptance || !isDraftHydrated) {
+            return
+        }
+
+        if (acceptanceSellingPrice.trim()) {
             return
         }
 
@@ -346,7 +422,14 @@ export default function ProductMovementForm({
                 selectedProduct?.name
             )
         )
-    }, [isAcceptance, acceptancePurchasePrice, acceptanceCategory, selectedProduct])
+    }, [
+        acceptanceCategory,
+        acceptancePurchasePrice,
+        acceptanceSellingPrice,
+        isAcceptance,
+        isDraftHydrated,
+        selectedProduct,
+    ])
 
     const resetDraftRow = () => {
         setSearchQuery('')
@@ -356,6 +439,18 @@ export default function ProductMovementForm({
         setAcceptanceCategory('')
         setAcceptancePurchasePrice('')
         setAcceptanceSellingPrice('')
+    }
+
+    const clearCurrentDraft = () => {
+        clearPersistentState(draftStorageKey)
+        setItems([])
+        resetDraftRow()
+        setManualSupplier('')
+        setManualInvoiceNumber('')
+        setManualComment('')
+        setShipper('')
+        setConsignee('')
+        setError(null)
     }
 
     const total = useMemo(() => {
@@ -793,16 +888,18 @@ export default function ProductMovementForm({
         `
     }
 
-
-    const buildAcceptanceDocumentsHtml = (documentNumber: string, rows: MovementItem[]) => {
+    const buildAcceptanceDocumentHtml = (documentNumber: string, rows: MovementItem[]) => {
         const date = new Date().toLocaleDateString('ru-RU')
-        const purchaseTotal = rows.reduce((sum, item) => sum + parseNumber(item.quantity) * parseNumber(item.purchasePrice), 0)
-        const sellingTotal = rows.reduce((sum, item) => sum + parseNumber(item.quantity) * parseNumber(item.sellingPrice), 0)
+        const supplierName = effectiveSupplier?.trim() || '-'
+        const invoice = effectiveInvoiceNumber?.trim() || '-'
+        const note = effectiveComment?.trim() || '-'
 
-        const fullRowsHtml = rows.map((item, index) => {
+        const rowsHtml = rows.map((item, index) => {
             const qty = parseNumber(item.quantity)
             const purchasePrice = parseNumber(item.purchasePrice)
             const sellingPrice = parseNumber(item.sellingPrice)
+            const purchaseSum = qty * purchasePrice
+            const sellingSum = qty * sellingPrice
 
             return `
                 <tr>
@@ -813,29 +910,20 @@ export default function ProductMovementForm({
                     <td>${unitLabel(item.product.unit)}</td>
                     <td>${qty}</td>
                     <td>${money(purchasePrice)}</td>
-                    <td>${money(qty * purchasePrice)}</td>
+                    <td>${money(purchaseSum)}</td>
                     <td>${money(sellingPrice)}</td>
-                    <td>${money(qty * sellingPrice)}</td>
+                    <td>${money(sellingSum)}</td>
                 </tr>
             `
         }).join('')
 
-        const sellerRowsHtml = rows.map((item, index) => {
-            const qty = parseNumber(item.quantity)
-            const sellingPrice = parseNumber(item.sellingPrice)
+        const totalPurchase = rows.reduce((sum, item) => {
+            return sum + parseNumber(item.quantity) * parseNumber(item.purchasePrice)
+        }, 0)
 
-            return `
-                <tr>
-                    <td>${index + 1}</td>
-                    <td>${escapeHtml(item.product.name)}</td>
-                    <td>${escapeHtml(item.product.barcode || '-')}</td>
-                    <td>${escapeHtml(item.category || item.product.category || '-')}</td>
-                    <td>${unitLabel(item.product.unit)}</td>
-                    <td>${qty}</td>
-                    <td>${money(sellingPrice)}</td>
-                </tr>
-            `
-        }).join('')
+        const totalSelling = rows.reduce((sum, item) => {
+            return sum + parseNumber(item.quantity) * parseNumber(item.sellingPrice)
+        }, 0)
 
         return `
             <!doctype html>
@@ -844,173 +932,153 @@ export default function ProductMovementForm({
                 <meta charset="utf-8" />
                 <title>Приёмка ${escapeHtml(documentNumber)}</title>
                 <style>
-                    * { box-sizing: border-box; }
+                    * {
+                        box-sizing: border-box;
+                    }
+
                     body {
                         font-family: Arial, sans-serif;
                         color: #111827;
                         margin: 24px;
                         font-size: 12px;
                     }
+
                     h1 {
                         text-align: center;
                         font-size: 20px;
-                        margin: 0 0 14px;
+                        margin: 0 0 16px;
                     }
-                    .doc-label {
-                        text-align: center;
-                        color: #6b7280;
-                        font-size: 12px;
-                        margin: -8px 0 14px;
-                    }
+
                     .meta {
                         display: grid;
                         grid-template-columns: 1fr 1fr;
                         gap: 8px 24px;
-                        margin-bottom: 16px;
+                        margin-bottom: 18px;
                     }
+
                     .line {
                         border-bottom: 1px solid #111827;
                         min-height: 22px;
                         padding-top: 4px;
                     }
+
                     table {
                         width: 100%;
                         border-collapse: collapse;
-                        margin-top: 10px;
+                        margin-top: 12px;
                     }
-                    th, td {
+
+                    th,
+                    td {
                         border: 1px solid #111827;
                         padding: 5px;
                         text-align: left;
                         vertical-align: top;
                     }
-                    th { background: #f3f4f6; }
-                    .total {
-                        margin-top: 10px;
-                        text-align: right;
+
+                    th {
+                        background: #f3f4f6;
+                    }
+
+                    .totals {
+                        display: grid;
+                        grid-template-columns: 1fr 1fr;
+                        gap: 16px;
+                        margin-top: 14px;
                         font-size: 15px;
                         font-weight: 700;
                     }
-                    .comment {
-                        margin-top: 12px;
+
+                    .total-box {
+                        border: 1px solid #111827;
+                        padding: 8px;
                     }
+
                     .signatures {
                         display: grid;
                         grid-template-columns: 1fr 1fr;
                         gap: 40px;
-                        margin-top: 40px;
+                        margin-top: 48px;
                     }
+
                     .signature-line {
                         border-top: 1px solid #111827;
                         padding-top: 6px;
                         text-align: center;
                     }
-                    .page-break {
-                        page-break-before: always;
-                        break-before: page;
-                    }
+
                     @media print {
-                        body { margin: 10mm; }
-                        .page-break { page-break-before: always; break-before: page; }
+                        body {
+                            margin: 12mm;
+                        }
                     }
                 </style>
             </head>
             <body>
-                <section>
-                    <h1>Акт приёмки товара № ${escapeHtml(documentNumber)}</h1>
-                    <div class="doc-label">Документ для администрации</div>
+                <h1>Акт приёмки товара № ${escapeHtml(documentNumber)}</h1>
 
-                    <div class="meta">
-                        <div>
-                            <strong>Дата:</strong>
-                            <div class="line">${date}</div>
-                        </div>
-                        <div>
-                            <strong>Номер документа:</strong>
-                            <div class="line">${escapeHtml(documentNumber)}</div>
-                        </div>
-                        <div>
-                            <strong>Поставщик:</strong>
-                            <div class="line">${escapeHtml(effectiveSupplier || '-')}</div>
-                        </div>
-                        <div>
-                            <strong>Номер накладной:</strong>
-                            <div class="line">${escapeHtml(effectiveInvoiceNumber || '-')}</div>
-                        </div>
+                <div class="meta">
+                    <div>
+                        <strong>Дата:</strong>
+                        <div class="line">${date}</div>
                     </div>
 
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>№</th>
-                                <th>Товар</th>
-                                <th>Штрихкод</th>
-                                <th>Категория</th>
-                                <th>Ед.</th>
-                                <th>Кол-во</th>
-                                <th>Закупка</th>
-                                <th>Сумма закупки</th>
-                                <th>Продажа</th>
-                                <th>Сумма продажи</th>
-                            </tr>
-                        </thead>
-                        <tbody>${fullRowsHtml}</tbody>
-                    </table>
-
-                    <div class="total">Итого закупка: ${money(purchaseTotal)}</div>
-                    <div class="total">Итого продажа: ${money(sellingTotal)}</div>
-
-                    ${effectiveComment ? `<div class="comment"><strong>Комментарий:</strong> ${escapeHtml(effectiveComment)}</div>` : ''}
-
-                    <div class="signatures">
-                        <div class="signature-line">Принял</div>
-                        <div class="signature-line">Проверил</div>
-                    </div>
-                </section>
-
-                <section class="page-break">
-                    <h1>Приёмка товара № ${escapeHtml(documentNumber)}</h1>
-                    <div class="doc-label">Документ для продавцов</div>
-
-                    <div class="meta">
-                        <div>
-                            <strong>Дата:</strong>
-                            <div class="line">${date}</div>
-                        </div>
-                        <div>
-                            <strong>Номер документа:</strong>
-                            <div class="line">${escapeHtml(documentNumber)}</div>
-                        </div>
+                    <div>
+                        <strong>Номер документа:</strong>
+                        <div class="line">${escapeHtml(documentNumber)}</div>
                     </div>
 
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>№</th>
-                                <th>Товар</th>
-                                <th>Штрихкод</th>
-                                <th>Категория</th>
-                                <th>Ед.</th>
-                                <th>Кол-во</th>
-                                <th>Цена продажи</th>
-                            </tr>
-                        </thead>
-                        <tbody>${sellerRowsHtml}</tbody>
-                    </table>
-
-                    <div class="total">Итого продажа: ${money(sellingTotal)}</div>
-
-                    <div class="signatures">
-                        <div class="signature-line">Передал</div>
-                        <div class="signature-line">Продавец</div>
+                    <div>
+                        <strong>Поставщик:</strong>
+                        <div class="line">${escapeHtml(supplierName)}</div>
                     </div>
-                </section>
+
+                    <div>
+                        <strong>Накладная поставщика:</strong>
+                        <div class="line">${escapeHtml(invoice)}</div>
+                    </div>
+
+                    <div style="grid-column: 1 / -1;">
+                        <strong>Комментарий:</strong>
+                        <div class="line">${escapeHtml(note)}</div>
+                    </div>
+                </div>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>№</th>
+                            <th>Товар</th>
+                            <th>Штрихкод</th>
+                            <th>Категория</th>
+                            <th>Ед.</th>
+                            <th>Кол-во</th>
+                            <th>Закупка</th>
+                            <th>Сумма закупки</th>
+                            <th>Продажа</th>
+                            <th>Сумма продажи</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rowsHtml}
+                    </tbody>
+                </table>
+
+                <div class="totals">
+                    <div class="total-box">Итого закупка: ${money(totalPurchase)}</div>
+                    <div class="total-box">Итого продажа: ${money(totalSelling)}</div>
+                </div>
+
+                <div class="signatures">
+                    <div class="signature-line">Сдал / поставщик</div>
+                    <div class="signature-line">Принял</div>
+                </div>
             </body>
             </html>
         `
     }
 
-    const printAcceptanceDocuments = (documentNumber: string, rows: MovementItem[]) => {
+    const printAcceptanceDocument = (documentNumber: string, rows: MovementItem[]) => {
         const iframe = document.createElement('iframe')
 
         iframe.style.position = 'fixed'
@@ -1032,7 +1100,7 @@ export default function ProductMovementForm({
         }
 
         iframeDocument.open()
-        iframeDocument.write(buildAcceptanceDocumentsHtml(documentNumber, rows))
+        iframeDocument.write(buildAcceptanceDocumentHtml(documentNumber, rows))
         iframeDocument.close()
 
         iframeWindow.focus()
@@ -1089,6 +1157,8 @@ export default function ProductMovementForm({
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
+                shipper,
+                consignee,
                 items: snapshot.map(item => ({
                     productId: item.product.id,
                     quantity: parseNumber(item.quantity),
@@ -1100,7 +1170,16 @@ export default function ProductMovementForm({
         })
 
         const text = await response.text()
-        const data = text ? JSON.parse(text) as { number?: string; message?: string } : null
+
+        let data: OperationApiResult | null = null
+
+        if (text) {
+            try {
+                data = JSON.parse(text)
+            } catch {
+                data = null
+            }
+        }
 
         if (!response.ok) {
             console.error('Shipment API error:', {
@@ -1123,6 +1202,12 @@ export default function ProductMovementForm({
 
         printWaybill(data.number, snapshot)
 
+        window.dispatchEvent(new CustomEvent('shipment-history-updated', {
+            detail: data,
+        }))
+
+        await onShipmentSaved?.(data)
+
         return data
     }
 
@@ -1142,19 +1227,27 @@ export default function ProductMovementForm({
         })
 
         const text = await response.text()
-        const rawData: unknown = text ? JSON.parse(text) : null
-        const data = parseAcceptanceCommitResult(rawData)
+
+        let data: AcceptanceCommitResult | null = null
+
+        if (text) {
+            try {
+                data = JSON.parse(text)
+            } catch {
+                data = null
+            }
+        }
 
         if (!response.ok) {
             console.error('Manual acceptance API error:', {
                 status: response.status,
                 statusText: response.statusText,
-                data: rawData,
+                data,
                 text,
             })
 
             throw new Error(
-                getResponseMessage(rawData) ||
+                data?.message ||
                 text ||
                 `Ошибка API ${response.status}: ${response.statusText}`
             )
@@ -1176,7 +1269,7 @@ export default function ProductMovementForm({
 
         await onAcceptanceSaved?.(data)
 
-        printAcceptanceDocuments(documentNumber, snapshot)
+        printAcceptanceDocument(documentNumber, snapshot)
 
         alert(`Приёмка сохранена в историю и отправлена на печать. Номер: ${documentNumber}`)
 
@@ -1203,8 +1296,14 @@ export default function ProductMovementForm({
                 await handleAcceptanceCommit(snapshot)
             }
 
+            clearPersistentState(draftStorageKey)
             setItems([])
             resetDraftRow()
+            setManualSupplier('')
+            setManualInvoiceNumber('')
+            setManualComment('')
+            setShipper('')
+            setConsignee('')
         } catch (error) {
             console.error(error)
 
@@ -1239,6 +1338,7 @@ export default function ProductMovementForm({
                 </p>
             </div>
 
+
             {shouldShowAcceptanceDocumentFields && (
                 <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
                     <input
@@ -1263,6 +1363,7 @@ export default function ProductMovementForm({
                     />
                 </div>
             )}
+
 
             {isShipment && (
                 <div className="mt-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -1551,22 +1652,41 @@ export default function ProductMovementForm({
             </div>
 
             <div className="mt-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                <div className="text-2xl font-bold text-gray-900">
-                    Итого: {money(total)}
+                <div>
+                    <div className="text-2xl font-bold text-gray-900">
+                        Итого: {money(total)}
+                    </div>
+
+                    {isDraftHydrated && (items.length > 0 || searchQuery || acceptanceCategory || acceptancePurchasePrice || acceptanceSellingPrice) && (
+                        <div className="mt-1 text-sm text-gray-500">
+                            Черновик сохранён в браузере. Можно уйти со страницы или закрыть вкладку.
+                        </div>
+                    )}
                 </div>
 
-                <button
-                    type="button"
-                    onClick={handleCommit}
-                    disabled={isCommitLoading || items.length === 0}
-                    className={`${buttonClass} ${isShipment ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}
-                >
-                    {isCommitLoading
-                        ? 'Применение...'
-                        : isShipment
-                            ? 'Списать и распечатать ТТН'
-                            : 'Сохранить и распечатать приёмку'}
-                </button>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                    <button
+                        type="button"
+                        onClick={clearCurrentDraft}
+                        disabled={isCommitLoading}
+                        className="rounded-xl border border-gray-300 bg-white px-6 py-3 text-base font-semibold text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                        Очистить черновик
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={handleCommit}
+                        disabled={isCommitLoading || items.length === 0}
+                        className={`${buttonClass} ${isShipment ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+                    >
+                        {isCommitLoading
+                            ? 'Применение...'
+                            : isShipment
+                                ? 'Списать и распечатать ТТН'
+                                : 'Сохранить и распечатать приёмку'}
+                    </button>
+                </div>
             </div>
         </div>
     )

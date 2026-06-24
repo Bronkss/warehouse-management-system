@@ -1,6 +1,13 @@
 'use client'
 
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import {
+    ACCEPTANCE_MODAL_DRAFT_KEY,
+    ACCEPTANCE_PAGE_DRAFT_KEY,
+    clearPersistentState,
+    readPersistentState,
+    writePersistentState,
+} from '@/app/lib/acceptanceStateManager'
 import System from '@/app/system/page'
 import ProductMovementForm from '@/app/components/ProductMovementForm'
 
@@ -168,6 +175,23 @@ type AcceptancePrintData = {
     comment: string
     createdAt: string
     rows: PreviewRow[]
+}
+
+type AcceptancePageDraftState = {
+    supplier: string
+    invoiceNumber: string
+    comment: string
+    historySearch: string
+    previewRows: PreviewRow[]
+}
+
+type AcceptanceModalDraftState = {
+    isOpen: boolean
+    selectedAcceptance: AcceptanceDetail | null
+    modalRows: PreviewRow[]
+    modalSupplier: string
+    modalInvoiceNumber: string
+    modalComment: string
 }
 
 function buildAcceptanceDocumentsHtml(data: AcceptancePrintData) {
@@ -486,6 +510,9 @@ export default function Page() {
     const [modalSuccess, setModalSuccess] = useState<string | null>(null)
     const [isModalSaving, setIsModalSaving] = useState(false)
 
+    const [isPageDraftHydrated, setIsPageDraftHydrated] = useState(false)
+    const [isModalDraftHydrated, setIsModalDraftHydrated] = useState(false)
+
     const isEditMode = Boolean(editingAcceptance)
 
     const summary = useMemo(() => {
@@ -568,6 +595,85 @@ export default function Page() {
         loadHistory()
     }, [])
 
+    useEffect(() => {
+        let isMounted = true
+
+        const restoreDrafts = async () => {
+            const [draft, modalDraft] = await Promise.all([
+                readPersistentState<AcceptancePageDraftState>(ACCEPTANCE_PAGE_DRAFT_KEY),
+                readPersistentState<AcceptanceModalDraftState>(ACCEPTANCE_MODAL_DRAFT_KEY),
+            ])
+
+            if (!isMounted) return
+
+            if (draft) {
+                setSupplier(draft.supplier || '')
+                setInvoiceNumber(draft.invoiceNumber || '')
+                setComment(draft.comment || '')
+                setHistorySearch(draft.historySearch || '')
+                setPreviewRows(Array.isArray(draft.previewRows) ? renumberRows(draft.previewRows) : [])
+            }
+
+            if (modalDraft?.isOpen && modalDraft.selectedAcceptance) {
+                setSelectedAcceptance(modalDraft.selectedAcceptance)
+                setModalSupplier(modalDraft.modalSupplier || '')
+                setModalInvoiceNumber(modalDraft.modalInvoiceNumber || '')
+                setModalComment(modalDraft.modalComment || '')
+                setModalRows(Array.isArray(modalDraft.modalRows) ? renumberRows(modalDraft.modalRows) : [])
+                setIsAcceptanceModalOpen(true)
+            }
+
+            setIsPageDraftHydrated(true)
+            setIsModalDraftHydrated(true)
+        }
+
+        void restoreDrafts()
+
+        return () => {
+            isMounted = false
+        }
+    }, [])
+
+    useEffect(() => {
+        if (!isPageDraftHydrated) return
+
+        writePersistentState<AcceptancePageDraftState>(ACCEPTANCE_PAGE_DRAFT_KEY, {
+            supplier,
+            invoiceNumber,
+            comment,
+            historySearch,
+            previewRows,
+        })
+    }, [
+        comment,
+        historySearch,
+        invoiceNumber,
+        isPageDraftHydrated,
+        previewRows,
+        supplier,
+    ])
+
+    useEffect(() => {
+        if (!isModalDraftHydrated) return
+
+        writePersistentState<AcceptanceModalDraftState>(ACCEPTANCE_MODAL_DRAFT_KEY, {
+            isOpen: isAcceptanceModalOpen,
+            selectedAcceptance,
+            modalRows,
+            modalSupplier,
+            modalInvoiceNumber,
+            modalComment,
+        })
+    }, [
+        isAcceptanceModalOpen,
+        isModalDraftHydrated,
+        modalComment,
+        modalInvoiceNumber,
+        modalRows,
+        modalSupplier,
+        selectedAcceptance,
+    ])
+
     const updateRow = (rowId: string, field: keyof PreviewRow, value: PreviewRow[keyof PreviewRow]) => {
         setPreviewRows(prev =>
             prev.map(row =>
@@ -600,6 +706,7 @@ export default function Page() {
     }
 
     const resetForm = () => {
+        clearPersistentState(ACCEPTANCE_PAGE_DRAFT_KEY)
         setFile(null)
         setPreviewRows([])
         setSupplier('')
@@ -607,6 +714,13 @@ export default function Page() {
         setComment('')
         setEditingAcceptance(null)
         setCommitResult(null)
+        setError(null)
+    }
+
+    const clearUnsavedAcceptanceDraft = () => {
+        clearPersistentState(ACCEPTANCE_PAGE_DRAFT_KEY)
+        setPreviewRows([])
+        setFile(null)
         setError(null)
     }
 
@@ -719,6 +833,7 @@ export default function Page() {
     }
 
     const closeAcceptanceModal = () => {
+        clearPersistentState(ACCEPTANCE_MODAL_DRAFT_KEY)
         setIsAcceptanceModalOpen(false)
         setSelectedAcceptance(null)
         setModalRows([])
@@ -1190,6 +1305,10 @@ export default function Page() {
                         </div>
                     </div>
 
+                    <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                        Черновики приёмки сохраняются в браузере автоматически. Можно перейти на другую страницу, обновить браузер или закрыть вкладку — введённые данные восстановятся.
+                    </div>
+
                     <ProductMovementForm
                         mode="acceptance"
                         supplier={supplier}
@@ -1255,6 +1374,14 @@ export default function Page() {
                                     </div>
 
                                     <div className="flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={clearUnsavedAcceptanceDraft}
+                                            className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100"
+                                        >
+                                            Очистить черновик
+                                        </button>
+
                                         <button
                                             type="button"
                                             onClick={addManualRow}

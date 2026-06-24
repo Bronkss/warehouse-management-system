@@ -11,10 +11,11 @@ const menuItems = [
     {title: 'Продажи', icon: '/icons/order.png', linkName: 'sales'},
     {title: 'Приемки', icon: '/icons/priemka.png', linkName: 'priemka'},
     {title: 'Отгрузки', icon: '/icons/otgruzki.png', linkName: 'otgruzki'},
-    {title: 'Списания', icon: '/icons/spisaniya.png', linkName: 'not-found'},
-    {title: 'Поставщики', icon: '/icons/postavshiki.png', linkName: 'not-found'},
-    {title: 'Инвентаризация', icon: '/icons/inventarizachiya.png', linkName: 'not-found'},
-    {title: 'Статистика', icon: '/icons/statistic.png', linkName: 'not-found'},
+    {title: 'Доставки', icon: '/icons/delivery.png', linkName: 'deliveries'},
+    // {title: 'Списания', icon: '/icons/spisaniya.png', linkName: 'not-found'},
+    // {title: 'Поставщики', icon: '/icons/postavshiki.png', linkName: 'not-found'},
+    // {title: 'Инвентаризация', icon: '/icons/inventarizachiya.png', linkName: 'not-found'},
+    // {title: 'Статистика', icon: '/icons/statistic.png', linkName: 'not-found'},
 ]
 
 type Props = {

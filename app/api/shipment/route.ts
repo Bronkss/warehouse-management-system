@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
 
 export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
 type ProductUnit = 'piece' | 'weight'
 
@@ -21,6 +22,12 @@ interface ProductRow {
 interface ShipmentItem {
     productId: number
     quantity: number
+}
+
+type ShipmentBody = {
+    items?: ShipmentItem[]
+    shipper?: string
+    consignee?: string
 }
 
 const mapProduct = (row: ProductRow) => ({
@@ -43,12 +50,23 @@ function generateShipmentNumber() {
     return `TTN-${date}-${random}`
 }
 
+function toNumber(value: unknown) {
+    const parsed = Number(String(value ?? '0').replace(',', '.'))
+    return Number.isFinite(parsed) ? parsed : 0
+}
+
+function cleanString(value: unknown) {
+    return String(value ?? '').trim()
+}
+
 export async function POST(request: NextRequest) {
     const client = await pool.connect()
 
     try {
-        const body = await request.json()
-        const items = body.items as ShipmentItem[]
+        const body = await request.json() as ShipmentBody
+        const items = body.items
+        const shipper = cleanString(body.shipper)
+        const consignee = cleanString(body.consignee)
 
         if (!Array.isArray(items) || items.length === 0) {
             return NextResponse.json(
@@ -59,7 +77,7 @@ export async function POST(request: NextRequest) {
 
         for (const item of items) {
             const productId = Number(item.productId)
-            const quantity = Number(item.quantity)
+            const quantity = toNumber(item.quantity)
 
             if (!Number.isInteger(productId) || productId <= 0) {
                 return NextResponse.json(
@@ -79,11 +97,33 @@ export async function POST(request: NextRequest) {
         await client.query('BEGIN')
 
         const shipmentNumber = generateShipmentNumber()
-        const updatedProducts = []
+        const shipmentResult = await client.query<{ id: number }>(
+            `
+            INSERT INTO product_shipments (
+                number,
+                shipper,
+                consignee,
+                total_rows,
+                total_quantity,
+                total_amount,
+                status,
+                errors
+            )
+            VALUES ($1, $2, $3, 0, 0, 0, 'completed', '[]'::jsonb)
+            RETURNING id
+            `,
+            [shipmentNumber, shipper || null, consignee || null]
+        )
 
-        for (const item of items) {
+        const shipmentId = shipmentResult.rows[0].id
+        const updatedProducts = []
+        let totalQuantity = 0
+        let totalAmount = 0
+
+        for (let index = 0; index < items.length; index += 1) {
+            const item = items[index]
             const productId = Number(item.productId)
-            const quantity = Number(item.quantity)
+            const quantity = toNumber(item.quantity)
 
             const productResult = await client.query<ProductRow>(
                 `
@@ -111,9 +151,11 @@ export async function POST(request: NextRequest) {
                 throw new Error(`Товар с ID ${productId} не найден`)
             }
 
-            if (Number(product.stock) < quantity) {
+            const previousStock = Number(product.stock)
+
+            if (previousStock < quantity) {
                 throw new Error(
-                    `Недостаточно остатка: ${product.name}. Доступно: ${Number(product.stock)}`
+                    `Недостаточно остатка: ${product.name}. Доступно: ${previousStock}`
                 )
             }
 
@@ -140,12 +182,70 @@ export async function POST(request: NextRequest) {
                 ]
             )
 
-            updatedProducts.push(mapProduct(updateResult.rows[0]))
+            const updatedProduct = updateResult.rows[0]
+            const sellingPrice = Number(product.selling_price || 0)
+            const purchasePrice = Number(product.purchase_price || 0)
+            const newStock = Number(updatedProduct.stock)
+
+            await client.query(
+                `
+                INSERT INTO product_shipment_items (
+                    shipment_id,
+                    product_id,
+                    row_number,
+                    product_name,
+                    category,
+                    barcode,
+                    unit,
+                    quantity,
+                    purchase_price,
+                    selling_price,
+                    previous_stock,
+                    new_stock,
+                    result,
+                    error
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'shipped', NULL)
+                `,
+                [
+                    shipmentId,
+                    productId,
+                    index + 1,
+                    product.name || '',
+                    product.category || '',
+                    product.barcode || '',
+                    product.unit || 'piece',
+                    quantity,
+                    purchasePrice,
+                    sellingPrice,
+                    previousStock,
+                    newStock,
+                ]
+            )
+
+            totalQuantity += quantity
+            totalAmount += quantity * sellingPrice
+            updatedProducts.push(mapProduct(updatedProduct))
         }
+
+        await client.query(
+            `
+            UPDATE product_shipments
+            SET
+                total_rows = $1,
+                total_quantity = $2,
+                total_amount = $3,
+                updated_at = NOW()
+            WHERE id = $4
+            `,
+            [items.length, totalQuantity, totalAmount, shipmentId]
+        )
 
         await client.query('COMMIT')
 
         return NextResponse.json({
+            id: shipmentId,
+            shipmentId,
             number: shipmentNumber,
             shipmentNumber,
             updated: updatedProducts.length,
