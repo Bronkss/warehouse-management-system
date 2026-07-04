@@ -8,7 +8,7 @@ import {
     SHIPMENT_PAGE_DRAFT_KEY,
     writeShipmentState,
 } from '@/app/lib/shipmentStateManager'
-import System from '@/app/system/page'
+import System from '@/app/components/SystemShell'
 import ProductMovementForm from '@/app/components/ProductMovementForm'
 
 type ProductUnit = 'piece' | 'weight'
@@ -279,6 +279,7 @@ export default function Page() {
     const [history, setHistory] = useState<ShipmentHistoryItem[]>([])
     const [historySearch, setHistorySearch] = useState('')
 
+    const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false)
     const [isHistoryLoading, setIsHistoryLoading] = useState(false)
     const [isShipmentLoading, setIsShipmentLoading] = useState(false)
     const [isSaveLoading, setIsSaveLoading] = useState(false)
@@ -413,6 +414,12 @@ export default function Page() {
         })
     }, [isModalOpen, isModalHydrated, modalConsignee, modalRows, modalShipper, selectedShipment])
 
+    const openHistoryModal = () => {
+        setIsHistoryModalOpen(true)
+        setError(null)
+        void loadHistory()
+    }
+
     const closeModal = () => {
         setIsModalOpen(false)
         setSelectedShipment(null)
@@ -426,6 +433,7 @@ export default function Page() {
         try {
             setIsShipmentLoading(true)
             setError(null)
+            setIsHistoryModalOpen(false)
             setIsModalOpen(true)
             setSelectedShipment(null)
             setModalRows([])
@@ -549,110 +557,47 @@ export default function Page() {
         <System>
             <section className="relative z-0 w-full min-h-screen bg-gray-50 p-4">
                 <div className="mx-auto max-w-[1600px] space-y-4">
-                    <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-4">
-                        <div className="rounded-2xl bg-white p-5 shadow-sm">
-                            <h1 className="text-2xl font-bold text-gray-900">
-                                Отгрузки
-                            </h1>
-
-                            <p className="mt-1 text-sm text-gray-500">
-                                Оформляйте отгрузку как раньше. История сохраняется отдельно и доступна для просмотра и редактирования.
-                            </p>
-
-                            {error && (
-                                <div className="mt-4 rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-700">
-                                    {error}
+                    <div className="rounded-2xl bg-white p-5 shadow-sm">
+                        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                            <div>
+                                <div className="inline-flex rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">
+                                    Новая отгрузка
                                 </div>
-                            )}
-                        </div>
 
-                        <div className="rounded-2xl bg-white p-5 shadow-sm">
-                            <div className="flex items-center justify-between gap-2">
-                                <h2 className="text-lg font-semibold text-gray-900">
-                                    История отгрузок
-                                </h2>
+                                <h1 className="mt-2 text-2xl font-bold text-gray-900">
+                                    Отгрузки
+                                </h1>
+
+                                <p className="mt-1 max-w-3xl text-sm text-gray-500">
+                                    Форма добавления находится сразу под шапкой. История скрыта в отдельном окне и не мешает работе со сканером.
+                                </p>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    onClick={openHistoryModal}
+                                    className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-700"
+                                >
+                                    История отгрузок ({history.length})
+                                </button>
 
                                 <button
                                     type="button"
                                     onClick={loadHistory}
-                                    className="text-sm text-blue-600 hover:text-blue-700"
+                                    disabled={isHistoryLoading}
+                                    className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 disabled:opacity-50"
                                 >
-                                    Обновить
+                                    {isHistoryLoading ? 'Обновляю...' : 'Обновить историю'}
                                 </button>
                             </div>
-
-                            <input
-                                type="search"
-                                value={historySearch}
-                                onChange={(e) => setHistorySearch(e.target.value)}
-                                placeholder="Поиск: номер, отправитель, получатель, дата"
-                                className="mt-4 h-10 w-full rounded-lg border border-gray-300 px-3 text-sm outline-none focus:ring-1 focus:ring-blue-500"
-                            />
-
-                            <div className="mt-3 max-h-[360px] space-y-2 overflow-y-auto pr-1">
-                                {(isHistoryLoading || isShipmentLoading) && (
-                                    <div className="text-sm text-gray-500">
-                                        Загрузка...
-                                    </div>
-                                )}
-
-                                {!isHistoryLoading && filteredHistory.length === 0 && (
-                                    <div className="text-sm text-gray-500">
-                                        Отгрузок пока нет
-                                    </div>
-                                )}
-
-                                {filteredHistory.map(item => (
-                                    <button
-                                        key={item.id}
-                                        type="button"
-                                        onClick={() => openShipmentModal(item.id)}
-                                        className={`block w-full rounded-xl border p-3 text-left transition-colors hover:bg-blue-50 ${selectedShipment?.id === item.id ? 'border-blue-200 bg-blue-50' : 'border-gray-100 bg-gray-50'}`}
-                                    >
-                                        <div className="flex items-center justify-between gap-2">
-                                            <div className="font-semibold text-blue-700">
-                                                {item.number}
-                                            </div>
-
-                                            <div className={`rounded-full px-2 py-0.5 text-xs ${
-                                                item.status === 'completed'
-                                                    ? 'bg-green-100 text-green-700'
-                                                    : 'bg-orange-100 text-orange-700'
-                                            }`}>
-                                                {item.status === 'completed' ? 'Готово' : 'С ошибками'}
-                                            </div>
-                                        </div>
-
-                                        <div className="mt-1 text-xs text-gray-500">
-                                            {formatDate(item.createdAt)}
-                                        </div>
-
-                                        {(item.shipper || item.consignee) && (
-                                            <div className="mt-1 truncate text-xs text-gray-500">
-                                                {item.shipper || 'Отправитель не указан'} → {item.consignee || 'Получатель не указан'}
-                                            </div>
-                                        )}
-
-                                        <div className="mt-2 grid grid-cols-3 gap-1 text-center text-xs">
-                                            <div className="rounded bg-white p-1">
-                                                <div className="text-gray-400">стр.</div>
-                                                <div className="font-bold">{item.totalRows}</div>
-                                            </div>
-
-                                            <div className="rounded bg-blue-50 p-1 text-blue-700">
-                                                <div>кол.</div>
-                                                <div className="font-bold">{item.totalQuantity}</div>
-                                            </div>
-
-                                            <div className="rounded bg-green-50 p-1 text-green-700">
-                                                <div>сумма</div>
-                                                <div className="font-bold">{money(item.totalAmount)}</div>
-                                            </div>
-                                        </div>
-                                    </button>
-                                ))}
-                            </div>
                         </div>
+
+                        {error && (
+                            <div className="mt-4 rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-700">
+                                {error}
+                            </div>
+                        )}
                     </div>
 
                     <ProductMovementForm
@@ -660,6 +605,119 @@ export default function Page() {
                         onShipmentSaved={loadHistory}
                     />
                 </div>
+
+                {isHistoryModalOpen && (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 px-3 py-4">
+                        <div className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+                            <div className="border-b border-gray-100 bg-gray-50 px-5 py-4">
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                    <div>
+                                        <h2 className="text-xl font-bold text-gray-900">
+                                            История отгрузок
+                                        </h2>
+
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Откройте отгрузку для просмотра, редактирования или печати ТТН.
+                                        </p>
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={loadHistory}
+                                            disabled={isHistoryLoading}
+                                            className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 disabled:opacity-50"
+                                        >
+                                            {isHistoryLoading ? 'Обновляю...' : 'Обновить'}
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsHistoryModalOpen(false)}
+                                            className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100"
+                                        >
+                                            Закрыть
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <input
+                                    type="search"
+                                    value={historySearch}
+                                    onChange={(e) => setHistorySearch(e.target.value)}
+                                    placeholder="Поиск: номер, отправитель, получатель, дата"
+                                    className="mt-4 h-10 w-full rounded-lg border border-gray-300 px-3 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                                />
+                            </div>
+
+                            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+                                {(isHistoryLoading || isShipmentLoading) && (
+                                    <div className="mb-3 text-sm text-gray-500">
+                                        Загрузка...
+                                    </div>
+                                )}
+
+                                {!isHistoryLoading && filteredHistory.length === 0 && (
+                                    <div className="rounded-xl border border-gray-100 bg-gray-50 p-8 text-center text-sm text-gray-500">
+                                        Отгрузок пока нет
+                                    </div>
+                                )}
+
+                                <div className="space-y-2">
+                                    {filteredHistory.map(item => (
+                                        <button
+                                            key={item.id}
+                                            type="button"
+                                            onClick={() => openShipmentModal(item.id)}
+                                            className={`block w-full rounded-xl border p-3 text-left transition-colors hover:bg-blue-50 ${selectedShipment?.id === item.id ? 'border-blue-200 bg-blue-50' : 'border-gray-100 bg-gray-50'}`}
+                                        >
+                                            <div className="flex items-center justify-between gap-2">
+                                                <div className="font-semibold text-blue-700">
+                                                    {item.number}
+                                                </div>
+
+                                                <div className={`rounded-full px-2 py-0.5 text-xs ${
+                                                    item.status === 'completed'
+                                                        ? 'bg-green-100 text-green-700'
+                                                        : 'bg-orange-100 text-orange-700'
+                                                }`}>
+                                                    {item.status === 'completed' ? 'Готово' : 'С ошибками'}
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-1 text-xs text-gray-500">
+                                                {formatDate(item.createdAt)}
+                                            </div>
+
+                                            {(item.shipper || item.consignee) && (
+                                                <div className="mt-1 truncate text-xs text-gray-500">
+                                                    {item.shipper || 'Отправитель не указан'} → {item.consignee || 'Получатель не указан'}
+                                                </div>
+                                            )}
+
+                                            <div className="mt-3 grid grid-cols-3 gap-1 text-center text-xs">
+                                                <div className="rounded bg-white p-1">
+                                                    <div className="text-gray-400">стр.</div>
+                                                    <div className="font-bold">{item.totalRows}</div>
+                                                </div>
+
+                                                <div className="rounded bg-blue-50 p-1 text-blue-700">
+                                                    <div>кол.</div>
+                                                    <div className="font-bold">{item.totalQuantity}</div>
+                                                </div>
+
+                                                <div className="rounded bg-green-50 p-1 text-green-700">
+                                                    <div>сумма</div>
+                                                    <div className="font-bold">{money(item.totalAmount)}</div>
+                                                </div>
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
 
                 {isModalOpen && (
                     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 px-3 py-4">
@@ -777,7 +835,7 @@ export default function Page() {
                                                             <input
                                                                 type="number"
                                                                 min="0"
-                                                                step="0.001"
+                                                                step={row.unit === 'weight' ? '0.001' : '1'}
                                                                 value={row.quantity}
                                                                 onChange={(e) => updateModalRow(row.rowId, 'quantity', e.target.value)}
                                                                 className={tableInputClass}

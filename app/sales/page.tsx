@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import System from '@/app/system/page'
+import System from '@/app/components/SystemShell'
 
 type PaymentMethod = 'card' | 'cash' | 'transfer'
 

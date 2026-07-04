@@ -3,15 +3,19 @@ import { pool } from '@/app/lib/db'
 
 export const runtime = 'nodejs'
 
-// Обновляем тип - params теперь Promise
 type RouteContext = {
-    params: Promise<{ id: string }>
+    params: Promise<{ id: string }> | { id: string }
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+async function getReceiptId(context: RouteContext): Promise<string> {
+    const params = await context.params
+
+    return params.id
+}
+
+export async function GET(_request: Request, context: RouteContext) {
     try {
-        // Дожидаемся params перед использованием
-        const { id } = await params
+        const id = await getReceiptId(context)
 
         const result = await pool.query(
             `
@@ -49,10 +53,9 @@ export async function GET(_request: Request, { params }: RouteContext) {
     }
 }
 
-export async function DELETE(_request: Request, { params }: RouteContext) {
+export async function DELETE(_request: Request, context: RouteContext) {
     try {
-        // Дожидаемся params перед использованием
-        const { id } = await params
+        const id = await getReceiptId(context)
 
         const result = await pool.query(
             `

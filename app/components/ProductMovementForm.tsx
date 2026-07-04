@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import {
     clearPersistentState,
     MANUAL_ACCEPTANCE_MOVEMENT_DRAFT_KEY,
@@ -94,6 +94,7 @@ type MovementDraftState = {
 
 const inputClass = 'w-full rounded-xl border border-gray-300 px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500'
 const tableInputClass = 'w-full rounded-lg border border-gray-300 px-3 py-2.5 text-base outline-none focus:ring-2 focus:ring-blue-500'
+const quantityTableInputClass = 'w-28 shrink-0 rounded-lg border border-gray-300 px-3 py-2.5 text-base outline-none focus:ring-2 focus:ring-blue-500'
 const buttonClass = 'rounded-xl px-6 py-3 text-base font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50'
 
 function parseNumber(value: string | number) {
@@ -102,6 +103,75 @@ function parseNumber(value: string | number) {
 
 function unitLabel(unit: ProductUnit) {
     return unit === 'weight' ? 'кг' : 'шт.'
+}
+
+function isWeightUnit(unit: ProductUnit) {
+    return unit === 'weight'
+}
+
+function normalizeQuantityInput(value: string, unit: ProductUnit) {
+    if (isWeightUnit(unit)) {
+        const normalized = value
+            .replace(',', '.')
+            .replace(/\s/g, '')
+            .replace(/[^\d.]/g, '')
+
+        const [integerPart, ...decimalParts] = normalized.split('.')
+        const decimalPart = decimalParts.join('').slice(0, 3)
+
+        if (normalized.includes('.')) {
+            return `${integerPart}.${decimalPart}`
+        }
+
+        return integerPart
+    }
+
+    return value
+        .replace(',', '.')
+        .split('.')[0]
+        .replace(/\D/g, '')
+}
+
+function validateQuantityForUnit(value: string | number, unit: ProductUnit) {
+    const rawValue = String(value ?? '').trim().replace(',', '.')
+
+    if (!rawValue) {
+        return 'Введите количество'
+    }
+
+    if (isWeightUnit(unit)) {
+        if (!/^\d+(\.\d{1,3})?$/.test(rawValue)) {
+            return 'Для весового товара количество должно быть до 3 знаков после запятой'
+        }
+    } else if (!/^\d+$/.test(rawValue)) {
+        return 'Для штучного товара количество должно быть целым числом'
+    }
+
+    const quantity = parseNumber(rawValue)
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+        return 'Введите корректное количество'
+    }
+
+    return null
+}
+
+function getQuantityInputProps(unit: ProductUnit) {
+    return isWeightUnit(unit)
+        ? {
+            type: 'number' as const,
+            inputMode: 'decimal' as const,
+            min: '0.001',
+            step: '0.001',
+            placeholder: 'Например 0.350',
+        }
+        : {
+            type: 'number' as const,
+            inputMode: 'numeric' as const,
+            min: '1',
+            step: '1',
+            placeholder: 'Например 1',
+        }
 }
 
 function money(value: number) {
@@ -259,6 +329,15 @@ export default function ProductMovementForm({
     const [manualSupplier, setManualSupplier] = useState('')
     const [manualInvoiceNumber, setManualInvoiceNumber] = useState('')
     const [manualComment, setManualComment] = useState('')
+
+    const [quantityModalProduct, setQuantityModalProduct] = useState<Product | null>(null)
+    const [quantityModalQuantity, setQuantityModalQuantity] = useState('1')
+    const [quantityModalCategory, setQuantityModalCategory] = useState('')
+    const [quantityModalPurchasePrice, setQuantityModalPurchasePrice] = useState('')
+    const [quantityModalSellingPrice, setQuantityModalSellingPrice] = useState('')
+
+    const scanInputRef = useRef<HTMLInputElement>(null)
+    const quantityModalInputRef = useRef<HTMLInputElement>(null)
 
     const effectiveSupplier = externalSupplier ?? manualSupplier
     const effectiveInvoiceNumber = externalInvoiceNumber ?? manualInvoiceNumber
@@ -431,6 +510,17 @@ export default function ProductMovementForm({
         selectedProduct,
     ])
 
+    useEffect(() => {
+        if (!quantityModalProduct) {
+            return
+        }
+
+        window.setTimeout(() => {
+            quantityModalInputRef.current?.focus()
+            quantityModalInputRef.current?.select()
+        }, 0)
+    }, [quantityModalProduct])
+
     const resetDraftRow = () => {
         setSearchQuery('')
         setSuggestions([])
@@ -469,13 +559,66 @@ export default function ProductMovementForm({
         }, 0)
     }, [items, isShipment])
 
-    const addProductToItems = (product: Product, overrides: AddOverrides = {}) => {
-        const qty = parseNumber(overrides.quantity ?? quantity)
+    const openQuantityModal = (product: Product, overrides: AddOverrides = {}) => {
+        const category = isAcceptance
+            ? String(overrides.category ?? acceptanceCategory ?? product.category ?? '').trim()
+            : product.category
 
-        if (!Number.isFinite(qty) || qty <= 0) {
-            setError('Введите корректное количество')
-            return
+        const purchasePrice = isAcceptance
+            ? String(overrides.purchasePrice ?? acceptancePurchasePrice ?? product.purchasePrice ?? '')
+            : String(product.purchasePrice || 0)
+
+        const rawSellingPrice = isAcceptance
+            ? String(
+                overrides.sellingPrice ??
+                acceptanceSellingPrice ??
+                calcSellingPrice(purchasePrice, category, product.name) ??
+                ''
+            )
+            : String(product.sellingPrice || 0)
+
+        const sellingPrice = isAcceptance
+            ? normalizeIntegerPrice(rawSellingPrice)
+            : rawSellingPrice
+
+        const initialQuantity = normalizeQuantityInput(
+            String(overrides.quantity ?? (quantity || '1')),
+            product.unit
+        ) || '1'
+
+        setQuantityModalProduct(product)
+        setQuantityModalQuantity(initialQuantity)
+        setQuantityModalCategory(category)
+        setQuantityModalPurchasePrice(purchasePrice)
+        setQuantityModalSellingPrice(sellingPrice)
+        setError(null)
+    }
+
+    const closeQuantityModal = () => {
+        setQuantityModalProduct(null)
+        setQuantityModalQuantity('1')
+        setQuantityModalCategory('')
+        setQuantityModalPurchasePrice('')
+        setQuantityModalSellingPrice('')
+
+        window.setTimeout(() => {
+            scanInputRef.current?.focus()
+        }, 0)
+    }
+
+    const addProductToItems = (product: Product, overrides: AddOverrides = {}): boolean => {
+        const rawQuantity = normalizeQuantityInput(
+            String(overrides.quantity ?? quantity),
+            product.unit
+        )
+        const quantityError = validateQuantityForUnit(rawQuantity, product.unit)
+
+        if (quantityError) {
+            setError(quantityError)
+            return false
         }
+
+        const qty = parseNumber(rawQuantity)
 
         const existingItem = items.find(item => item.product.id === product.id)
         const existingQty = existingItem ? parseNumber(existingItem.quantity) : 0
@@ -483,7 +626,7 @@ export default function ProductMovementForm({
 
         if (isShipment && newQty > Number(product.stock)) {
             setError(`Недостаточно остатка. Сейчас доступно: ${product.stock} ${unitLabel(product.unit)}`)
-            return
+            return false
         }
 
         const category = isAcceptance
@@ -513,52 +656,80 @@ export default function ProductMovementForm({
 
             if (!category) {
                 setError('Введите категорию')
-                return
+                return false
             }
 
             if (!Number.isFinite(purchasePriceNumber) || purchasePriceNumber <= 0) {
                 setError('Введите корректную цену закупки')
-                return
+                return false
             }
 
             if (!Number.isFinite(sellingPriceNumber) || sellingPriceNumber <= 0) {
                 setError('Цена продажи рассчитана некорректно')
-                return
+                return false
             }
         }
 
         const newItem: MovementItem = {
             product,
-            quantity: String(qty),
+            quantity: rawQuantity,
             category,
             purchasePrice,
             sellingPrice,
         }
 
         setItems(prev => {
-            const exists = prev.some(item => item.product.id === product.id)
+            const existing = prev.find(item => item.product.id === product.id)
 
-            if (!exists) {
-                return [...prev, newItem]
+            if (!existing) {
+                return [newItem, ...prev]
             }
 
-            return prev.map(item => {
-                if (item.product.id !== product.id) {
-                    return item
-                }
+            const updatedItem: MovementItem = {
+                ...existing,
+                quantity: isWeightUnit(product.unit)
+                    ? String(Math.round((parseNumber(existing.quantity) + qty) * 1000) / 1000)
+                    : String(parseNumber(existing.quantity) + qty),
+                category: isAcceptance ? category || existing.category : existing.category,
+                purchasePrice: isAcceptance ? purchasePrice || existing.purchasePrice : existing.purchasePrice,
+                sellingPrice: isAcceptance ? sellingPrice || existing.sellingPrice : existing.sellingPrice,
+            }
 
-                return {
-                    ...item,
-                    quantity: String(parseNumber(item.quantity) + qty),
-                    category: isAcceptance ? category || item.category : item.category,
-                    purchasePrice: isAcceptance ? purchasePrice || item.purchasePrice : item.purchasePrice,
-                    sellingPrice: isAcceptance ? sellingPrice || item.sellingPrice : item.sellingPrice,
-                }
-            })
+            return [
+                updatedItem,
+                ...prev.filter(item => item.product.id !== product.id),
+            ]
         })
 
         setError(null)
         resetDraftRow()
+        return true
+    }
+
+    const confirmQuantityModal = () => {
+        if (!quantityModalProduct) {
+            return
+        }
+
+        const added = addProductToItems(quantityModalProduct, {
+            quantity: quantityModalQuantity,
+            category: quantityModalCategory,
+            purchasePrice: quantityModalPurchasePrice,
+            sellingPrice: quantityModalSellingPrice,
+        })
+
+        if (added) {
+            closeQuantityModal()
+        }
+    }
+
+    const handleQuantityModalKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+        if (event.key !== 'Enter') {
+            return
+        }
+
+        event.preventDefault()
+        confirmQuantityModal()
     }
 
     const handleSuggestionClick = (product: Product) => {
@@ -574,7 +745,7 @@ export default function ProductMovementForm({
             ? calcSellingPrice(purchasePrice, category, product.name)
             : String(product.sellingPrice || 0)
 
-        addProductToItems(product, {
+        openQuantityModal(product, {
             category,
             purchasePrice,
             sellingPrice,
@@ -618,7 +789,7 @@ export default function ProductMovementForm({
                 ? normalizeIntegerPrice(acceptanceSellingPrice || calcSellingPrice(purchasePrice, category, product.name))
                 : String(product.sellingPrice || 0)
 
-            addProductToItems(product, {
+            openQuantityModal(product, {
                 category,
                 purchasePrice,
                 sellingPrice,
@@ -642,7 +813,7 @@ export default function ProductMovementForm({
         setItems(prev =>
             prev.map(item =>
                 item.product.id === productId
-                    ? { ...item, quantity: value }
+                    ? { ...item, quantity: normalizeQuantityInput(value, item.product.unit) }
                     : item
             )
         )
@@ -701,9 +872,10 @@ export default function ProductMovementForm({
 
         for (const item of items) {
             const qty = parseNumber(item.quantity)
+            const quantityError = validateQuantityForUnit(item.quantity, item.product.unit)
 
-            if (!Number.isFinite(qty) || qty <= 0) {
-                return `Некорректное количество у товара "${item.product.name}"`
+            if (quantityError) {
+                return `${quantityError} у товара "${item.product.name}"`
             }
 
             if (isShipment && qty > Number(item.product.stock)) {
@@ -1318,14 +1490,6 @@ export default function ProductMovementForm({
     }
 
     const previewProduct = selectedProduct || suggestions[0] || null
-    const draftQty = parseNumber(quantity)
-
-    const draftPrice = isShipment
-        ? parseNumber(previewProduct?.sellingPrice || 0)
-        : parseNumber(acceptancePurchasePrice || previewProduct?.purchasePrice || 0)
-
-    const draftSum = Number.isFinite(draftQty) ? draftQty * draftPrice : 0
-
     return (
         <div className="w-full rounded-2xl bg-white p-6 shadow-sm">
             <div className="flex flex-col gap-1">
@@ -1334,7 +1498,7 @@ export default function ProductMovementForm({
                 </h1>
 
                 <p className="text-base text-gray-500">
-                    Вводите товар прямо в первой строке таблицы. Нажмите Enter, чтобы добавить найденный товар.
+                    Сканируйте штрихкод или введите название товара. После сканирования откроется окно количества.
                 </p>
             </div>
 
@@ -1389,8 +1553,122 @@ export default function ProductMovementForm({
                 </div>
             )}
 
+            <div className="mt-6 rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 to-white p-5 shadow-sm">
+                <div className="flex flex-col gap-4 xl:flex-row xl:items-start">
+                    <div className="flex-1">
+                        <label className="mb-2 block text-sm font-bold uppercase tracking-wide text-blue-700">
+                            Сканер / поиск товара
+                        </label>
+
+                        <div className="relative">
+                            <input
+                                ref={scanInputRef}
+                                value={searchQuery}
+                                onChange={(e) => {
+                                    setSearchQuery(e.target.value)
+                                    setSelectedProduct(null)
+                                }}
+                                onKeyDown={handleDraftKeyDown}
+                                placeholder="Сканируйте штрихкод или введите название и нажмите Enter"
+                                autoComplete="off"
+                                className="w-full rounded-2xl border-2 border-blue-200 bg-white px-5 py-4 pr-14 font-mono text-xl font-semibold tracking-wide text-gray-900 outline-none transition-colors placeholder:font-sans placeholder:text-base placeholder:font-normal placeholder:tracking-normal focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                            />
+
+                            <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-2xl text-blue-400">
+                                ⌁
+                            </div>
+                        </div>
+
+                        <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="text-sm text-blue-700">
+                                {isSearchLoading
+                                    ? 'Ищу товар в базе...'
+                                    : previewProduct
+                                        ? `Найден: ${previewProduct.name}. Нажмите Enter, чтобы указать количество.`
+                                        : 'После сканирования откроется окно количества. Товар добавится наверх таблицы.'}
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={() => void handleAddFromDraft()}
+                                disabled={isSearchLoading || searchQuery.trim().length < 2}
+                                className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                Открыть количество
+                            </button>
+                        </div>
+                    </div>
+
+                    {previewProduct && (
+                        <div className="w-full rounded-2xl border border-blue-100 bg-white p-4 xl:w-[360px]">
+                            <div className="text-sm font-bold text-gray-900">
+                                {previewProduct.name}
+                            </div>
+
+                            <div className="mt-2 grid grid-cols-2 gap-2 text-sm text-gray-500">
+                                <div>
+                                    <span className="block text-xs text-gray-400">Штрихкод</span>
+                                    <span className="font-mono">{previewProduct.barcode || '—'}</span>
+                                </div>
+
+                                <div>
+                                    <span className="block text-xs text-gray-400">Остаток</span>
+                                    <span>{`${previewProduct.stock} ${unitLabel(previewProduct.unit)}`}</span>
+                                </div>
+
+                                <div>
+                                    <span className="block text-xs text-gray-400">Категория</span>
+                                    <span>{previewProduct.category || '—'}</span>
+                                </div>
+
+                                <div>
+                                    <span className="block text-xs text-gray-400">Ед.</span>
+                                    <span>{unitLabel(previewProduct.unit)}</span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {(suggestions.length > 0 || isSearchLoading) && searchQuery.trim().length >= 2 && (
+                    <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+                        {isSearchLoading && (
+                            <div className="px-4 py-3 text-base text-gray-500">
+                                Поиск...
+                            </div>
+                        )}
+
+                        {!isSearchLoading && suggestions.map(product => (
+                            <button
+                                key={product.id}
+                                type="button"
+                                onMouseDown={(e) => {
+                                    e.preventDefault()
+                                    handleSuggestionClick(product)
+                                }}
+                                className="flex w-full items-center justify-between gap-4 border-b border-gray-100 px-4 py-4 text-left text-base hover:bg-blue-50"
+                            >
+                                <span className="min-w-0">
+                                    <span className="block truncate font-semibold text-gray-900">
+                                        {product.name}
+                                    </span>
+
+                                    <span className="mt-1 block truncate text-sm text-gray-500">
+                                        {product.barcode || 'Без штрихкода'} · {product.category}
+                                    </span>
+                                </span>
+
+                                <span className="whitespace-nowrap text-sm text-gray-500">
+                                    Остаток: {product.stock} {unitLabel(product.unit)}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </div>
+
             <div className="mt-6 w-full overflow-x-auto rounded-2xl border border-gray-100">
-                <table className="w-full min-w-[1650px] text-base">
+                <table className="w-full min-w-[1200px] text-base">
                     <thead className="bg-gray-100 text-gray-700">
                     <tr>
                         <th className="w-[360px] p-4 text-left">Товар</th>
@@ -1405,7 +1683,7 @@ export default function ProductMovementForm({
                             </>
                         )}
 
-                        <th className="w-[170px] p-4 text-left">Количество</th>
+                        <th className="w-[190px] p-4 text-left">Количество</th>
                         <th className="w-[170px] p-4 text-left">
                             {isShipment ? 'Сумма' : 'Сумма закупки'}
                         </th>
@@ -1414,150 +1692,10 @@ export default function ProductMovementForm({
                     </thead>
 
                     <tbody>
-                    <tr className="border-t border-blue-100 bg-blue-50 align-top">
-                        <td className="relative p-4">
-                            <input
-                                value={searchQuery}
-                                onChange={(e) => {
-                                    setSearchQuery(e.target.value)
-                                    setSelectedProduct(null)
-                                }}
-                                onKeyDown={handleDraftKeyDown}
-                                placeholder="Название или штрихкод, затем Enter"
-                                className={tableInputClass}
-                            />
-
-                            <div className="mt-2 text-sm text-blue-700">
-                                {isSearchLoading
-                                    ? 'Поиск...'
-                                    : previewProduct
-                                        ? `Найден: ${previewProduct.name}`
-                                        : 'Enter добавит первый найденный товар'}
-                            </div>
-
-                            {(suggestions.length > 0 || isSearchLoading) && searchQuery.trim().length >= 2 && (
-                                <div className="absolute left-4 right-4 top-[78px] z-30 max-h-80 overflow-auto rounded-xl border border-gray-200 bg-white shadow-xl">
-                                    {isSearchLoading && (
-                                        <div className="px-4 py-3 text-base text-gray-500">
-                                            Поиск...
-                                        </div>
-                                    )}
-
-                                    {!isSearchLoading && suggestions.map(product => (
-                                        <button
-                                            key={product.id}
-                                            type="button"
-                                            onMouseDown={(e) => {
-                                                e.preventDefault()
-                                                handleSuggestionClick(product)
-                                            }}
-                                            className="flex w-full items-center justify-between gap-4 border-b border-gray-100 px-4 py-4 text-left text-base hover:bg-blue-50"
-                                        >
-                                            <span>
-                                                <span className="font-semibold text-gray-900">
-                                                    {product.name}
-                                                </span>
-
-                                                <span className="mt-1 block text-sm text-gray-500">
-                                                    {product.barcode || 'Без штрихкода'} · {product.category}
-                                                </span>
-                                            </span>
-
-                                            <span className="whitespace-nowrap text-sm text-gray-500">
-                                                Остаток: {product.stock} {unitLabel(product.unit)}
-                                            </span>
-                                        </button>
-                                    ))}
-                                </div>
-                            )}
-                        </td>
-
-                        <td className="p-4 text-gray-600">
-                            {previewProduct?.barcode || '—'}
-                        </td>
-
-                        <td className="p-4 text-gray-600">
-                            {previewProduct
-                                ? `${previewProduct.stock} ${unitLabel(previewProduct.unit)}`
-                                : '—'}
-                        </td>
-
-                        {isAcceptance && (
-                            <>
-                                <td className="p-4">
-                                    <input
-                                        value={acceptanceCategory}
-                                        onChange={(e) => setAcceptanceCategory(e.target.value)}
-                                        onKeyDown={handleDraftKeyDown}
-                                        placeholder="Категория"
-                                        className={tableInputClass}
-                                    />
-                                </td>
-
-                                <td className="p-4">
-                                    <input
-                                        value={acceptancePurchasePrice}
-                                        onChange={(e) => setAcceptancePurchasePrice(e.target.value)}
-                                        onKeyDown={handleDraftKeyDown}
-                                        type="number"
-                                        min="0"
-                                        step="0.01"
-                                        placeholder="Закупка"
-                                        className={tableInputClass}
-                                    />
-
-                                    <div className="mt-2 text-xs text-gray-500">
-                                        Из поля БД purchase_price
-                                    </div>
-                                </td>
-
-                                <td className="p-4">
-                                    <input
-                                        value={acceptanceSellingPrice}
-                                        onChange={(e) => setAcceptanceSellingPrice(e.target.value)}
-                                        onBlur={(e) => setAcceptanceSellingPrice(normalizeIntegerPrice(e.target.value))}
-                                        onKeyDown={handleDraftKeyDown}
-                                        type="text"
-                                        inputMode="numeric"
-                                        placeholder="Продажа"
-                                        className={tableInputClass}
-                                    />
-
-                                    <div className="mt-2 text-sm text-gray-500">
-                                        {isBeerProduct(acceptanceCategory, previewProduct?.name) ? '+35%' : '+30%'}
-                                    </div>
-                                </td>
-                            </>
-                        )}
-
-                        <td className="p-4">
-                            <input
-                                value={quantity}
-                                onChange={(e) => setQuantity(e.target.value)}
-                                onKeyDown={handleDraftKeyDown}
-                                type="number"
-                                min="0"
-                                step="0.001"
-                                placeholder="Кол-во"
-                                className={tableInputClass}
-                            />
-                        </td>
-
-                        <td className="p-4 font-semibold text-gray-900">
-                            {money(draftSum)}
-                        </td>
-
-                        <td className="p-4 text-right">
-                            <span className="rounded-full bg-blue-100 px-4 py-2 text-sm font-semibold text-blue-700">
-                                Enter ↵
-                            </span>
-                        </td>
-                    </tr>
-
                     {items.length === 0 && (
                         <tr>
                             <td colSpan={isAcceptance ? 9 : 7} className="p-8 text-center text-base text-gray-500">
-                                Товары пока не добавлены
+                                Товары пока не добавлены. Сканируйте штрихкод в поле выше.
                             </td>
                         </tr>
                     )}
@@ -1617,18 +1755,18 @@ export default function ProductMovementForm({
                                 )}
 
                                 <td className="p-4">
-                                    <input
-                                        value={item.quantity}
-                                        onChange={(e) => updateItemQty(item.product.id, e.target.value)}
-                                        type="number"
-                                        min="0"
-                                        step="0.001"
-                                        className={tableInputClass}
-                                    />
+                                    <div className="flex items-center gap-2 whitespace-nowrap">
+                                        <input
+                                            value={item.quantity}
+                                            onChange={(e) => updateItemQty(item.product.id, e.target.value)}
+                                            {...getQuantityInputProps(item.product.unit)}
+                                            className={quantityTableInputClass}
+                                        />
 
-                                    <span className="ml-2 text-gray-500">
-                                        {unitLabel(item.product.unit)}
-                                    </span>
+                                        <span className="shrink-0 text-gray-500">
+                                            {unitLabel(item.product.unit)}
+                                        </span>
+                                    </div>
                                 </td>
 
                                 <td className="p-4 font-semibold">
@@ -1688,6 +1826,191 @@ export default function ProductMovementForm({
                     </button>
                 </div>
             </div>
+
+            {quantityModalProduct && (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/45 px-3 py-3 sm:px-4"
+                    onMouseDown={closeQuantityModal}
+                >
+                    <div
+                        className="my-auto flex max-h-[calc(100dvh-24px)] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+                        onMouseDown={(event) => event.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-3 border-b border-gray-100 px-4 py-3">
+                            <div className="min-w-0">
+                                <div className="text-xs font-bold uppercase tracking-wide text-blue-600">
+                                    {isShipment ? 'Отгрузка товара' : 'Приёмка товара'}
+                                </div>
+
+                                <h2 className="mt-0.5 text-lg font-bold text-gray-900">
+                                    Укажите количество
+                                </h2>
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={closeQuantityModal}
+                                className="text-2xl leading-none text-gray-400 hover:text-gray-600"
+                            >
+                                ×
+                            </button>
+                        </div>
+
+                        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                            <div className="mb-3 rounded-xl border border-gray-100 bg-gray-50 p-3">
+                                <div className="line-clamp-2 text-base font-bold leading-5 text-gray-900">
+                                    {quantityModalProduct.name}
+                                </div>
+
+                                <div className="mt-2 grid grid-cols-1 gap-1.5 text-xs text-gray-600 sm:grid-cols-2">
+                                    <div className="min-w-0 truncate">
+                                        <span className="text-gray-400">ШК:</span>{' '}
+                                        <span className="font-mono">{quantityModalProduct.barcode || '—'}</span>
+                                    </div>
+
+                                    <div>
+                                        <span className="text-gray-400">Остаток:</span>{' '}
+                                        {quantityModalProduct.stock} {unitLabel(quantityModalProduct.unit)}
+                                    </div>
+
+                                    <div className="min-w-0 truncate">
+                                        <span className="text-gray-400">Категория:</span>{' '}
+                                        {quantityModalProduct.category || '—'}
+                                    </div>
+
+                                    <div>
+                                        <span className="text-gray-400">Ед.:</span>{' '}
+                                        {unitLabel(quantityModalProduct.unit)}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {isAcceptance && (
+                                <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                    <div className="sm:col-span-3">
+                                        <label className="mb-1 block text-xs font-medium text-gray-700">
+                                            Категория
+                                        </label>
+
+                                        <input
+                                            value={quantityModalCategory}
+                                            onChange={(e) => {
+                                                const category = e.target.value
+                                                setQuantityModalCategory(category)
+                                                setQuantityModalSellingPrice(
+                                                    calcSellingPrice(quantityModalPurchasePrice, category, quantityModalProduct.name)
+                                                )
+                                            }}
+                                            onKeyDown={handleQuantityModalKeyDown}
+                                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="mb-1 block text-xs font-medium text-gray-700">
+                                            Закупка
+                                        </label>
+
+                                        <input
+                                            value={quantityModalPurchasePrice}
+                                            onChange={(e) => {
+                                                const purchasePrice = e.target.value
+                                                setQuantityModalPurchasePrice(purchasePrice)
+                                                setQuantityModalSellingPrice(
+                                                    calcSellingPrice(purchasePrice, quantityModalCategory, quantityModalProduct.name)
+                                                )
+                                            }}
+                                            onKeyDown={handleQuantityModalKeyDown}
+                                            type="number"
+                                            min="0"
+                                            step="0.01"
+                                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="mb-1 block text-xs font-medium text-gray-700">
+                                            Продажа
+                                        </label>
+
+                                        <input
+                                            value={quantityModalSellingPrice}
+                                            onChange={(e) => setQuantityModalSellingPrice(e.target.value)}
+                                            onBlur={(e) => setQuantityModalSellingPrice(normalizeIntegerPrice(e.target.value))}
+                                            onKeyDown={handleQuantityModalKeyDown}
+                                            type="text"
+                                            inputMode="numeric"
+                                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+
+                                    <div className="flex items-end rounded-lg bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500">
+                                        Наценка: {isBeerProduct(quantityModalCategory, quantityModalProduct.name) ? '+35%' : '+30%'}
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="mb-3">
+                                <label className="mb-1 block text-sm font-bold text-gray-700">
+                                    Количество, {unitLabel(quantityModalProduct.unit)}
+                                </label>
+
+                                <input
+                                    ref={quantityModalInputRef}
+                                    value={quantityModalQuantity}
+                                    onChange={(e) => setQuantityModalQuantity(
+                                        normalizeQuantityInput(e.target.value, quantityModalProduct.unit)
+                                    )}
+                                    onKeyDown={handleQuantityModalKeyDown}
+                                    {...getQuantityInputProps(quantityModalProduct.unit)}
+                                    className="w-full rounded-xl border-2 border-blue-200 px-4 py-3 text-2xl font-bold text-gray-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                                />
+
+                                <div className="mt-1.5 text-xs text-gray-500">
+                                    {isWeightUnit(quantityModalProduct.unit)
+                                        ? 'Весовой товар: можно вводить дробный вес до 3 знаков, например 0.350.'
+                                        : 'Штучный товар: только целое количество, стрелки меняют по 1 шт.'}
+                                    {' '}Enter — добавить в верх таблицы.
+                                </div>
+                            </div>
+
+                            <div className="rounded-xl bg-blue-50 p-3">
+                                <div className="text-xs text-blue-700">
+                                    Предварительная сумма:
+                                </div>
+
+                                <div className="text-2xl font-bold text-blue-800">
+                                    {money(
+                                        parseNumber(quantityModalQuantity) *
+                                        (isShipment
+                                            ? parseNumber(quantityModalProduct.sellingPrice || 0)
+                                            : parseNumber(quantityModalPurchasePrice || quantityModalProduct.purchasePrice || 0))
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex flex-col gap-2 border-t border-gray-100 px-4 py-3 sm:flex-row sm:justify-end">
+                            <button
+                                type="button"
+                                onClick={closeQuantityModal}
+                                className="rounded-xl border border-gray-300 px-5 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                            >
+                                Отмена
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={confirmQuantityModal}
+                                className={`rounded-xl px-5 py-2.5 text-sm font-semibold text-white ${isShipment ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+                            >
+                                Добавить
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
         </div>
     )
 }
