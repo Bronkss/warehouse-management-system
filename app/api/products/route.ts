@@ -18,10 +18,13 @@ interface ProductRow {
     unit: ProductUnit
     stock: string
     min_stock: string
+    marked: boolean
     image: string
 }
 
 function mapProduct(row: ProductRow) {
+    const marked = Boolean(row.marked)
+
     return {
         id: Number(row.id),
         name: row.name,
@@ -32,6 +35,8 @@ function mapProduct(row: ProductRow) {
         unit: row.unit,
         stock: Number(row.stock),
         minStock: Number(row.min_stock),
+        marked,
+        isMarked: marked,
         image: row.image || DEFAULT_PRODUCT_IMAGE,
     }
 }
@@ -101,6 +106,40 @@ function parseNumber(value: unknown, fallback = 0): number {
     const parsed = Number(value)
 
     return Number.isNaN(parsed) ? fallback : parsed
+}
+
+function parseMarked(value: unknown): boolean {
+    if (typeof value === 'boolean') {
+        return value
+    }
+
+    if (typeof value === 'number') {
+        return value === 1
+    }
+
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase()
+
+        return (
+            normalized === 'true' ||
+            normalized === '1' ||
+            normalized === 'yes' ||
+            normalized === 'on' ||
+            normalized === 'да'
+        )
+    }
+
+    return false
+}
+
+function getMarkedFromBody(body: any): boolean {
+    return parseMarked(
+        body?.marked ??
+        body?.isMarked ??
+        body?.is_marked ??
+        body?.marking ??
+        body?.markedProduct
+    )
 }
 
 export async function GET(request: NextRequest) {
@@ -175,6 +214,7 @@ export async function GET(request: NextRequest) {
                 unit,
                 stock,
                 min_stock,
+                COALESCE(marked, false) AS marked,
                 COALESCE(NULLIF(image_url, ''), $${defaultImageIndex}) AS image
             FROM products
             ${whereSql}
@@ -233,6 +273,7 @@ export async function POST(request: NextRequest) {
         const sellingPrice = parseNumber(body.sellingPrice, 0)
         const stock = parseNumber(body.stock, 0)
         const minStock = parseNumber(body.minStock, 10)
+        const marked = getMarkedFromBody(body)
         const image = normalizeImageUrl(body.image)
 
         if (!name) {
@@ -302,9 +343,10 @@ export async function POST(request: NextRequest) {
                 unit,
                 stock,
                 min_stock,
+                marked,
                 image_url
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING
                 id,
                 name,
@@ -315,7 +357,8 @@ export async function POST(request: NextRequest) {
                 unit,
                 stock,
                 min_stock,
-                COALESCE(NULLIF(image_url, ''), $10) AS image
+                COALESCE(marked, false) AS marked,
+                COALESCE(NULLIF(image_url, ''), $11) AS image
             `,
             [
                 name,
@@ -326,6 +369,7 @@ export async function POST(request: NextRequest) {
                 unit,
                 stock,
                 minStock,
+                marked,
                 image,
                 DEFAULT_PRODUCT_IMAGE,
             ]

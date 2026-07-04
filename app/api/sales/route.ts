@@ -14,12 +14,30 @@ type SaleItemInput = {
     total: number
 }
 
+type PaymentMethod = 'card' | 'cash' | 'transfer'
+
+const PAYMENT_LABELS: Record<PaymentMethod, string> = {
+    card: 'Карта',
+    cash: 'Наличные',
+    transfer: 'Перевод',
+}
+
+const PAYMENT_METHODS = new Set<PaymentMethod>(['card', 'cash', 'transfer'])
+
 const createReceiptNumber = () => {
     const now = new Date()
     const date = now.toISOString().slice(0, 10).replaceAll('-', '')
     const time = String(now.getTime()).slice(-6)
 
     return `${date}-${time}`
+}
+
+const isPaymentMethod = (value: unknown): value is PaymentMethod => {
+    return typeof value === 'string' && PAYMENT_METHODS.has(value as PaymentMethod)
+}
+
+const isWeightUnit = (value: unknown): boolean => {
+    return String(value || '').trim().toLowerCase() === 'weight'
 }
 
 export async function GET() {
@@ -69,7 +87,7 @@ export async function POST(request: Request) {
             )
         }
 
-        if (!['card', 'cash'].includes(paymentMethod)) {
+        if (!isPaymentMethod(paymentMethod)) {
             return NextResponse.json(
                 { message: 'Некорректный способ оплаты' },
                 { status: 400 }
@@ -83,8 +101,10 @@ export async function POST(request: Request) {
             )
         }
 
-        // Добавляем проверку на null
-        if (paymentMethod === 'cash' && (receivedAmount === null || !Number.isFinite(receivedAmount) || receivedAmount < total)) {
+        if (
+            paymentMethod === 'cash' &&
+            (receivedAmount === null || !Number.isFinite(receivedAmount) || receivedAmount < total)
+        ) {
             return NextResponse.json(
                 { message: 'Полученная сумма меньше суммы чека' },
                 { status: 400 }
@@ -103,7 +123,7 @@ export async function POST(request: Request) {
 
             const productResult = await client.query(
                 `
-                SELECT id, name, stock
+                SELECT id, name, stock, unit
                 FROM products
                 WHERE id = $1
                 FOR UPDATE
@@ -117,8 +137,9 @@ export async function POST(request: Request) {
 
             const product = productResult.rows[0]
             const currentStock = Number(product.stock)
+            const canSellIntoNegativeStock = isWeightUnit(product.unit) || isWeightUnit(item.unit)
 
-            if (currentStock < quantity) {
+            if (!canSellIntoNegativeStock && currentStock < quantity) {
                 throw new Error(
                     `Недостаточно остатка: «${product.name}». В наличии ${currentStock}, в чеке ${quantity}`
                 )
@@ -135,7 +156,7 @@ export async function POST(request: Request) {
         }
 
         const receiptNumber = createReceiptNumber()
-        const paymentLabel = paymentMethod === 'card' ? 'Карта' : 'Наличные'
+        const paymentLabel = PAYMENT_LABELS[paymentMethod]
 
         const receiptResult = await client.query(
             `
@@ -165,7 +186,6 @@ export async function POST(request: Request) {
                 paymentMethod,
                 paymentLabel,
                 total,
-                // Здесь тоже проверяем на null
                 paymentMethod === 'cash' && receivedAmount !== null ? receivedAmount : total,
                 paymentMethod === 'cash' && change !== null ? change : 0,
                 JSON.stringify(items),

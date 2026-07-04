@@ -25,6 +25,7 @@ interface ProductFormData {
     stock: string
     minStock: string
     image: string
+    marked: boolean
     imageFile?: File | null
 }
 
@@ -44,6 +45,7 @@ interface ProductFormState {
     stock: string
     minStock: string
     image: string
+    marked: boolean
     imagePreview: string
     imageFile: File | null
 }
@@ -162,6 +164,7 @@ const getInitialState = (data?: ProductFormData): ProductFormState => {
         stock: data?.stock || '0',
         minStock: data?.minStock || '10',
         image: data?.image || '',
+        marked: Boolean(data?.marked),
         imagePreview: data?.image || '',
         imageFile: null,
     }
@@ -228,6 +231,13 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
         setFormState(prev => ({ ...prev, [field]: value }))
         clearFieldError(field)
     }, [clearFieldError])
+
+    const updateMarked = useCallback((value: boolean) => {
+        setFormState(prev => ({
+            ...prev,
+            marked: value,
+        }))
+    }, [])
 
     const updatePurchasePrice = (value: string) => {
         setFormState(prev => {
@@ -481,6 +491,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 stock: normalizeQuantityString(formState.stock),
                 minStock: normalizeQuantityString(formState.minStock),
                 image: formState.image,
+                marked: formState.marked,
                 imageFile: formState.imageFile,
             })
         } finally {
@@ -799,6 +810,27 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 </div>
             </div>
 
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                <label className="flex cursor-pointer items-start gap-3">
+                    <input
+                        type="checkbox"
+                        checked={formState.marked}
+                        onChange={event => updateMarked(event.target.checked)}
+                        className="mt-1 h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500"
+                    />
+
+                    <span>
+                        <span className="block text-sm font-semibold text-amber-900">
+                            Маркированный товар / Честный знак
+                        </span>
+
+                        <span className="mt-1 block text-xs leading-5 text-amber-700">
+                            При продаже касса попросит отсканировать DataMatrix, а ККТ выполнит проверку и фискализацию маркировки.
+                        </span>
+                    </span>
+                </label>
+            </div>
+
             {formState.name && formState.category && (
                 <div className="bg-gray-50 p-4 rounded-lg">
                     <h4 className="font-medium text-gray-700 mb-2">Предпросмотр:</h4>
@@ -841,6 +873,11 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                         <p>
                             <span className="text-gray-500">Тип:</span>{' '}
                             {formState.unit === 'piece' ? 'Штучный' : 'Весовой'}
+                        </p>
+
+                        <p>
+                            <span className="text-gray-500">Маркировка:</span>{' '}
+                            {formState.marked ? 'Да, Честный знак' : 'Нет'}
                         </p>
 
                         <p>

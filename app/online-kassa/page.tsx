@@ -1,6 +1,11 @@
 'use client';
 
 import AtolAgentSetup from '@/app/components/AtolAgentSetup';
+import {
+    usePosCheckoutStore,
+    type HeldCheckout,
+    type StoredCheckoutItem,
+} from './pos-checkout-store';
 import JsBarcode from 'jsbarcode';
 import { useRouter } from 'next/navigation';
 import { useState, useEffect, useMemo, useRef, type KeyboardEvent } from 'react';
@@ -36,6 +41,11 @@ type Product = {
     minStock?: number | string;
     min_stock?: number | string;
     image?: string;
+    marked?: boolean | number | string | null;
+    isMarked?: boolean | number | string | null;
+    is_marked?: boolean | number | string | null;
+    marking?: boolean | number | string | null;
+    markedProduct?: boolean | number | string | null;
 };
 
 type ProductsApiResponse = {
@@ -46,10 +56,16 @@ type ProductsApiResponse = {
     durationMs?: number;
 };
 
+type MarkingStatus = 'M+' | 'M-' | 'M';
+
 type CheckoutItem = {
     product: Product;
     id: string;
     quantity: number;
+    markingCode?: string;
+    markingStatus?: MarkingStatus;
+    markingMessage?: string;
+    markingCheckedAt?: string;
 };
 
 type PaymentMethod = 'card' | 'cash' | 'transfer';
@@ -63,6 +79,10 @@ type ReceiptItem = {
     quantity: number;
     price: number;
     total: number;
+    marked?: boolean;
+    markingCode?: string;
+    markingStatus?: MarkingStatus;
+    markingMessage?: string;
 };
 
 type FiscalParams = {
@@ -80,6 +100,15 @@ type FiscalParams = {
 type FiscalResult = {
     uuid: string;
     fiscalParams?: FiscalParams;
+    raw?: unknown;
+};
+
+type MarkingPrecheckResult = {
+    ok?: boolean;
+    canSell?: boolean;
+    markingStatus?: MarkingStatus;
+    normalizedMarkingCode?: string;
+    message?: string;
     raw?: unknown;
 };
 
@@ -115,7 +144,7 @@ const AUTH_USER_KEY = 'warehouse_auth_user';
 const AUTH_LOGIN_KEY = 'warehouse_auth_login';
 const REMEMBER_ME_KEY = 'warehouse_remember_me';
 
-const DEFAULT_FISCAL_AGENT_URL = 'http://127.0.0.1:3107';
+const DEFAULT_FISCAL_AGENT_URL = 'http://127.0.0.1:3108';
 const FISCAL_AGENT_URL_KEY = 'pos_fiscal_agent_url';
 const FISCAL_AGENT_TOKEN_KEY = 'pos_fiscal_agent_token';
 const SHIFT_STATUS_KEY = 'pos_kkt_shift_status';
@@ -151,6 +180,53 @@ const getMinStock = (product: Product): number => {
     return safeParseNumber(product.minStock ?? product.min_stock);
 };
 
+const normalizeBooleanFlag = (value: unknown): boolean => {
+    if (typeof value === 'boolean') {
+        return value;
+    }
+
+    if (typeof value === 'number') {
+        return value === 1;
+    }
+
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+
+        return ['1', 'true', 'yes', 'y', 'да', 'маркированный', 'marked'].includes(normalized);
+    }
+
+    return false;
+};
+
+const isMarkedProduct = (product: Product): boolean => {
+    return normalizeBooleanFlag(
+        product.marked ??
+        product.isMarked ??
+        product.is_marked ??
+        product.marking ??
+        product.markedProduct
+    );
+};
+
+const normalizeMarkingCode = (value: unknown): string => {
+    return String(value ?? '')
+        .replaceAll('\\u001d', '\u001d')
+        .replaceAll('\\x1d', '\u001d')
+        .replaceAll('<GS>', '\u001d')
+        .replaceAll('[GS]', '\u001d')
+        .trim();
+};
+
+const formatMarkingCodePreview = (value: unknown): string => {
+    const code = normalizeMarkingCode(value);
+
+    if (code.length <= 22) {
+        return code;
+    }
+
+    return `${code.slice(0, 14)}…${code.slice(-6)}`;
+};
+
 const normalizeProduct = (product: Product): Product => {
     return {
         ...product,
@@ -162,6 +238,7 @@ const normalizeProduct = (product: Product): Product => {
         category: product.category || 'Другое',
         barcode: product.barcode || '',
         image: product.image || '',
+        marked: isMarkedProduct(product),
     };
 };
 
@@ -213,6 +290,10 @@ const formatCurrency = (amount: number | undefined | null): string => {
 
 const isWeightProduct = (product: Product): boolean => {
     return product.unit === 'weight';
+};
+
+const canSellIntoNegativeStock = (product: Product): boolean => {
+    return isWeightProduct(product) && !isMarkedProduct(product);
 };
 
 const roundQuantity = (value: number): number => {
@@ -289,6 +370,58 @@ const createReceiptId = (): string => {
     const timePart = String(date.getTime()).slice(-6);
 
     return `${datePart}-${timePart}`;
+};
+
+const normalizeStoredCheckoutItem = (item: StoredCheckoutItem): CheckoutItem | null => {
+    if (!item || !item.product) {
+        return null;
+    }
+
+    const product = normalizeProduct(item.product as Product);
+
+    if (product.id === undefined || product.id === null || !String(product.name || '').trim()) {
+        return null;
+    }
+
+    const quantity = isMarkedProduct(product)
+        ? 1
+        : product.unit === 'weight'
+            ? roundQuantity(safeParseNumber(item.quantity))
+            : Math.floor(safeParseNumber(item.quantity));
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+        return null;
+    }
+
+    return {
+        product,
+        id: String(item.id || `${product.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`),
+        quantity,
+        markingCode: item.markingCode ? normalizeMarkingCode(item.markingCode) : undefined,
+        markingStatus: item.markingStatus,
+        markingMessage: item.markingMessage,
+        markingCheckedAt: item.markingCheckedAt,
+    };
+};
+
+const normalizeStoredCheckoutItems = (items: StoredCheckoutItem[]): CheckoutItem[] => {
+    return items
+        .map(normalizeStoredCheckoutItem)
+        .filter((item): item is CheckoutItem => Boolean(item));
+};
+
+const getHeldCheckoutTitle = (held: HeldCheckout): string => {
+    if (held.title) {
+        return held.title;
+    }
+
+    const firstItemName = held.items[0]?.product?.name;
+
+    if (firstItemName) {
+        return String(firstItemName);
+    }
+
+    return 'Отложенный чек';
 };
 
 const readJsonSafe = async <T,>(response: Response): Promise<T | null> => {
@@ -368,6 +501,15 @@ const fiscalizeReceipt = async (receipt: Receipt): Promise<FiscalResult> => {
     }
 
     return data.fiscal;
+};
+
+const precheckMarkingCode = async (markingCode: string): Promise<MarkingPrecheckResult> => {
+    const data = await callFiscalAgent<MarkingPrecheckResult>('/marking/precheck', {
+        method: 'POST',
+        body: JSON.stringify({ markingCode }),
+    });
+
+    return data;
 };
 
 const fetchProductsPage = async ({
@@ -472,6 +614,11 @@ export default function PosPage() {
     const [weightModalProduct, setWeightModalProduct] = useState<Product | null>(null);
     const [weightQuantity, setWeightQuantity] = useState('');
 
+    const [markingModalProduct, setMarkingModalProduct] = useState<Product | null>(null);
+    const [markingCodeInput, setMarkingCodeInput] = useState('');
+    const [markingCheckResult, setMarkingCheckResult] = useState<MarkingPrecheckResult | null>(null);
+    const [isCheckingMarking, setIsCheckingMarking] = useState(false);
+
     const [isPriceLabelModalOpen, setIsPriceLabelModalOpen] = useState(false);
     const [priceLabelSearch, setPriceLabelSearch] = useState('');
     const [priceLabelCategoryFilter, setPriceLabelCategoryFilter] = useState('all');
@@ -480,6 +627,14 @@ export default function PosPage() {
     const [isRefreshingLabels, setIsRefreshingLabels] = useState(false);
 
     const [isAtolSetupOpen, setIsAtolSetupOpen] = useState(false);
+    const [isHeldReceiptsModalOpen, setIsHeldReceiptsModalOpen] = useState(false);
+    const [isCheckoutStoreReady, setIsCheckoutStoreReady] = useState(false);
+
+    const heldCheckouts = usePosCheckoutStore(state => state.heldCheckouts);
+    const setStoredCheckoutItems = usePosCheckoutStore(state => state.setCurrentItems);
+    const clearStoredCheckoutItems = usePosCheckoutStore(state => state.clearCurrentItems);
+    const holdCheckoutInStore = usePosCheckoutStore(state => state.holdCheckout);
+    const removeHeldCheckout = usePosCheckoutStore(state => state.removeHeldCheckout);
 
     const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -487,6 +642,10 @@ export default function PosPage() {
     const cashReceivedNumber = safeParseNumber(cashReceived);
     const change = cashReceivedNumber - total;
     const isShiftOpen = shiftStatus === 'open';
+    const hasMarkedCheckoutItems = checkoutItems.some(item => isMarkedProduct(item.product));
+    const hasUnsafeMarkedCheckoutItems = checkoutItems.some(item =>
+        isMarkedProduct(item.product) && item.markingStatus !== 'M+'
+    );
 
     const priceLabelCategories = useMemo(() => {
         const categories = allProducts.map(getProductCategory);
@@ -553,6 +712,30 @@ export default function PosPage() {
     }, [router]);
 
     useEffect(() => {
+        const storedItems = usePosCheckoutStore.getState().currentItems;
+        const restoredItems = normalizeStoredCheckoutItems(storedItems);
+
+        if (restoredItems.length > 0) {
+            setCheckoutItems(restoredItems);
+        }
+
+        setIsCheckoutStoreReady(true);
+    }, []);
+
+    useEffect(() => {
+        if (!isCheckoutStoreReady) {
+            return;
+        }
+
+        if (checkoutItems.length === 0) {
+            clearStoredCheckoutItems();
+            return;
+        }
+
+        setStoredCheckoutItems(checkoutItems as unknown as StoredCheckoutItem[]);
+    }, [checkoutItems, clearStoredCheckoutItems, isCheckoutStoreReady, setStoredCheckoutItems]);
+
+    useEffect(() => {
         if (!isAuthChecked) {
             return;
         }
@@ -601,7 +784,13 @@ export default function PosPage() {
             }
 
             event.preventDefault();
-            completePayment('cash', false);
+
+            if (cashReceivedNumber < total) {
+                setError('Полученная сумма меньше суммы чека');
+                return;
+            }
+
+            setFiscalConfirmModal(true);
         };
 
         window.addEventListener('keydown', handleEnterPayment);
@@ -660,7 +849,11 @@ export default function PosPage() {
             setPaymentModal(null);
             setFiscalConfirmModal(false);
             setWeightModalProduct(null);
+            setMarkingModalProduct(null);
+            setMarkingCodeInput('');
+            setMarkingCheckResult(null);
             setIsPriceLabelModalOpen(false);
+            setIsHeldReceiptsModalOpen(false);
             setLastReceipt(null);
             setIsAtolSetupOpen(false);
         };
@@ -803,17 +996,171 @@ export default function PosPage() {
                     return product;
                 }
 
+                const nextStock = roundQuantity(getStock(product) - receiptItem.quantity);
+
                 return {
                     ...product,
-                    stock: Math.max(0, getStock(product) - receiptItem.quantity),
+                    stock: isWeightProduct(product) ? nextStock : Math.max(0, nextStock),
                 };
             })
         );
     };
 
+    const openMarkingScanModal = (product: Product) => {
+        const safeProduct = normalizeProduct(product);
+
+        setMarkingModalProduct(safeProduct);
+        setMarkingCodeInput('');
+        setMarkingCheckResult(null);
+        setError(null);
+        setNotice(null);
+    };
+
+    const getMarkingStatusClassName = (status?: MarkingStatus): string => {
+        if (status === 'M+') {
+            return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+        }
+
+        if (status === 'M-') {
+            return 'bg-red-100 text-red-700 border-red-200';
+        }
+
+        return 'bg-amber-100 text-amber-700 border-amber-200';
+    };
+
+    const addMarkedProductToCheckout = async (product: Product, rawMarkingCode: string) => {
+        if (isCheckingMarking) {
+            return;
+        }
+
+        const safeProduct = normalizeProduct(product);
+        const markingCode = normalizeMarkingCode(rawMarkingCode);
+        const stock = getStock(safeProduct);
+
+        if (!markingCode) {
+            setMarkingCheckResult(null);
+            setError('Отсканируйте DataMatrix маркированного товара');
+            return;
+        }
+
+        if (markingCode.length < 20) {
+            setMarkingCheckResult({
+                ok: false,
+                canSell: false,
+                markingStatus: 'M',
+                message: 'DataMatrix выглядит слишком коротким. Проверьте сканирование.',
+            });
+            setError('DataMatrix выглядит слишком коротким. Проверьте сканирование.');
+            return;
+        }
+
+        if (stock <= 0) {
+            setMarkingCheckResult(null);
+            setError(`Товар «${safeProduct.name}» отсутствует на остатке`);
+            return;
+        }
+
+        const hasSameCode = checkoutItems.some(item =>
+            normalizeMarkingCode(item.markingCode) === markingCode
+        );
+
+        if (hasSameCode) {
+            setMarkingCheckResult({
+                ok: false,
+                canSell: false,
+                markingStatus: 'M-',
+                message: 'Этот DataMatrix уже добавлен в текущий чек',
+            });
+            setError('Этот DataMatrix уже добавлен в текущий чек');
+            return;
+        }
+
+        const currentProductQuantity = checkoutItems
+            .filter(item => String(item.product.id) === String(safeProduct.id))
+            .reduce((sum, item) => sum + item.quantity, 0);
+
+        if (currentProductQuantity + 1 > stock) {
+            setMarkingCheckResult(null);
+            setError(
+                `Недостаточно остатка: «${safeProduct.name}». В наличии ${formatQuantity(stock, safeProduct.unit)}`
+            );
+            return;
+        }
+
+        try {
+            setIsCheckingMarking(true);
+            setError(null);
+            setNotice(null);
+            setMarkingCheckResult(null);
+
+            const checkResult = await precheckMarkingCode(markingCode);
+            const status = checkResult.markingStatus || 'M';
+
+            setMarkingCheckResult({
+                ...checkResult,
+                markingStatus: status,
+            });
+
+            if (!checkResult.canSell || status !== 'M+') {
+                setError(checkResult.message || `Код маркировки не прошёл проверку: [${status}]`);
+                return;
+            }
+
+            const safeMarkingCode = normalizeMarkingCode(checkResult.normalizedMarkingCode || markingCode);
+
+            setCheckoutItems(prevItems => [
+                ...prevItems,
+                {
+                    product: safeProduct,
+                    id: `${safeProduct.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                    quantity: 1,
+                    markingCode: safeMarkingCode,
+                    markingStatus: 'M+',
+                    markingMessage: checkResult.message || 'КМ проверен успешно',
+                    markingCheckedAt: new Date().toISOString(),
+                },
+            ]);
+
+            setMarkingModalProduct(null);
+            setMarkingCodeInput('');
+            setMarkingCheckResult(null);
+            setSearchQuery('');
+            setFoundProducts([]);
+            setError(null);
+            setNotice(`Маркировка проверена [M+]. Товар «${safeProduct.name}» добавлен в чек.`);
+
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
+        } catch (err) {
+            console.error(err);
+
+            const message = err instanceof Error
+                ? err.message
+                : 'Не удалось проверить код маркировки';
+
+            setMarkingCheckResult({
+                ok: false,
+                canSell: false,
+                markingStatus: 'M',
+                message,
+            });
+            setError(message);
+        } finally {
+            setIsCheckingMarking(false);
+        }
+    };
+
     const addQuantityToCheckout = (product: Product, quantity: number) => {
         const safeProduct = normalizeProduct(product);
+
+        if (isMarkedProduct(safeProduct)) {
+            openMarkingScanModal(safeProduct);
+            return;
+        }
+
         const stock = getStock(safeProduct);
+        const allowNegativeStock = canSellIntoNegativeStock(safeProduct);
         const safeQuantity = isWeightProduct(safeProduct)
             ? roundQuantity(quantity)
             : Math.floor(quantity);
@@ -823,7 +1170,7 @@ export default function PosPage() {
             return;
         }
 
-        if (stock <= 0) {
+        if (!allowNegativeStock && stock <= 0) {
             setError(`Товар «${safeProduct.name}» отсутствует на остатке`);
             return;
         }
@@ -836,7 +1183,7 @@ export default function PosPage() {
             const currentQuantity = existingItem?.quantity || 0;
             const nextQuantity = roundQuantity(currentQuantity + safeQuantity);
 
-            if (nextQuantity > stock) {
+            if (!allowNegativeStock && nextQuantity > stock) {
                 setError(
                     `Недостаточно остатка: «${safeProduct.name}». В наличии ${formatQuantity(stock, safeProduct.unit)}`
                 );
@@ -844,6 +1191,14 @@ export default function PosPage() {
             }
 
             setError(null);
+
+            if (allowNegativeStock && nextQuantity > stock) {
+                setNotice(
+                    `Весовой товар «${safeProduct.name}» добавлен с уходом остатка в минус. Это разрешено для погрешности веса.`
+                );
+            } else {
+                setNotice(null);
+            }
 
             if (existingItem) {
                 return prevItems.map(item =>
@@ -874,6 +1229,11 @@ export default function PosPage() {
     const addToCheckout = (product: Product) => {
         const safeProduct = normalizeProduct(product);
 
+        if (isMarkedProduct(safeProduct)) {
+            openMarkingScanModal(safeProduct);
+            return;
+        }
+
         if (isWeightProduct(safeProduct)) {
             setWeightModalProduct(safeProduct);
             setWeightQuantity('');
@@ -891,14 +1251,20 @@ export default function PosPage() {
                     return item;
                 }
 
+                if (isMarkedProduct(item.product)) {
+                    setError('Для маркированного товара количество не меняется: один DataMatrix = одна позиция в чеке');
+                    return item;
+                }
+
                 const nextQuantity = item.quantity + delta;
                 const stock = getStock(item.product);
+                const allowNegativeStock = canSellIntoNegativeStock(item.product);
 
                 if (nextQuantity <= 0) {
                     return item;
                 }
 
-                if (nextQuantity > stock) {
+                if (!allowNegativeStock && nextQuantity > stock) {
                     setError(
                         `Недостаточно остатка: «${item.product.name}». В наличии ${formatQuantity(stock, item.product.unit)}`
                     );
@@ -906,6 +1272,12 @@ export default function PosPage() {
                 }
 
                 setError(null);
+
+                if (allowNegativeStock && nextQuantity > stock) {
+                    setNotice(
+                        `Весовой товар «${item.product.name}» уходит в минусовой остаток. Это разрешено для погрешности веса.`
+                    );
+                }
 
                 return {
                     ...item,
@@ -924,8 +1296,14 @@ export default function PosPage() {
                     return item;
                 }
 
+                if (isMarkedProduct(item.product)) {
+                    setError('Для маркированного товара количество не меняется: один DataMatrix = одна позиция в чеке');
+                    return item;
+                }
+
                 const stock = getStock(item.product);
                 const isWeight = item.product.unit === 'weight';
+                const allowNegativeStock = canSellIntoNegativeStock(item.product);
 
                 const nextQuantity = isWeight
                     ? roundQuantity(parsed)
@@ -936,7 +1314,7 @@ export default function PosPage() {
                     return item;
                 }
 
-                if (nextQuantity > stock) {
+                if (!allowNegativeStock && nextQuantity > stock) {
                     setError(
                         `Недостаточно остатка: «${item.product.name}». В наличии ${formatQuantity(stock, item.product.unit)}`
                     );
@@ -944,6 +1322,12 @@ export default function PosPage() {
                 }
 
                 setError(null);
+
+                if (allowNegativeStock && nextQuantity > stock) {
+                    setNotice(
+                        `Весовой товар «${item.product.name}» уходит в минусовой остаток. Это разрешено для погрешности веса.`
+                    );
+                }
 
                 return {
                     ...item,
@@ -955,6 +1339,76 @@ export default function PosPage() {
 
     const removeFromCheckout = (itemId: string) => {
         setCheckoutItems(prev => prev.filter(item => item.id !== itemId));
+    };
+
+    const holdCurrentCheckout = () => {
+        if (checkoutItems.length === 0) {
+            setError('Нечего откладывать: чек пустой');
+            return;
+        }
+
+        const heldCheckout = holdCheckoutInStore(
+            checkoutItems as unknown as StoredCheckoutItem[],
+            total
+        );
+
+        if (!heldCheckout) {
+            setError('Не удалось отложить чек');
+            return;
+        }
+
+        setCheckoutItems([]);
+        setPaymentModal(null);
+        setFiscalConfirmModal(false);
+        setCashReceived('');
+        setError(null);
+        setNotice(`Чек отложен: ${getHeldCheckoutTitle(heldCheckout)}`);
+
+        requestAnimationFrame(() => {
+            searchInputRef.current?.focus();
+        });
+    };
+
+    const restoreHeldCheckout = (held: HeldCheckout) => {
+        if (checkoutItems.length > 0) {
+            const shouldReplace = confirm('В текущем чеке уже есть товары. Заменить его отложенным чеком?');
+
+            if (!shouldReplace) {
+                return;
+            }
+        }
+
+        const restoredItems = normalizeStoredCheckoutItems(held.items);
+
+        if (restoredItems.length === 0) {
+            removeHeldCheckout(held.id);
+            setError('Отложенный чек пустой или повреждён, он удалён из списка');
+            return;
+        }
+
+        removeHeldCheckout(held.id);
+        setCheckoutItems(restoredItems);
+        setPaymentModal(null);
+        setFiscalConfirmModal(false);
+        setCashReceived('');
+        setIsHeldReceiptsModalOpen(false);
+        setError(null);
+        setNotice(`Отложенный чек восстановлен: ${getHeldCheckoutTitle(held)}`);
+
+        requestAnimationFrame(() => {
+            searchInputRef.current?.focus();
+        });
+    };
+
+    const deleteHeldCheckout = (held: HeldCheckout) => {
+        const shouldDelete = confirm(`Удалить отложенный чек «${getHeldCheckoutTitle(held)}»?`);
+
+        if (!shouldDelete) {
+            return;
+        }
+
+        removeHeldCheckout(held.id);
+        setNotice('Отложенный чек удалён');
     };
 
     const handleKeyDown = async (e: KeyboardEvent<HTMLInputElement>) => {
@@ -1029,12 +1483,23 @@ export default function PosPage() {
         }
 
         const stockError = checkoutItems.find(item => {
-            return item.quantity > getStock(item.product);
+            return !canSellIntoNegativeStock(item.product) && item.quantity > getStock(item.product);
         });
 
         if (stockError) {
             setError(
                 `Недостаточно остатка: «${stockError.product.name}». В наличии ${formatQuantity(getStock(stockError.product), stockError.product.unit)}`
+            );
+            return;
+        }
+
+        const unsafeMarkedItem = checkoutItems.find(item =>
+            isMarkedProduct(item.product) && item.markingStatus !== 'M+'
+        );
+
+        if (unsafeMarkedItem) {
+            setError(
+                `Маркированный товар «${unsafeMarkedItem.product.name}» не прошёл проверку [M+]. Продажа заблокирована.`
             );
             return;
         }
@@ -1076,8 +1541,9 @@ export default function PosPage() {
                 }
 
                 const freshStock = getStock(freshProduct);
+                const allowNegativeStock = canSellIntoNegativeStock(freshProduct);
 
-                if (freshStock < item.quantity) {
+                if (!allowNegativeStock && freshStock < item.quantity) {
                     throw new Error(
                         `Недостаточно остатка: «${freshProduct.name}». В наличии ${formatQuantity(freshStock, freshProduct.unit)}, в чеке ${formatQuantity(item.quantity, freshProduct.unit)}`
                     );
@@ -1089,8 +1555,26 @@ export default function PosPage() {
                 };
             });
 
+            const missingMarkedItem = validatedItems.find(item =>
+                isMarkedProduct(item.product) && !normalizeMarkingCode(item.markingCode)
+            );
+
+            if (missingMarkedItem) {
+                throw new Error(`Для маркированного товара «${missingMarkedItem.product.name}» не отсканирован DataMatrix`);
+            }
+
+            const unsafeMarkedItem = validatedItems.find(item =>
+                isMarkedProduct(item.product) && item.markingStatus !== 'M+'
+            );
+
+            if (unsafeMarkedItem) {
+                throw new Error(`Маркированный товар «${unsafeMarkedItem.product.name}» не прошёл проверку [M+]. Продажа заблокирована.`);
+            }
+
             const receiptItems: ReceiptItem[] = validatedItems.map(item => {
                 const price = getSellingPrice(item.product);
+                const marked = isMarkedProduct(item.product);
+                const markingCode = normalizeMarkingCode(item.markingCode);
 
                 return {
                     productId: item.product.id,
@@ -1101,11 +1585,18 @@ export default function PosPage() {
                     quantity: item.quantity,
                     price,
                     total: price * item.quantity,
+                    marked,
+                    ...(marked && markingCode ? {
+                        markingCode,
+                        markingStatus: item.markingStatus,
+                        markingMessage: item.markingMessage,
+                    } : {}),
                 };
             });
 
             const receiptTotal = receiptItems.reduce((sum, item) => sum + item.total, 0);
-            const shouldRunFiscalization = method === 'card' && shouldFiscalize;
+            const hasMarkedReceiptItems = receiptItems.some(item => item.marked && item.markingCode);
+            const shouldRunFiscalization = hasMarkedReceiptItems || ((method === 'card' || method === 'cash') && shouldFiscalize);
 
             const receipt: Receipt = {
                 id: createReceiptId(),
@@ -1731,9 +2222,22 @@ export default function PosPage() {
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
             <div className="max-w-5xl mx-auto">
-                <h1 className="text-3xl font-bold text-indigo-800 mb-6 text-center">
-                    ТОЧКА онлайн - касса
-                </h1>
+                <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <button
+                        type="button"
+                        onClick={() => router.push('/system')}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-white px-5 py-3 text-sm font-bold text-indigo-700 shadow-sm transition-colors hover:bg-indigo-50"
+                    >
+                        <span aria-hidden="true">←</span>
+                        Вернуться в склад
+                    </button>
+
+                    <h1 className="text-3xl font-bold text-indigo-800 text-center sm:flex-1">
+                        ТОЧКА онлайн - касса
+                    </h1>
+
+                    <div className="hidden min-w-[168px] sm:block" />
+                </div>
 
                 <div className="mb-6 rounded-2xl bg-white p-4 shadow-lg">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1788,14 +2292,6 @@ export default function PosPage() {
 
                             <button
                                 type="button"
-                                onClick={() => setIsAtolSetupOpen(true)}
-                                className="rounded-lg border border-indigo-300 px-4 py-2 text-indigo-700 hover:bg-indigo-50"
-                            >
-                                Настройка ККТ
-                            </button>
-
-                            <button
-                                type="button"
                                 onClick={handleLogout}
                                 className="rounded-lg border border-gray-300 px-4 py-2 hover:bg-gray-50"
                             >
@@ -1805,7 +2301,27 @@ export default function PosPage() {
                     </div>
 
                     <div className="mt-3 text-xs text-gray-500">
-                        Продажа доступна только при открытой смене. Фискализация выполняется только для оплаты картой и только после подтверждения кассира.
+                        Продажа доступна только при открытой смене. Обычный чек по карте фискализируется после подтверждения кассира; маркированные товары всегда отправляются на ККТ.
+                    </div>
+
+                    <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <div className="text-sm font-bold text-indigo-900">
+                                Настройки ККТ и файлы для установки
+                            </div>
+
+                            <div className="mt-1 text-xs leading-5 text-indigo-700">
+                                Открывай только при настройке рабочего места кассира: агент 127.0.0.1:3108, драйвер АТОЛ 10.10.8 и файлы загрузки.
+                            </div>
+                        </div>
+
+                        <button
+                            type="button"
+                            onClick={() => setIsAtolSetupOpen(true)}
+                            className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700"
+                        >
+                            Открыть настройки ККТ
+                        </button>
                     </div>
                 </div>
 
@@ -1870,18 +2386,28 @@ export default function PosPage() {
                         )}
 
                         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                            <button
-                                type="button"
-                                onClick={openPriceLabelModal}
-                                disabled={isRefreshingLabels}
-                                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
-                            >
-                                <AiOutlinePrinter size={20} />
-                                {isRefreshingLabels ? 'Обновляю цены...' : 'Печать ценников / термоэтикеток 58×40'}
-                            </button>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={openPriceLabelModal}
+                                    disabled={isRefreshingLabels}
+                                    className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
+                                >
+                                    <AiOutlinePrinter size={20} />
+                                    {isRefreshingLabels ? 'Обновляю цены...' : 'Печать ценников / термоэтикеток 58×40'}
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setIsHeldReceiptsModalOpen(true)}
+                                    className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-5 py-2.5 font-semibold text-amber-800 hover:bg-amber-100"
+                                >
+                                    Отложенные чеки ({heldCheckouts.length})
+                                </button>
+                            </div>
 
                             <div className="text-xs text-gray-500">
-                                Цены и штрихкоды для печати берутся из актуальной базы товаров.
+                                Цены и штрихкоды для печати берутся из актуальной базы товаров. Текущий чек сохраняется после обновления страницы.
                             </div>
                         </div>
                     </div>
@@ -1911,18 +2437,23 @@ export default function PosPage() {
                                     {foundProducts.map((product) => {
                                         const stock = getStock(product);
                                         const isEmpty = stock <= 0;
+                                        const canSellNegative = canSellIntoNegativeStock(product);
+                                        const isBlockedByStock = isEmpty && !canSellNegative;
+                                        const marked = isMarkedProduct(product);
 
                                         return (
                                             <motion.div
                                                 key={String(product.id)}
-                                                whileHover={{ scale: isEmpty ? 1 : 1.01 }}
+                                                whileHover={{ scale: isBlockedByStock ? 1 : 1.01 }}
                                                 className={`flex justify-between items-center p-3 rounded-lg shadow-sm transition-shadow ${
-                                                    isEmpty
+                                                    isBlockedByStock
                                                         ? 'bg-red-50 cursor-not-allowed opacity-70'
-                                                        : 'bg-white hover:shadow-md cursor-pointer'
+                                                        : canSellNegative && isEmpty
+                                                            ? 'bg-amber-50 hover:shadow-md cursor-pointer'
+                                                            : 'bg-white hover:shadow-md cursor-pointer'
                                                 }`}
                                                 onClick={() => {
-                                                    if (!isEmpty) {
+                                                    if (!isBlockedByStock) {
                                                         addToCheckout(product);
                                                     }
                                                 }}
@@ -1937,8 +2468,21 @@ export default function PosPage() {
                                                         {product.barcode ? ` · ШК: ${getBarcodeDisplay(product.barcode)}` : ''}
                                                     </div>
 
-                                                    <div className={`text-sm ${isEmpty ? 'text-red-600' : 'text-green-600'}`}>
+                                                    {marked && (
+                                                        <div className="mt-1 inline-flex rounded-full bg-purple-100 px-2 py-0.5 text-xs font-semibold text-purple-700">
+                                                            Маркированный товар · нужен DataMatrix
+                                                        </div>
+                                                    )}
+
+                                                    <div className={`text-sm ${
+                                                        isEmpty && !canSellNegative
+                                                            ? 'text-red-600'
+                                                            : canSellNegative && isEmpty
+                                                                ? 'text-amber-700'
+                                                                : 'text-green-600'
+                                                    }`}>
                                                         Остаток: {formatQuantity(stock, product.unit)}
+                                                        {canSellNegative && isEmpty ? ' · можно продать в минус' : ''}
                                                     </div>
                                                 </div>
 
@@ -1951,11 +2495,11 @@ export default function PosPage() {
 
                                                 <button
                                                     type="button"
-                                                    disabled={isEmpty}
+                                                    disabled={isBlockedByStock}
                                                     onClick={(e) => {
                                                         e.stopPropagation();
 
-                                                        if (!isEmpty) {
+                                                        if (!isBlockedByStock) {
                                                             addToCheckout(product);
                                                         }
                                                     }}
@@ -1976,6 +2520,7 @@ export default function PosPage() {
                             <div className="space-y-2">
                                 {checkoutItems.map((item) => {
                                     const stock = getStock(item.product);
+                                    const marked = isMarkedProduct(item.product);
 
                                     return (
                                         <motion.div
@@ -1993,6 +2538,13 @@ export default function PosPage() {
                                                     {formatCurrency(getSellingPrice(item.product))} × {formatQuantity(item.quantity, item.product.unit)}
                                                 </div>
 
+                                                {marked && (
+                                                    <div className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold ${getMarkingStatusClassName(item.markingStatus)}`}>
+                                                        [{item.markingStatus || 'M'}] {item.markingStatus === 'M+' ? 'Маркировка проверена' : 'Маркировка не подтверждена'}
+                                                        {item.markingCode ? ` · КМ: ${formatMarkingCodePreview(item.markingCode)}` : ' · DataMatrix не задан'}
+                                                    </div>
+                                                )}
+
                                                 {item.product.barcode && (
                                                     <div className="text-sm text-gray-500 truncate">
                                                         ШК: {getBarcodeDisplay(item.product.barcode)}
@@ -2006,7 +2558,11 @@ export default function PosPage() {
 
                                             <div className="flex items-center space-x-4">
                                                 <div className="flex items-center space-x-1">
-                                                    {item.product.unit === 'weight' ? (
+                                                    {marked ? (
+                                                        <span className="rounded-lg bg-purple-50 px-3 py-1 text-sm font-bold text-purple-700">
+                                                            1 шт.
+                                                        </span>
+                                                    ) : item.product.unit === 'weight' ? (
                                                         <input
                                                             type="number"
                                                             min="0.001"
@@ -2070,7 +2626,21 @@ export default function PosPage() {
                                     </div>
                                 </div>
 
+                                {hasUnsafeMarkedCheckoutItems && (
+                                    <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
+                                        В чеке есть маркированный товар без подтверждения [M+]. Оплата заблокирована.
+                                    </div>
+                                )}
+
                                 <div className="flex flex-wrap justify-end gap-3 mt-5">
+                                    <button
+                                        type="button"
+                                        onClick={holdCurrentCheckout}
+                                        className="px-6 py-2 border border-amber-300 bg-amber-50 text-amber-800 rounded-lg hover:bg-amber-100 transition-colors"
+                                    >
+                                        Отложить чек
+                                    </button>
+
                                     <button
                                         type="button"
                                         onClick={() => {
@@ -2085,7 +2655,8 @@ export default function PosPage() {
                                     <button
                                         type="button"
                                         onClick={() => openPayment('cash')}
-                                        className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+                                        disabled={hasUnsafeMarkedCheckoutItems}
+                                        className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                     >
                                         Наличные
                                     </button>
@@ -2093,7 +2664,8 @@ export default function PosPage() {
                                     <button
                                         type="button"
                                         onClick={() => openPayment('transfer')}
-                                        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                                        disabled={hasUnsafeMarkedCheckoutItems}
+                                        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                     >
                                         Перевод
                                     </button>
@@ -2101,7 +2673,8 @@ export default function PosPage() {
                                     <button
                                         type="button"
                                         onClick={() => openPayment('card')}
-                                        className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+                                        disabled={hasUnsafeMarkedCheckoutItems}
+                                        className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                     >
                                         Карта
                                     </button>
@@ -2131,6 +2704,123 @@ export default function PosPage() {
             </div>
 
             <AnimatePresence>
+                {markingModalProduct && (
+                    <div
+                        key="marking-modal"
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                        onClick={() => {
+                            setMarkingModalProduct(null);
+                            setMarkingCodeInput('');
+                            setMarkingCheckResult(null);
+                        }}
+                    >
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.96 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.96 }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
+                        >
+                            <h2 className="text-2xl font-bold text-gray-800 mb-2">
+                                Сканирование DataMatrix
+                            </h2>
+
+                            <div className="mb-4 text-gray-600">
+                                {markingModalProduct.name}
+                            </div>
+
+                            <div className="mb-5 rounded-xl border border-purple-100 bg-purple-50 p-4 text-sm text-purple-800">
+                                Этот товар отмечен как маркированный. Для продажи отсканируйте DataMatrix с упаковки.
+                                Один DataMatrix добавляется в чек отдельной позицией с количеством 1 шт.
+                            </div>
+
+                            <label className="mb-2 block text-sm font-medium text-gray-700">
+                                DataMatrix / КМ
+                            </label>
+
+                            <textarea
+                                autoFocus
+                                disabled={isCheckingMarking}
+                                value={markingCodeInput}
+                                onChange={(e) => {
+                                    setMarkingCodeInput(e.target.value);
+                                    setMarkingCheckResult(null);
+                                    setError(null);
+                                }}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        void addMarkedProductToCheckout(markingModalProduct, markingCodeInput);
+                                    }
+                                }}
+                                placeholder="Отсканируйте код маркировки..."
+                                className="mb-4 h-28 w-full resize-none rounded-xl border border-gray-300 px-4 py-3 font-mono text-sm outline-none focus:border-transparent focus:ring-2 focus:ring-purple-500 disabled:bg-gray-100 disabled:opacity-70"
+                            />
+
+                            {isCheckingMarking && (
+                                <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700">
+                                    Проверяю код маркировки в ККТ / Честном ЗНАКе...
+                                </div>
+                            )}
+
+                            {markingCheckResult && (
+                                <div className={`mb-4 rounded-xl border px-4 py-3 text-sm font-semibold ${getMarkingStatusClassName(markingCheckResult.markingStatus)}`}>
+                                    <div className="text-lg">
+                                        [{markingCheckResult.markingStatus || 'M'}]
+                                    </div>
+
+                                    <div>
+                                        {markingCheckResult.message || 'Результат проверки маркировки получен'}
+                                    </div>
+
+                                    {markingCheckResult.markingStatus !== 'M+' && (
+                                        <div className="mt-2 text-xs font-medium">
+                                            Продажа этого товара заблокирована. Нужен только результат [M+].
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            <div className="mb-6 rounded-xl bg-gray-50 p-4">
+                                <div className="text-sm text-gray-500">
+                                    Цена:
+                                </div>
+
+                                <div className="text-3xl font-bold text-gray-800">
+                                    {formatCurrency(getSellingPrice(markingModalProduct))}
+                                </div>
+
+                                <div className="mt-2 text-sm text-gray-500">
+                                    Остаток: {formatQuantity(getStock(markingModalProduct), markingModalProduct.unit)}
+                                </div>
+                            </div>
+
+                            <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setMarkingModalProduct(null);
+                                        setMarkingCodeInput('');
+                                        setMarkingCheckResult(null);
+                                    }}
+                                    className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50"
+                                >
+                                    Отмена
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={isCheckingMarking}
+                                    onClick={() => void addMarkedProductToCheckout(markingModalProduct, markingCodeInput)}
+                                    className="px-5 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    {isCheckingMarking ? 'Проверяю...' : 'Проверить [M+] и добавить'}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+
                 {weightModalProduct && (
                     <div
                         key="weight-modal"
@@ -2167,6 +2857,10 @@ export default function PosPage() {
                                 <div className="mt-2 text-sm text-indigo-700">
                                     Остаток: {formatQuantity(getStock(weightModalProduct), 'weight')}
                                 </div>
+
+                                <div className="mt-2 rounded-lg bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-800">
+                                    Для весового товара разрешён минусовой остаток из-за погрешности веса.
+                                </div>
                             </div>
 
                             <label className="mb-2 block text-sm font-medium text-gray-700">
@@ -2193,13 +2887,6 @@ export default function PosPage() {
 
                                     if (quantity <= 0) {
                                         setError('Введите корректный вес');
-                                        return;
-                                    }
-
-                                    if (quantity > getStock(weightModalProduct)) {
-                                        setError(
-                                            `Недостаточно остатка: «${weightModalProduct.name}». В наличии ${formatQuantity(getStock(weightModalProduct), 'weight')}`
-                                        );
                                         return;
                                     }
 
@@ -2240,13 +2927,6 @@ export default function PosPage() {
 
                                         if (quantity <= 0) {
                                             setError('Введите корректный вес');
-                                            return;
-                                        }
-
-                                        if (quantity > getStock(weightModalProduct)) {
-                                            setError(
-                                                `Недостаточно остатка: «${weightModalProduct.name}». В наличии ${formatQuantity(getStock(weightModalProduct), 'weight')}`
-                                            );
                                             return;
                                         }
 
@@ -2561,6 +3241,119 @@ export default function PosPage() {
                     </div>
                 )}
 
+                {isHeldReceiptsModalOpen && (
+                    <div
+                        key="held-receipts-modal"
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+                        onClick={() => setIsHeldReceiptsModalOpen(false)}
+                    >
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.96 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.96 }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+                        >
+                            <div className="border-b border-gray-100 p-6">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <h2 className="text-2xl font-bold text-gray-800">
+                                            Отложенные чеки
+                                        </h2>
+
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Чеки хранятся только в локальном состоянии кассы и не попадают в БД до оплаты.
+                                        </p>
+                                    </div>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsHeldReceiptsModalOpen(false)}
+                                        className="text-2xl text-gray-400 hover:text-gray-600"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="min-h-0 flex-1 overflow-y-auto p-6">
+                                {heldCheckouts.length === 0 ? (
+                                    <div className="rounded-xl bg-gray-50 px-4 py-8 text-center text-gray-500">
+                                        Отложенных чеков пока нет
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {heldCheckouts.map(held => {
+                                            const title = getHeldCheckoutTitle(held);
+                                            const heldTotal = held.total || held.items.reduce((sum, item) => {
+                                                return sum + safeParseNumber(item.product?.sellingPrice ?? item.product?.selling_price) * safeParseNumber(item.quantity);
+                                            }, 0);
+
+                                            return (
+                                                <div
+                                                    key={held.id}
+                                                    className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm"
+                                                >
+                                                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                                        <div className="min-w-0">
+                                                            <div className="font-bold text-gray-900">
+                                                                {title}
+                                                            </div>
+
+                                                            <div className="mt-1 text-xs text-gray-500">
+                                                                Создан: {new Date(held.createdAt).toLocaleString('ru-RU')} · Позиций: {held.items.length}
+                                                            </div>
+
+                                                            <div className="mt-2 space-y-1 text-sm text-gray-600">
+                                                                {held.items.slice(0, 3).map((item, index) => (
+                                                                    <div key={`${held.id}-${index}`} className="truncate">
+                                                                        {item.product?.name || 'Товар'} × {formatQuantity(safeParseNumber(item.quantity), item.product?.unit)}
+                                                                        {item.markingStatus ? ` · [${item.markingStatus}]` : ''}
+                                                                    </div>
+                                                                ))}
+
+                                                                {held.items.length > 3 && (
+                                                                    <div className="text-xs text-gray-400">
+                                                                        + ещё {held.items.length - 3}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="shrink-0 text-left sm:text-right">
+                                                            <div className="text-2xl font-bold text-indigo-700">
+                                                                {formatCurrency(heldTotal)}
+                                                            </div>
+
+                                                            <div className="mt-3 flex flex-wrap justify-start gap-2 sm:justify-end">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => restoreHeldCheckout(held)}
+                                                                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+                                                                >
+                                                                    Открыть
+                                                                </button>
+
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => deleteHeldCheckout(held)}
+                                                                    className="rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                                                                >
+                                                                    Удалить
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+
                 {paymentModal === 'card' && (
                     <div
                         key="payment-card-modal"
@@ -2586,6 +3379,11 @@ export default function PosPage() {
 
                             <div className="rounded-xl bg-indigo-50 p-4 text-sm text-indigo-700 mb-6">
                                 После успешной оплаты на терминале нажмите «Оплата прошла».
+                                {hasMarkedCheckoutItems && (
+                                    <div className="mt-2 font-semibold">
+                                        В чеке есть маркированный товар — он обязательно будет пробит на ККТ.
+                                    </div>
+                                )}
                             </div>
 
                             <div className="flex justify-end gap-3">
@@ -2634,6 +3432,12 @@ export default function PosPage() {
                                 <div className="text-4xl font-bold text-emerald-700">
                                     {formatCurrency(total)}
                                 </div>
+
+                                {hasMarkedCheckoutItems && (
+                                    <div className="mt-3 rounded-lg bg-white/70 px-3 py-2 text-sm font-semibold text-emerald-800">
+                                        В чеке есть маркированный товар — чек будет пробит на ККТ.
+                                    </div>
+                                )}
                             </div>
 
                             <div className="mb-4">
@@ -2732,7 +3536,7 @@ export default function PosPage() {
                                 <button
                                     type="button"
                                     disabled={isPaying || cashReceivedNumber < total}
-                                    onClick={() => completePayment('cash', false)}
+                                    onClick={() => setFiscalConfirmModal(true)}
                                     className="rounded-lg bg-emerald-600 px-5 py-2 text-white hover:bg-emerald-700 disabled:opacity-50"
                                 >
                                     {isPaying ? 'Провожу оплату...' : 'Оплата получена'}
@@ -2769,6 +3573,11 @@ export default function PosPage() {
 
                             <div className="rounded-xl bg-blue-50 p-4 text-sm text-blue-700 mb-6">
                                 Перед подтверждением обязательно убедитесь, что перевод поступил или показан клиентом как выполненный.
+                                {hasMarkedCheckoutItems && (
+                                    <div className="mt-2 font-semibold">
+                                        В чеке есть маркированный товар — чек будет пробит на ККТ.
+                                    </div>
+                                )}
                             </div>
 
                             <div className="flex justify-end gap-3">
@@ -2794,7 +3603,7 @@ export default function PosPage() {
                     </div>
                 )}
 
-                {fiscalConfirmModal && paymentModal === 'card' && (
+                {fiscalConfirmModal && (paymentModal === 'card' || paymentModal === 'cash') && (
                     <div
                         key="fiscal-confirm-modal"
                         className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-4"
@@ -2811,39 +3620,66 @@ export default function PosPage() {
 
                             <div className="mb-4">
                                 <div className="text-gray-600 mb-1">
-                                    Сумма оплаты картой:
+                                    Сумма оплаты {paymentModal === 'cash' ? 'наличными' : 'картой'}:
                                 </div>
 
-                                <div className="text-3xl font-bold text-indigo-700">
+                                <div className={paymentModal === 'cash' ? 'text-3xl font-bold text-emerald-700' : 'text-3xl font-bold text-indigo-700'}>
                                     {formatCurrency(total)}
                                 </div>
+
+                                {paymentModal === 'cash' && (
+                                    <div className="mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                                        <div className="flex justify-between">
+                                            <span>Получено:</span>
+                                            <span className="font-bold">{formatCurrency(cashReceivedNumber)}</span>
+                                        </div>
+
+                                        <div className="mt-1 flex justify-between">
+                                            <span>Сдача:</span>
+                                            <span className="font-bold">{formatCurrency(Math.max(0, change))}</span>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
 
                             <div className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800 mb-6">
-                                Фискализация будет отправлена на локальную ККТ АТОЛ. Если чек пробивать не нужно, продажа сохранится без отправки в ККТ.
+                                Фискализация будет отправлена на локальную ККТ АТОЛ.
+                                {hasMarkedCheckoutItems
+                                    ? ' В чеке есть маркированный товар, поэтому сохранить продажу без ККТ нельзя.'
+                                    : ' Если чек пробивать не нужно, продажа сохранится без отправки в ККТ.'}
                             </div>
 
                             <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
                                 <button
                                     type="button"
-                                    disabled={isPaying}
+                                    disabled={isPaying || hasMarkedCheckoutItems}
                                     onClick={() => {
+                                        if (!paymentModal) {
+                                            return;
+                                        }
+
                                         setFiscalConfirmModal(false);
-                                        completePayment('card', false);
+                                        completePayment(paymentModal, false);
                                     }}
                                     className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
                                 >
-                                    Нет, сохранить без ККТ
+                                    {hasMarkedCheckoutItems ? 'Без ККТ нельзя для маркировки' : 'Нет, сохранить без ККТ'}
                                 </button>
 
                                 <button
                                     type="button"
                                     disabled={isPaying || !isShiftOpen}
                                     onClick={() => {
+                                        if (!paymentModal) {
+                                            return;
+                                        }
+
                                         setFiscalConfirmModal(false);
-                                        completePayment('card', true);
+                                        completePayment(paymentModal, true);
                                     }}
-                                    className="px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                                    className={paymentModal === 'cash'
+                                        ? 'px-5 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50'
+                                        : 'px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50'}
                                 >
                                     {isPaying ? 'Фискализирую...' : 'Да, пробить на ККТ'}
                                 </button>
@@ -2896,6 +3732,13 @@ export default function PosPage() {
                                         <div className="font-medium text-gray-800">
                                             {item.name}
                                         </div>
+
+                                        {item.marked && (
+                                            <div className="mt-1 text-xs font-semibold text-emerald-700">
+                                                [{item.markingStatus || 'M+'}] Маркировка проверена
+                                                {item.markingCode ? ` · КМ: ${formatMarkingCodePreview(item.markingCode)}` : ''}
+                                            </div>
+                                        )}
 
                                         <div className="flex justify-between text-sm text-gray-500">
                                             <span>

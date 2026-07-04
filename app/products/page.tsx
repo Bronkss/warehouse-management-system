@@ -1,10 +1,11 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import System from '../system/page'
+import System from '@/app/components/SystemShell'
 import { useModal } from '../hooks/useModal'
 import Modal from '../components/Modal'
 import AddProductForm from '../components/AddProductForm'
+import AddCigaretteForm from '../components/AddCigaretteForm'
 import CustomSelect from '../components/CustomSelect'
 import { getBarcodeDisplay } from '../utils/barcodes'
 import type { Product } from '../types/product'
@@ -69,6 +70,7 @@ interface ProductFormData {
     stock: string
     minStock: string
     image: string
+    marked: boolean
     imageFile?: File | null
 }
 
@@ -150,6 +152,66 @@ const ALL_CATEGORIES = [
     'Другое',
 ] as const
 
+
+type MarkableProduct = Product & {
+    marked?: boolean | number | string | null
+    isMarked?: boolean | number | string | null
+    is_marked?: boolean | number | string | null
+    marking?: boolean | number | string | null
+    markedProduct?: boolean | number | string | null
+}
+
+const normalizeBooleanFlag = (value: unknown): boolean => {
+    if (typeof value === 'boolean') {
+        return value
+    }
+
+    if (typeof value === 'number') {
+        return value === 1
+    }
+
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase()
+
+        return ['1', 'true', 'yes', 'y', 'да', 'маркированный', 'marked'].includes(normalized)
+    }
+
+    return false
+}
+
+const isMarkedProduct = (product: Product): boolean => {
+    const markableProduct = product as MarkableProduct
+
+    return normalizeBooleanFlag(
+        markableProduct.marked ??
+        markableProduct.isMarked ??
+        markableProduct.is_marked ??
+        markableProduct.marking ??
+        markableProduct.markedProduct
+    )
+}
+
+type ProductFormMode = 'product' | 'cigarette'
+
+const isCigaretteProduct = (product: Product): boolean => {
+    return product.category === 'Табачные изделия' && isMarkedProduct(product)
+}
+
+const buildProductFormInitialData = (product: Product): ProductFormData => {
+    return {
+        name: product.name,
+        category: product.category,
+        barcode: product.barcode,
+        purchasePrice: String(product.purchasePrice),
+        sellingPrice: String(product.sellingPrice),
+        unit: product.unit,
+        stock: String(product.stock),
+        minStock: String(product.minStock),
+        image: product.image || '',
+        marked: isMarkedProduct(product),
+    }
+}
+
 export default function Products() {
     const { isOpen, open, close } = useModal()
 
@@ -176,6 +238,7 @@ export default function Products() {
     const debouncedSearchQueryRef = useRef(debouncedSearchQuery)
 
     const [editingProduct, setEditingProduct] = useState<Product | null>(null)
+    const [productFormMode, setProductFormMode] = useState<ProductFormMode>('product')
 
     useEffect(() => {
         const timeoutId = setTimeout(() => {
@@ -571,16 +634,25 @@ export default function Products() {
                 product => product.stock > 0 && product.stock <= product.minStock
             ).length,
             available: filteredProducts.filter(product => product.stock > product.minStock).length,
+            marked: filteredProducts.filter(isMarkedProduct).length,
         }
     }, [filteredProducts])
 
     const handleOpenAddProduct = () => {
         setEditingProduct(null)
+        setProductFormMode('product')
+        open()
+    }
+
+    const handleOpenAddCigarette = () => {
+        setEditingProduct(null)
+        setProductFormMode('cigarette')
         open()
     }
 
     const handleOpenEditProduct = (product: Product) => {
         setEditingProduct(product)
+        setProductFormMode(isCigaretteProduct(product) ? 'cigarette' : 'product')
         open()
     }
 
@@ -603,6 +675,7 @@ export default function Products() {
                     stock: formData.stock,
                     minStock: formData.minStock,
                     image,
+                    marked: formData.marked,
                 }),
             })
 
@@ -689,6 +762,7 @@ export default function Products() {
                     stock: formData.stock,
                     minStock: formData.minStock,
                     image,
+                    marked: formData.marked,
                 }),
             })
 
@@ -780,12 +854,21 @@ export default function Products() {
             <System>
                 <section className="products-layout w-screen h-auto flex gap-6 p-6 overflow-x-clip">
                     <aside className="products-sidebar w-80 flex-shrink-0 bg-white rounded-lg shadow-md p-6 h-fit sticky top-6">
-                        <button
-                            className="products-add-button w-full bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold mb-8"
-                            onClick={handleOpenAddProduct}
-                        >
-                            + Добавить товар
-                        </button>
+                        <div className="mb-8 space-y-3">
+                            <button
+                                className="products-add-button w-full bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors font-semibold"
+                                onClick={handleOpenAddProduct}
+                            >
+                                + Добавить товар
+                            </button>
+
+                            <button
+                                className="w-full rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 font-semibold text-orange-700 transition-colors hover:bg-orange-100"
+                                onClick={handleOpenAddCigarette}
+                            >
+                                + Добавить сигареты
+                            </button>
+                        </div>
 
                         <nav className="products-categories">
                             <h3 className="products-sidebar-title text-lg font-semibold text-gray-700 mb-4">
@@ -845,6 +928,13 @@ export default function Products() {
                                     <span className="text-sm text-gray-600">🟢 В наличии:</span>
                                     <span className="font-semibold text-green-600">
                                         {stockStats.available}
+                                    </span>
+                                </div>
+
+                                <div className="flex justify-between items-center">
+                                    <span className="text-sm text-gray-600">🟣 Маркированные:</span>
+                                    <span className="font-semibold text-purple-600">
+                                        {stockStats.marked}
                                     </span>
                                 </div>
                             </div>
@@ -938,35 +1028,36 @@ export default function Products() {
                             </div>
                         )}
 
-                    {/*    {error && (*/}
-                    {/*    <div className="text-center py-12">*/}
-                    {/*        <p className="text-red-500 text-lg mb-4">{error}</p>*/}
+                        {/*    {error && (*/}
+                        {/*    <div className="text-center py-12">*/}
+                        {/*        <p className="text-red-500 text-lg mb-4">{error}</p>*/}
 
-                    {/*        <button*/}
-                    {/*            onClick={() => {*/}
-                    {/*                if (debouncedSearchQuery.trim()) {*/}
-                    {/*                    void searchProductsFromIndexedDbOnly(debouncedSearchQuery)*/}
-                    {/*                    return*/}
-                    {/*                }*/}
+                        {/*        <button*/}
+                        {/*            onClick={() => {*/}
+                        {/*                if (debouncedSearchQuery.trim()) {*/}
+                        {/*                    void searchProductsFromIndexedDbOnly(debouncedSearchQuery)*/}
+                        {/*                    return*/}
+                        {/*                }*/}
 
-                    {/*                fetchProducts({*/}
-                    {/*                    mode: 'replace',*/}
-                    {/*                    search: '',*/}
-                    {/*                    cursor: null,*/}
-                    {/*                })*/}
-                    {/*            }}*/}
-                    {/*            className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"*/}
-                    {/*        >*/}
-                    {/*            Повторить*/}
-                    {/*        </button>*/}
-                    {/*    </div>*/}
-                    {/*)}*/}
+                        {/*                fetchProducts({*/}
+                        {/*                    mode: 'replace',*/}
+                        {/*                    search: '',*/}
+                        {/*                    cursor: null,*/}
+                        {/*                })*/}
+                        {/*            }}*/}
+                        {/*            className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"*/}
+                        {/*        >*/}
+                        {/*            Повторить*/}
+                        {/*        </button>*/}
+                        {/*    </div>*/}
+                        {/*)}*/}
 
                         {!isLoading && !error && hasProducts && (
                             <>
                                 <div className="products-grid grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
                                     {filteredProducts.map(product => {
                                         const status = getStockStatus(product)
+                                        const marked = isMarkedProduct(product)
 
                                         return (
                                             <article
@@ -985,7 +1076,7 @@ export default function Products() {
                                                         className="w-full h-full object-contain bg-white"
                                                     />
 
-                                                    <div className="absolute top-2 left-2">
+                                                    <div className="absolute top-2 left-2 flex flex-col gap-1">
                                                         <span
                                                             className={`px-2 py-1 rounded-full text-xs font-medium ${
                                                                 product.unit === 'weight'
@@ -995,6 +1086,12 @@ export default function Products() {
                                                         >
                                                             {product.unit === 'weight' ? 'Весовой' : 'Штучный'}
                                                         </span>
+
+                                                        {marked && (
+                                                            <span className="rounded-full bg-purple-100 px-2 py-1 text-xs font-semibold text-purple-700 shadow-sm">
+                                                                Маркировка
+                                                            </span>
+                                                        )}
                                                     </div>
 
                                                     <div
@@ -1058,6 +1155,12 @@ export default function Products() {
                                                     <p className="product-category text-sm text-gray-500 mb-2">
                                                         {product.category}
                                                     </p>
+
+                                                    {marked && (
+                                                        <div className="mb-2 inline-flex rounded-full bg-purple-50 px-2.5 py-1 text-xs font-semibold text-purple-700 ring-1 ring-purple-100">
+                                                            Маркированный товар
+                                                        </div>
+                                                    )}
 
                                                     {product.barcode && (
                                                         <div className="mb-2 flex items-start gap-2">
@@ -1180,30 +1283,40 @@ export default function Products() {
             </System>
 
             <Modal
-                key={editingProduct ? editingProduct.id : 'new'}
+                key={editingProduct ? `${productFormMode}-${editingProduct.id}` : `new-${productFormMode}`}
                 isOpen={isOpen}
                 onClose={close}
-                title={editingProduct ? 'Редактировать товар' : 'Добавить новый товар'}
+                title={
+                    editingProduct
+                        ? productFormMode === 'cigarette'
+                            ? 'Редактировать сигареты'
+                            : 'Редактировать товар'
+                        : productFormMode === 'cigarette'
+                            ? 'Добавить сигареты'
+                            : 'Добавить новый товар'
+                }
             >
-                <AddProductForm
-                    onSave={editingProduct ? handleEditProduct : handleAddProduct}
-                    onCancel={close}
-                    initialData={
-                        editingProduct
-                            ? {
-                                name: editingProduct.name,
-                                category: editingProduct.category,
-                                barcode: editingProduct.barcode,
-                                purchasePrice: String(editingProduct.purchasePrice),
-                                sellingPrice: String(editingProduct.sellingPrice),
-                                unit: editingProduct.unit,
-                                stock: String(editingProduct.stock),
-                                minStock: String(editingProduct.minStock),
-                                image: editingProduct.image || '',
-                            }
-                            : undefined
-                    }
-                />
+                {productFormMode === 'cigarette' ? (
+                    <AddCigaretteForm
+                        onSave={editingProduct ? handleEditProduct : handleAddProduct}
+                        onCancel={close}
+                        initialData={
+                            editingProduct
+                                ? buildProductFormInitialData(editingProduct)
+                                : undefined
+                        }
+                    />
+                ) : (
+                    <AddProductForm
+                        onSave={editingProduct ? handleEditProduct : handleAddProduct}
+                        onCancel={close}
+                        initialData={
+                            editingProduct
+                                ? buildProductFormInitialData(editingProduct)
+                                : undefined
+                        }
+                    />
+                )}
             </Modal>
 
             {isUpdateModalOpen && (

@@ -1,5 +1,5 @@
 {
-  "name": "atol-local-agent",
+  "name": "atol-local-agent-driver",
   "version": "1.0.0",
   "type": "module",
   "private": true,

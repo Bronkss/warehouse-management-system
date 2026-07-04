@@ -1,30 +1,33 @@
 import 'dotenv/config';
 import express from 'express';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { writeFile, unlink } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const app = express();
 
-const PORT = Number(process.env.PORT || 3107);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const PORT = Number(process.env.PORT || 3108);
 const POS_ORIGIN = process.env.POS_ORIGIN || '';
 const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
-
-const ATOL_BASE_URL = process.env.ATOL_BASE_URL || 'http://127.0.0.1:16732/api/v2';
-const ATOL_DEVICE_ID = process.env.ATOL_DEVICE_ID || 'kassa1';
-
-const ATOL_USE_AUTH = String(process.env.ATOL_USE_AUTH || 'false') === 'true';
-const ATOL_LOGIN = process.env.ATOL_LOGIN || '';
-const ATOL_PASSWORD = process.env.ATOL_PASSWORD || '';
-const ATOL_USER_AGENT = process.env.ATOL_USER_AGENT || '';
 
 const ATOL_TAXATION_TYPE = process.env.ATOL_TAXATION_TYPE || 'patent';
 const ATOL_VAT_TYPE = process.env.ATOL_VAT_TYPE || 'none';
 const ATOL_OPERATOR_NAME = process.env.ATOL_OPERATOR_NAME || 'Администратор';
 const ATOL_OPERATOR_VATIN = process.env.ATOL_OPERATOR_VATIN || '';
 
-const ATOL_POLL_ATTEMPTS = Number(process.env.ATOL_POLL_ATTEMPTS || 45);
-const ATOL_POLL_INTERVAL_MS = Number(process.env.ATOL_POLL_INTERVAL_MS || 1000);
+const ATOL_POWERSHELL_TIMEOUT_MS = Number(process.env.ATOL_POWERSHELL_TIMEOUT_MS || 120000);
 
-app.use(express.json({ limit: '2mb' }));
+const GS_CHAR = '\u001d';
+const MARKING_STATUS_ATTEMPTS = Number(process.env.MARKING_STATUS_ATTEMPTS || 10);
+const MARKING_STATUS_INTERVAL_MS = Number(process.env.MARKING_STATUS_INTERVAL_MS || 1200);
+
+app.use(express.json({ limit: '4mb' }));
 
 app.use((req, res, next) => {
     const origin = req.headers.origin;
@@ -58,12 +61,12 @@ app.use((req, res, next) => {
     });
 });
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 const money = value => {
     const number = Number(value || 0);
     return Math.round((number + Number.EPSILON) * 100) / 100;
 };
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const requireToken = (req, res, next) => {
     if (!AGENT_TOKEN) {
@@ -84,176 +87,592 @@ const requireToken = (req, res, next) => {
     next();
 };
 
-const getAtolUrl = path => {
-    const base = ATOL_BASE_URL.endsWith('/') ? ATOL_BASE_URL : `${ATOL_BASE_URL}/`;
-    return new URL(path.replace(/^\//, ''), base).toString();
+let atolCommandQueue = Promise.resolve();
+
+const runExclusiveAtolTask = async task => {
+    const previousTask = atolCommandQueue.catch(() => {});
+
+    let releaseCurrentTask;
+
+    atolCommandQueue = new Promise(resolve => {
+        releaseCurrentTask = resolve;
+    });
+
+    await previousTask;
+
+    try {
+        await sleep(250);
+        return await task();
+    } finally {
+        await sleep(250);
+        releaseCurrentTask();
+    }
 };
 
-const getAtolAuthHeader = () => {
-    if (!ATOL_USE_AUTH) {
-        return null;
-    }
-
-    if (!ATOL_LOGIN || !ATOL_PASSWORD) {
-        return null;
-    }
-
-    return `Basic ${Buffer.from(`${ATOL_LOGIN}:${ATOL_PASSWORD}`).toString('base64')}`;
-};
-
-const readResponseBody = async response => {
-    const text = await response.text();
+const readJsonFromStdout = stdout => {
+    const text = String(stdout || '').trim();
 
     if (!text) {
         return null;
     }
 
-    try {
-        return JSON.parse(text);
-    } catch {
-        return text;
-    }
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const lastLine = lines[lines.length - 1];
+
+    return JSON.parse(lastLine);
 };
 
-const atolFetch = async (path, init = {}) => {
-    const headers = new Headers(init.headers || {});
+const runPowerShellBridge = async commands => {
+    const bridgePath = path.join(__dirname, 'bridge', 'atol-json.ps1');
+    const inputFile = path.join(
+        os.tmpdir(),
+        `atol-driver-${process.pid}-${Date.now()}-${crypto.randomUUID()}.json`
+    );
 
-    headers.set('Content-Type', 'application/json');
+    await writeFile(inputFile, JSON.stringify({ commands }), 'utf8');
 
-    if (ATOL_USER_AGENT) {
-        headers.set('User-Agent', ATOL_USER_AGENT);
-    }
+    return new Promise((resolve, reject) => {
+        const child = spawn(
+            'powershell.exe',
+            [
+                '-NoProfile',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                bridgePath,
+                '-InputFile',
+                inputFile,
+            ],
+            {
+                env: process.env,
+                windowsHide: true,
+            }
+        );
 
-    const authHeader = getAtolAuthHeader();
+        let stdout = '';
+        let stderr = '';
+        let finished = false;
 
-    if (authHeader) {
-        headers.set('Authorization', authHeader);
-    }
-
-    const url = getAtolUrl(path);
-
-    const response = await fetch(url, {
-        ...init,
-        headers,
-    });
-
-    const data = await readResponseBody(response);
-
-    if (!response.ok) {
-        const message =
-                  data?.message ||
-                  data?.error?.description ||
-                  data?.description ||
-                  `Ошибка АТОЛ HTTP ${response.status}`;
-
-        throw new Error(message);
-    }
-
-    return data;
-};
-
-const getErrorFromResult = result => {
-    if (!result || typeof result !== 'object') {
-        return null;
-    }
-
-    const error = result.error;
-
-    if (!error) {
-        return null;
-    }
-
-    const code = Number(error.code || 0);
-
-    if (code === 0) {
-        return null;
-    }
-
-    return error.description || `Ошибка АТОЛ, код ${error.code}`;
-};
-
-const parseAtolQueueResponse = data => {
-    const results = Array.isArray(data?.results)
-        ? data.results
-        : Array.isArray(data)
-            ? data
-            : [data];
-
-    const inProgress = results.some(result => {
-        return result?.status === 'inProgress' || result?.status === 'wait';
-    });
-
-    if (inProgress) {
-        return {
-            inProgress: true,
-            result: null,
+        const cleanupInputFile = async () => {
+            try {
+                await unlink(inputFile);
+            } catch {}
         };
+
+        const timeout = setTimeout(async () => {
+            if (finished) {
+                return;
+            }
+
+            finished = true;
+            child.kill('SIGTERM');
+            await cleanupInputFile();
+            reject(new Error('АТОЛ-драйвер не ответил вовремя'));
+        }, ATOL_POWERSHELL_TIMEOUT_MS);
+
+        child.stdout.on('data', chunk => {
+            stdout += chunk.toString('utf8');
+        });
+
+        child.stderr.on('data', chunk => {
+            stderr += chunk.toString('utf8');
+        });
+
+        child.on('error', async error => {
+            if (finished) {
+                return;
+            }
+
+            finished = true;
+            clearTimeout(timeout);
+            await cleanupInputFile();
+            reject(error);
+        });
+
+        child.on('close', async code => {
+            if (finished) {
+                return;
+            }
+
+            finished = true;
+            clearTimeout(timeout);
+            await cleanupInputFile();
+
+            try {
+                const parsed = readJsonFromStdout(stdout);
+
+                if (!parsed) {
+                    reject(new Error(stderr || `PowerShell завершился без JSON-ответа, code=${code}`));
+                    return;
+                }
+
+                if (!parsed.ok) {
+                    reject(new Error(parsed.message || 'Ошибка bridge АТОЛ'));
+                    return;
+                }
+
+                resolve(parsed);
+            } catch (error) {
+                reject(
+                    new Error(
+                        `Не удалось разобрать ответ bridge АТОЛ: ${
+                            error instanceof Error ? error.message : String(error)
+                        }. STDERR: ${stderr}`
+                    )
+                );
+            }
+        });
+    });
+};
+
+const getAtolResultErrorMessage = item => {
+    if (!item) {
+        return null;
     }
 
-    for (const result of results) {
-        const error = getErrorFromResult(result);
-
-        if (error) {
-            throw new Error(error);
-        }
+    if (item.errorDescription) {
+        return item.errorDescription;
     }
 
-    const topError = getErrorFromResult(data);
-
-    if (topError) {
-        throw new Error(topError);
+    if (item.message) {
+        return item.message;
     }
 
-    const lastResultWithPayload = [...results]
-        .reverse()
-        .find(result => result?.result);
+    if (item.result?.error?.description) {
+        return item.result.error.description;
+    }
 
-    return {
-        inProgress: false,
-        result: lastResultWithPayload?.result || data?.result || data,
-    };
+    if (item.result?.error?.message) {
+        return item.result.error.message;
+    }
+
+    if (item.result?.description) {
+        return item.result.description;
+    }
+
+    return null;
+};
+
+const isInvalidMarkingProcessStateError = value => {
+    const message = String(value || '').toLowerCase();
+
+    return (
+        message.includes('неверное состояние процесса проверки км') ||
+        message.includes('invalid marking') ||
+        message.includes('invalid state')
+    );
+};
+
+const isMarkingRejectedError = value => {
+    const message = String(value || '').toLowerCase();
+
+    return (
+        message.includes('[m-]') ||
+        message.includes('[m]') ||
+        message.includes('не прошёл проверку') ||
+        message.includes('не прошел проверку') ||
+        message.includes('не подтвержд') ||
+        message.includes('marking code is not positive')
+    );
 };
 
 const runAtolCommands = async commands => {
-    const uuid = crypto.randomUUID();
+    return runExclusiveAtolTask(async () => {
+        const result = await runPowerShellBridge(commands);
 
-    const payload = {
-        uuid,
-        deviceID: ATOL_DEVICE_ID,
-        request: commands,
-    };
+        const failed = result.results?.find(item => {
+            if (item.commandType === '__sleep') {
+                return false;
+            }
 
-    await atolFetch('/requests', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-    });
-
-    for (let attempt = 0; attempt < ATOL_POLL_ATTEMPTS; attempt += 1) {
-        const data = await atolFetch(`/requests/${uuid}`, {
-            method: 'GET',
+            return !item.ok;
         });
 
-        const parsed = parseAtolQueueResponse(data);
-
-        if (!parsed.inProgress) {
-            return {
-                uuid,
-                result: parsed.result,
-            };
+        if (failed) {
+            throw new Error(
+                getAtolResultErrorMessage(failed) ||
+                `Ошибка выполнения команды АТОЛ: ${failed.commandType || 'unknown'}`
+            );
         }
 
-        await sleep(ATOL_POLL_INTERVAL_MS);
-    }
-
-    throw new Error('ККТ не вернула результат выполнения задания вовремя');
+        return {
+            uuid: crypto.randomUUID(),
+            result,
+        };
+    });
 };
 
-const getPaymentType = paymentMethod => {
-    if (paymentMethod === 'cash') {
-        return 'cash';
+const runAtolCommandsRaw = async commands => {
+    return runExclusiveAtolTask(async () => {
+        const result = await runPowerShellBridge(commands);
+
+        return {
+            uuid: crypto.randomUUID(),
+            result,
+        };
+    });
+};
+
+const getAtolResultPayload = item => {
+    if (!item) {
+        return null;
     }
 
-    return 'electronically';
+    if (item.result) {
+        return item.result;
+    }
+
+    if (item.rawText) {
+        try {
+            return JSON.parse(item.rawText);
+        } catch {
+            return item.rawText;
+        }
+    }
+
+    return item;
+};
+
+const restoreMissingGsBeforeAi93 = value => {
+    const code = String(value || '');
+
+    if (!code) {
+        return code;
+    }
+
+    if (code.includes(GS_CHAR)) {
+        return code;
+    }
+
+    if (!code.startsWith('01')) {
+        return code;
+    }
+
+    const ai21Index = 16;
+
+    if (code.slice(ai21Index, ai21Index + 2) !== '21') {
+        return code;
+    }
+
+    const serialStartIndex = ai21Index + 2;
+    const lastAi93Index = code.lastIndexOf('93');
+
+    if (lastAi93Index <= serialStartIndex) {
+        return code;
+    }
+
+    const tailLength = code.length - lastAi93Index;
+
+    if (tailLength >= 4 && tailLength <= 12) {
+        const restored = `${code.slice(0, lastAi93Index)}${GS_CHAR}${code.slice(lastAi93Index)}`;
+
+        console.log('Marking code GS/FNC1 restored before AI 93:');
+        console.log(JSON.stringify({
+            before: code,
+            after: restored,
+        }, null, 2));
+
+        return restored;
+    }
+
+    return code;
+};
+
+const normalizeMarkingCodeInput = value => {
+    const normalized = String(value || '')
+        .replace(/^\]d2/i, '')
+        .replaceAll('\\u001d', GS_CHAR)
+        .replaceAll('\\x1d', GS_CHAR)
+        .replaceAll('<GS>', GS_CHAR)
+        .replaceAll('[GS]', GS_CHAR)
+        .trim();
+
+    return restoreMissingGsBeforeAi93(normalized);
+};
+
+const buildNativeDriverMarkingParams = markingCode => {
+    const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
+
+    return {
+        imcType: 256,
+        imc: normalizedMarkingCode,
+        itemEstimatedStatus: 1,
+        imcModeProcessing: 0,
+    };
+};
+
+const getDriverJsonPaymentType = paymentMethod => {
+    if (paymentMethod === 'cash') {
+        return '0';
+    }
+
+    return '1';
+};
+
+const hasMarkingCode = item => {
+    return Boolean(
+        item?.markingCode ||
+        item?.imc ||
+        item?.imcParams?.imc
+    );
+};
+
+const getItemMarkingCode = item => {
+    return normalizeMarkingCodeInput(
+        item?.markingCode ||
+        item?.imc ||
+        item?.imcParams?.imc ||
+        ''
+    );
+};
+
+const buildDriverJsonSellItem = item => {
+    const price = money(item.price);
+    const quantity = Number(item.quantity || 1);
+    const amount = money(item.total || item.amount || price * quantity);
+    const marked = hasMarkingCode(item);
+    const markingCode = getItemMarkingCode(item);
+
+    const sellItem = {
+        name: String(item.name || 'Товар').slice(0, 128),
+        paymentMethod: 'fullPayment',
+        paymentObject: marked ? 'commodityWithMarking' : 'commodity',
+        price,
+        quantity,
+        amount,
+        infoDiscountAmount: 0,
+        tax: {
+            sum: 0,
+            type: ATOL_VAT_TYPE,
+        },
+        type: 'position',
+    };
+
+    if (item.unit === 'piece' || !item.unit) {
+        sellItem.piece = true;
+        sellItem.measurementUnit = 'piece';
+    }
+
+    if (marked && markingCode) {
+        sellItem.imcParams = buildNativeDriverMarkingParams(markingCode);
+    }
+
+    return sellItem;
+};
+
+const buildDriverJsonSellCommand = receipt => {
+    const items = receipt.items.map(buildDriverJsonSellItem);
+
+    const total = money(
+        items.reduce((sum, item) => sum + Number(item.amount || 0), 0)
+    );
+
+    return {
+        electronically: false,
+        taxationType: ATOL_TAXATION_TYPE,
+        items,
+        operator: {
+            name: ATOL_OPERATOR_NAME,
+            ...(ATOL_OPERATOR_VATIN ? { vatin: ATOL_OPERATOR_VATIN } : {}),
+        },
+        payments: [
+            {
+                sum: total,
+                type: getDriverJsonPaymentType(receipt.paymentMethod),
+            },
+        ],
+        taxes: [],
+        type: 'sell',
+        useVAT18: false,
+    };
+};
+
+const buildNativeMarkingStatusPollCommands = markingCode => {
+    const params = buildNativeDriverMarkingParams(markingCode);
+
+    const commands = [
+        {
+            type: 'beginMarkingCodeValidation',
+            params,
+        },
+    ];
+
+    for (let index = 0; index < MARKING_STATUS_ATTEMPTS; index += 1) {
+        commands.push(
+            {
+                type: '__sleep',
+                ms: MARKING_STATUS_INTERVAL_MS,
+            },
+            {
+                type: 'getMarkingCodeValidationStatus',
+            }
+        );
+    }
+
+    return commands;
+};
+
+const buildNativeMarkingCheckCommands = markingCode => {
+    const commands = buildNativeMarkingStatusPollCommands(markingCode);
+
+    commands.push(
+        {
+            type: '__assertMarkingPositive',
+        },
+        {
+            type: 'acceptMarkingCode',
+        },
+        {
+            type: '__sleep',
+            ms: 300,
+        }
+    );
+
+    return commands;
+};
+
+const buildNativeMarkedReceiptBatchCommands = receipt => {
+    const commands = [];
+
+    for (const item of receipt.items) {
+        if (!hasMarkingCode(item)) {
+            continue;
+        }
+
+        const markingCode = getItemMarkingCode(item);
+
+        if (!markingCode) {
+            throw new Error(`Для маркированного товара "${item.name || 'Товар'}" не передан DataMatrix`);
+        }
+
+        commands.push(...buildNativeMarkingCheckCommands(markingCode));
+    }
+
+    commands.push(buildDriverJsonSellCommand(receipt));
+
+    return commands;
+};
+
+const parseBatchResult = batch => {
+    const results = batch?.result?.results || [];
+
+    const failed = results.find(item => {
+        if (item.commandType === '__sleep') {
+            return false;
+        }
+
+        return !item.ok;
+    }) || null;
+
+    const markingBegins = results
+        .filter(item => item.commandType === 'beginMarkingCodeValidation')
+        .map(getAtolResultPayload);
+
+    const markingStatuses = results
+        .filter(item => item.commandType === 'getMarkingCodeValidationStatus')
+        .map(getAtolResultPayload);
+
+    const markingAssertions = results
+        .filter(item => item.commandType === '__assertMarkingPositive')
+        .map(getAtolResultPayload);
+
+    const markingAccepts = results
+        .filter(item => item.commandType === 'acceptMarkingCode')
+        .map(getAtolResultPayload);
+
+    const sellItem = results
+        .filter(item => item.commandType === 'sell')
+        .at(-1) || null;
+
+    return {
+        results,
+        failed,
+        markingBegins,
+        markingStatuses,
+        markingAssertions,
+        markingAccepts,
+        sell: getAtolResultPayload(sellItem),
+        sellItem,
+    };
+};
+
+const getLatestMarkingStatus = statuses => {
+    if (!Array.isArray(statuses) || statuses.length === 0) {
+        return null;
+    }
+
+    for (let index = statuses.length - 1; index >= 0; index -= 1) {
+        const status = statuses[index];
+
+        if (status && typeof status === 'object') {
+            return status;
+        }
+    }
+
+    return null;
+};
+
+const determineMarkingStatus = statuses => {
+    const status = getLatestMarkingStatus(statuses);
+
+    if (!status) {
+        return {
+            markingStatus: 'M',
+            canSell: false,
+            message: 'Проверка КМ не завершена: ККТ не вернула статус проверки',
+            status,
+        };
+    }
+
+    const itemInfo = status?.onlineValidation?.itemInfoCheckResult;
+    const operatorResponse = status?.onlineValidation?.markOperatorResponse;
+    const operatorResult = status?.onlineValidation?.markOperatorResponseResult;
+    const ready = status?.ready === true;
+    const sent = status?.sentImcRequest === true;
+
+    const positive = Boolean(
+        ready &&
+        sent &&
+        itemInfo?.imcCheckFlag === true &&
+        itemInfo?.imcCheckResult === true &&
+        itemInfo?.imcEstimatedStatusCorrect === true &&
+        itemInfo?.imcStatusInfo === true &&
+        operatorResponse?.responseStatus === true &&
+        operatorResponse?.itemStatusCheck === true
+    );
+
+    if (positive) {
+        return {
+            markingStatus: 'M+',
+            canSell: true,
+            message: 'Код маркировки проверен успешно [M+]',
+            status,
+        };
+    }
+
+    const hasNegativeResult = Boolean(
+        operatorResult === 'unrecognized' ||
+        itemInfo?.imcCheckResult === false ||
+        itemInfo?.imcEstimatedStatusCorrect === false ||
+        operatorResponse?.responseStatus === false ||
+        operatorResponse?.itemStatusCheck === false
+    );
+
+    if (ready && sent && hasNegativeResult) {
+        return {
+            markingStatus: 'M-',
+            canSell: false,
+            message: 'Код маркировки не прошёл проверку [M-]. Продажа заблокирована.',
+            status,
+        };
+    }
+
+    return {
+        markingStatus: 'M',
+        canSell: false,
+        message: 'Проверка КМ не дала положительный результат [M+]. Продажа заблокирована.',
+        status,
+    };
 };
 
 const findFiscalParams = value => {
@@ -278,101 +697,158 @@ const findFiscalParams = value => {
     return undefined;
 };
 
-const buildSellCommand = receipt => {
-    const items = receipt.items.map(item => {
-        const price = money(item.price);
-        const quantity = Number(item.quantity);
-        const amount = money(item.total || price * quantity);
+function isHarmlessMarkingCleanupError(error) {
+    const message = error instanceof Error
+        ? error.message.toLowerCase()
+        : String(error || '').toLowerCase();
+
+    return (
+        message.includes('км отсутствует в таблице') ||
+        message.includes('данный км отсутствует в таблице') ||
+        message.includes('отсутствует в таблице') ||
+        message.includes('процедура проверки км не запущена') ||
+        message.includes('проверка км не запущена') ||
+        message.includes('нет активной проверки') ||
+        message.includes('validation is not started')
+    );
+}
+
+const safeRunAtolCommands = async commands => {
+    try {
+        const result = await runAtolCommands(commands);
 
         return {
-            type: 'position',
-            name: String(item.name || 'Товар').slice(0, 128),
-            price,
-            quantity,
-            amount,
-            department: 1,
-            paymentMethod: 'fullPayment',
-            paymentObject: 'commodity',
-            tax: {
-                type: ATOL_VAT_TYPE,
-            },
+            ok: true,
+            result,
+            error: null,
+            ignored: false,
         };
-    });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || '');
 
-    const total = money(
-        items.reduce((sum, item) => sum + Number(item.amount || 0), 0)
-    );
+        return {
+            ok: false,
+            result: null,
+            error: message,
+            ignored: isHarmlessMarkingCleanupError(error),
+        };
+    }
+};
+
+const resetMarkingValidationState = async () => {
+    const cancel = await safeRunAtolCommands([
+        {
+            type: 'cancelMarkingCodeValidation',
+        },
+    ]);
+
+    await sleep(1200);
+
+    const decline = await safeRunAtolCommands([
+        {
+            type: 'declineMarkingCode',
+        },
+    ]);
+
+    await sleep(1200);
+
+    const clear = await safeRunAtolCommands([
+        {
+            type: 'clearMarkingCodeValidationResult',
+        },
+    ]);
+
+    await sleep(1200);
 
     return {
-        type: 'sell',
-        electronically: false,
-        taxationType: ATOL_TAXATION_TYPE,
-        items,
-        operator: {
-            name: ATOL_OPERATOR_NAME,
-            ...(ATOL_OPERATOR_VATIN ? { vatin: ATOL_OPERATOR_VATIN } : {}),
-        },
-        payments: [
-            {
-                type: getPaymentType(receipt.paymentMethod),
-                sum: total,
-            },
-        ],
-        total,
+        cancel,
+        decline,
+        clear,
     };
 };
 
-const isAlreadyOpenShiftError = error => {
-    const message = error instanceof Error ? error.message.toLowerCase() : '';
+const runNativeMarkedReceiptWithRetry = async ({
+    receipt,
+    logLabel = 'Driver native marked fiscal batch command:',
+}) => {
+    let commands = buildNativeMarkedReceiptBatchCommands(receipt);
 
-    return (
-        message.includes('смен') &&
-        (
-            message.includes('откры') ||
-            message.includes('операция невозможна')
-        )
-    );
-};
+    console.log(logLabel);
+    console.log(JSON.stringify(commands, null, 2));
 
-const isAlreadyClosedShiftError = error => {
-    const message = error instanceof Error ? error.message.toLowerCase() : '';
+    let batch = await runAtolCommandsRaw(commands);
+    let parsed = parseBatchResult(batch);
+    let retried = false;
+    let reset = null;
 
-    return (
-        message.includes('смен') &&
-        (
-            message.includes('закры') ||
-            message.includes('не откры')
-        )
-    );
+    if (parsed.failed) {
+        const failedMessage =
+            getAtolResultErrorMessage(parsed.failed) ||
+            parsed.failed.errorDescription ||
+            parsed.failed.message ||
+            '';
+
+        if (isInvalidMarkingProcessStateError(failedMessage) && !isMarkingRejectedError(failedMessage)) {
+            console.warn('Invalid marking process state. Reset marking state and retry once.');
+
+            reset = await resetMarkingValidationState();
+            await sleep(1500);
+
+            commands = buildNativeMarkedReceiptBatchCommands(receipt);
+
+            console.log('Driver native marked fiscal batch retry command:');
+            console.log(JSON.stringify(commands, null, 2));
+
+            batch = await runAtolCommandsRaw(commands);
+            parsed = parseBatchResult(batch);
+            retried = true;
+        }
+    }
+
+    return {
+        commands,
+        batch,
+        parsed,
+        retried,
+        reset,
+    };
 };
 
 app.get('/health', requireToken, async (req, res) => {
     res.json({
         ok: true,
-        service: 'atol-local-agent',
-        mode: 'atol-driver-10.8-no-auth',
-        atolBaseUrl: ATOL_BASE_URL,
-        deviceId: ATOL_DEVICE_ID,
-        useAuth: ATOL_USE_AUTH,
+        service: 'atol-local-agent-driver',
+        mode: 'driver-com-powershell-bridge',
+        port: PORT,
         taxationType: ATOL_TAXATION_TYPE,
         vatType: ATOL_VAT_TYPE,
+        useSavedSettings: process.env.ATOL_DRIVER_USE_SAVED_SETTINGS || 'true',
+        markingStatusAttempts: MARKING_STATUS_ATTEMPTS,
+        markingStatusIntervalMs: MARKING_STATUS_INTERVAL_MS,
+        strictMarkingSell: true,
     });
 });
 
-app.get('/atol/ping', requireToken, async (req, res) => {
+app.post('/driver/raw-json', requireToken, async (req, res) => {
     try {
-        const data = await atolFetch('/requests', {
-            method: 'GET',
-        });
+        const commands = Array.isArray(req.body?.commands)
+            ? req.body.commands
+            : [req.body?.command || req.body];
+
+        const result = await runAtolCommands(commands);
 
         res.json({
             ok: true,
-            data,
+            result,
         });
     } catch (error) {
+        console.error(error);
+
         res.status(502).json({
             ok: false,
-            message: error instanceof Error ? error.message : 'АТОЛ Web Server недоступен',
+            message: error instanceof Error
+                ? error.message
+                : 'Ошибка выполнения JSON-команды через драйвер',
         });
     }
 });
@@ -387,6 +863,7 @@ app.post('/service/x-report', requireToken, async (req, res) => {
 
         res.json({
             ok: true,
+            message: 'X-отчёт отправлен на ККТ',
             result,
         });
     } catch (error) {
@@ -394,7 +871,9 @@ app.post('/service/x-report', requireToken, async (req, res) => {
 
         res.status(502).json({
             ok: false,
-            message: error instanceof Error ? error.message : 'Не удалось напечатать X-отчёт',
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось напечатать X-отчёт',
         });
     }
 });
@@ -413,25 +892,17 @@ app.post('/service/open-shift', requireToken, async (req, res) => {
 
         res.json({
             ok: true,
-            alreadyOpen: false,
             message: 'Смена открыта',
             result,
         });
     } catch (error) {
         console.error(error);
 
-        if (isAlreadyOpenShiftError(error)) {
-            res.json({
-                ok: true,
-                alreadyOpen: true,
-                message: 'Смена уже открыта',
-            });
-            return;
-        }
-
         res.status(502).json({
             ok: false,
-            message: error instanceof Error ? error.message : 'Не удалось открыть смену',
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось открыть смену',
         });
     }
 });
@@ -450,25 +921,17 @@ app.post('/service/close-shift', requireToken, async (req, res) => {
 
         res.json({
             ok: true,
-            alreadyClosed: false,
             message: 'Смена закрыта',
             result,
         });
     } catch (error) {
         console.error(error);
 
-        if (isAlreadyClosedShiftError(error)) {
-            res.json({
-                ok: true,
-                alreadyClosed: true,
-                message: 'Смена уже закрыта',
-            });
-            return;
-        }
-
         res.status(502).json({
             ok: false,
-            message: error instanceof Error ? error.message : 'Не удалось закрыть смену',
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось закрыть смену',
         });
     }
 });
@@ -510,20 +973,86 @@ app.post('/fiscal/sell', requireToken, async (req, res) => {
             return;
         }
 
-        const sellCommand = buildSellCommand(receipt);
+        const hasMarkedItems = receipt.items.some(hasMarkingCode);
 
-        console.log('Fiscal sell command:');
-        console.log(JSON.stringify(sellCommand, null, 2));
+        if (!hasMarkedItems) {
+            const sellCommand = buildDriverJsonSellCommand(receipt);
 
-        const fiscalResult = await runAtolCommands([sellCommand]);
+            console.log('Driver fiscal sell command:');
+            console.log(JSON.stringify(sellCommand, null, 2));
+
+            const fiscalResult = await runAtolCommands([sellCommand]);
+
+            res.json({
+                ok: true,
+                mode: 'ordinary-sell',
+                fiscal: {
+                    uuid: fiscalResult.uuid,
+                    fiscalParams: findFiscalParams(fiscalResult.result),
+                    raw: fiscalResult.result,
+                },
+            });
+            return;
+        }
+
+        const {
+            batch,
+            parsed,
+            retried,
+            reset,
+        } = await runNativeMarkedReceiptWithRetry({
+            receipt,
+            logLabel: 'Driver native marked fiscal batch command:',
+        });
+
+        if (parsed.failed) {
+            const message =
+                getAtolResultErrorMessage(parsed.failed) ||
+                parsed.failed.errorDescription ||
+                'Ошибка фискализации маркированного чека';
+
+            const statusInfo = determineMarkingStatus(parsed.markingStatuses);
+            const httpStatus = isMarkingRejectedError(message) || statusInfo.markingStatus !== 'M+'
+                ? 409
+                : 502;
+
+            res.status(httpStatus).json({
+                ok: false,
+                mode: 'native-marked-sell',
+                message,
+                markingStatus: statusInfo.markingStatus,
+                canSell: false,
+                failed: parsed.failed,
+                markingBegins: parsed.markingBegins,
+                markingStatuses: parsed.markingStatuses,
+                markingAssertions: parsed.markingAssertions,
+                markingAccepts: parsed.markingAccepts,
+                sell: parsed.sell,
+                retried,
+                reset,
+                batch,
+            });
+            return;
+        }
 
         res.json({
             ok: true,
+            mode: 'native-marked-sell',
             fiscal: {
-                uuid: fiscalResult.uuid,
-                fiscalParams: findFiscalParams(fiscalResult.result),
-                raw: fiscalResult.result,
+                uuid: batch.uuid,
+                fiscalParams: findFiscalParams(batch.result),
+                raw: batch.result,
             },
+            marking: {
+                begins: parsed.markingBegins,
+                statuses: parsed.markingStatuses,
+                assertions: parsed.markingAssertions,
+                accepts: parsed.markingAccepts,
+            },
+            sell: parsed.sell,
+            retried,
+            reset,
+            batch,
         });
     } catch (error) {
         console.error(error);
@@ -532,16 +1061,323 @@ app.post('/fiscal/sell', requireToken, async (req, res) => {
             ok: false,
             message: error instanceof Error
                 ? error.message
-                : 'Не удалось фискализировать чек',
+                : 'Не удалось фискализировать чек через драйвер',
+        });
+    }
+});
+
+app.post('/marking/precheck', requireToken, async (req, res) => {
+    let batch = null;
+    let reset = null;
+
+    try {
+        const { markingCode } = req.body || {};
+        const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
+
+        if (!normalizedMarkingCode) {
+            res.status(400).json({
+                ok: false,
+                canSell: false,
+                markingStatus: 'M',
+                message: 'Передайте DataMatrix / код маркировки',
+            });
+            return;
+        }
+
+        const commands = buildNativeMarkingStatusPollCommands(normalizedMarkingCode);
+
+        console.log('Driver marking precheck command:');
+        console.log(JSON.stringify(commands, null, 2));
+
+        batch = await runAtolCommandsRaw(commands);
+        const parsed = parseBatchResult(batch);
+        const statusInfo = determineMarkingStatus(parsed.markingStatuses);
+
+        reset = await resetMarkingValidationState();
+
+        res.json({
+            ok: statusInfo.canSell,
+            canSell: statusInfo.canSell,
+            markingStatus: statusInfo.markingStatus,
+            normalizedMarkingCode,
+            message: statusInfo.message,
+            markingBegins: parsed.markingBegins,
+            markingStatuses: parsed.markingStatuses,
+            reset,
+            batch,
+        });
+    } catch (error) {
+        console.error(error);
+
+        try {
+            reset = await resetMarkingValidationState();
+        } catch {}
+
+        res.status(502).json({
+            ok: false,
+            canSell: false,
+            markingStatus: 'M',
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось предварительно проверить КМ',
+            reset,
+            batch,
+        });
+    }
+});
+
+app.post('/marking/ism-ping', requireToken, async (req, res) => {
+    try {
+        const result = await runAtolCommands([
+            {
+                type: 'pingIsm',
+            },
+        ]);
+
+        res.json({
+            ok: true,
+            message: 'Проверка связи с ИСМ выполнена',
+            result,
+        });
+    } catch (error) {
+        console.error(error);
+
+        res.status(502).json({
+            ok: false,
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось проверить связь с ИСМ',
+        });
+    }
+});
+
+app.post('/marking/clear', requireToken, async (req, res) => {
+    try {
+        const result = await runAtolCommands([
+            {
+                type: 'clearMarkingCodeValidationResult',
+            },
+        ]);
+
+        res.json({
+            ok: true,
+            message: 'Таблица проверенных КМ очищена',
+            result,
+        });
+    } catch (error) {
+        console.error(error);
+
+        res.status(502).json({
+            ok: false,
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось очистить таблицу проверенных КМ',
+        });
+    }
+});
+
+app.post('/marking/reset', requireToken, async (req, res) => {
+    try {
+        const reset = await resetMarkingValidationState();
+
+        res.json({
+            ok: true,
+            message: 'Состояние проверки КМ сброшено',
+            reset,
+        });
+    } catch (error) {
+        console.error(error);
+
+        res.status(502).json({
+            ok: false,
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось сбросить состояние проверки КМ',
+        });
+    }
+});
+
+app.post('/marking/native-check', requireToken, async (req, res) => {
+    let batch = null;
+
+    try {
+        const { markingCode } = req.body || {};
+        const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
+
+        if (!normalizedMarkingCode) {
+            res.status(400).json({
+                ok: false,
+                message: 'Передайте DataMatrix / код маркировки',
+            });
+            return;
+        }
+
+        const commands = buildNativeMarkingCheckCommands(normalizedMarkingCode);
+
+        console.log('Driver native marking batch command:');
+        console.log(JSON.stringify(commands, null, 2));
+
+        batch = await runAtolCommandsRaw(commands);
+
+        const parsed = parseBatchResult(batch);
+        const statusInfo = determineMarkingStatus(parsed.markingStatuses);
+
+        if (parsed.failed) {
+            res.status(statusInfo.markingStatus === 'M+' ? 502 : 409).json({
+                ok: false,
+                method: 'native-check',
+                markingStatus: statusInfo.markingStatus,
+                canSell: false,
+                message:
+                    getAtolResultErrorMessage(parsed.failed) ||
+                    parsed.failed.errorDescription ||
+                    statusInfo.message ||
+                    'Ошибка проверки или принятия КМ',
+                failed: parsed.failed,
+                markingBegins: parsed.markingBegins,
+                markingStatuses: parsed.markingStatuses,
+                markingAssertions: parsed.markingAssertions,
+                markingAccepts: parsed.markingAccepts,
+                batch,
+            });
+            return;
+        }
+
+        res.json({
+            ok: true,
+            method: 'native-check',
+            message: 'КМ проверен и принят в одном COM-сеансе',
+            markingStatus: 'M+',
+            canSell: true,
+            params: buildNativeDriverMarkingParams(normalizedMarkingCode),
+            markingBegins: parsed.markingBegins,
+            markingStatuses: parsed.markingStatuses,
+            markingAssertions: parsed.markingAssertions,
+            markingAccepts: parsed.markingAccepts,
+            batch,
+        });
+    } catch (error) {
+        console.error(error);
+
+        res.status(502).json({
+            ok: false,
+            method: 'native-check',
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось проверить и принять КМ',
+            batch,
+        });
+    }
+});
+
+app.post('/marking/native-sell-test', requireToken, async (req, res) => {
+    try {
+        const {
+            markingCode,
+            name = 'Тест маркировки',
+            price = 1,
+            quantity = 1,
+            paymentMethod = 'cash',
+        } = req.body || {};
+
+        const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
+
+        if (!normalizedMarkingCode) {
+            res.status(400).json({
+                ok: false,
+                message: 'Передайте DataMatrix / код маркировки',
+            });
+            return;
+        }
+
+        const receipt = {
+            paymentMethod,
+            items: [
+                {
+                    name,
+                    price,
+                    quantity,
+                    total: money(Number(price || 1) * Number(quantity || 1)),
+                    unit: 'piece',
+                    markingCode: normalizedMarkingCode,
+                },
+            ],
+        };
+
+        const {
+            batch,
+            parsed,
+            retried,
+            reset,
+        } = await runNativeMarkedReceiptWithRetry({
+            receipt,
+            logLabel: 'Driver native marking sell-test batch command:',
+        });
+
+        if (parsed.failed) {
+            const statusInfo = determineMarkingStatus(parsed.markingStatuses);
+
+            res.status(statusInfo.markingStatus === 'M+' ? 502 : 409).json({
+                ok: false,
+                method: 'native-sell-test',
+                markingStatus: statusInfo.markingStatus,
+                canSell: false,
+                message:
+                    getAtolResultErrorMessage(parsed.failed) ||
+                    parsed.failed.errorDescription ||
+                    statusInfo.message ||
+                    'Ошибка тестовой продажи маркированного товара',
+                failed: parsed.failed,
+                markingBegins: parsed.markingBegins,
+                markingStatuses: parsed.markingStatuses,
+                markingAssertions: parsed.markingAssertions,
+                markingAccepts: parsed.markingAccepts,
+                sell: parsed.sell,
+                retried,
+                reset,
+                batch,
+            });
+            return;
+        }
+
+        res.json({
+            ok: true,
+            method: 'native-sell-test',
+            message: 'Тестовый чек с маркировкой пробит в одном COM-сеансе',
+            markingStatus: 'M+',
+            canSell: true,
+            marking: {
+                begins: parsed.markingBegins,
+                statuses: parsed.markingStatuses,
+                assertions: parsed.markingAssertions,
+                accepts: parsed.markingAccepts,
+            },
+            sell: parsed.sell,
+            fiscalParams: findFiscalParams(batch.result),
+            retried,
+            reset,
+            batch,
+        });
+    } catch (error) {
+        console.error(error);
+
+        res.status(502).json({
+            ok: false,
+            method: 'native-sell-test',
+            message: error instanceof Error
+                ? error.message
+                : 'Не удалось пробить тестовый чек с маркировкой',
+            batch: null,
         });
     }
 });
 
 app.listen(PORT, '127.0.0.1', () => {
-    console.log(`ATOL local agent started: http://127.0.0.1:${PORT}`);
-    console.log(`ATOL target: ${ATOL_BASE_URL}`);
-    console.log(`ATOL deviceID: ${ATOL_DEVICE_ID}`);
-    console.log(`ATOL auth: ${ATOL_USE_AUTH ? 'enabled' : 'disabled'}`);
+    console.log(`ATOL driver local agent started: http://127.0.0.1:${PORT}`);
+    console.log('Mode: driver COM / PowerShell bridge');
     console.log(`Taxation type: ${ATOL_TAXATION_TYPE}`);
     console.log(`VAT type: ${ATOL_VAT_TYPE}`);
+    console.log(`Marking status attempts: ${MARKING_STATUS_ATTEMPTS}`);
+    console.log(`Marking status interval: ${MARKING_STATUS_INTERVAL_MS} ms`);
+    console.log('Strict marking sell: enabled. Only [M+] can be fiscalized.');
 });

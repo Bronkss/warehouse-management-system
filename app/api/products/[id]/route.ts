@@ -18,6 +18,7 @@ interface ProductRow {
     unit: ProductUnit
     stock: string
     min_stock: string
+    marked: boolean
     image: string
 }
 
@@ -26,6 +27,8 @@ type RouteContext = {
 }
 
 function mapProduct(row: ProductRow) {
+    const marked = Boolean(row.marked)
+
     return {
         id: Number(row.id),
         name: row.name,
@@ -36,6 +39,8 @@ function mapProduct(row: ProductRow) {
         unit: row.unit,
         stock: Number(row.stock),
         minStock: Number(row.min_stock),
+        marked,
+        isMarked: marked,
         image: row.image || DEFAULT_PRODUCT_IMAGE,
     }
 }
@@ -59,6 +64,40 @@ function parseNumber(value: unknown, fallback = 0): number {
     const parsed = Number(value)
 
     return Number.isNaN(parsed) ? fallback : parsed
+}
+
+function parseMarked(value: unknown): boolean {
+    if (typeof value === 'boolean') {
+        return value
+    }
+
+    if (typeof value === 'number') {
+        return value === 1
+    }
+
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase()
+
+        return (
+            normalized === 'true' ||
+            normalized === '1' ||
+            normalized === 'yes' ||
+            normalized === 'on' ||
+            normalized === 'да'
+        )
+    }
+
+    return false
+}
+
+function getMarkedFromBody(body: any): boolean {
+    return parseMarked(
+        body?.marked ??
+        body?.isMarked ??
+        body?.is_marked ??
+        body?.marking ??
+        body?.markedProduct
+    )
 }
 
 function normalizeImageUrl(value: unknown): string {
@@ -97,6 +136,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
         const sellingPrice = parseNumber(body.sellingPrice, 0)
         const stock = parseNumber(body.stock, 0)
         const minStock = parseNumber(body.minStock, 10)
+        const marked = getMarkedFromBody(body)
         const image = normalizeImageUrl(body.image)
 
         if (!name) {
@@ -167,8 +207,9 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 unit = $6,
                 stock = $7,
                 min_stock = $8,
-                image_url = $9
-            WHERE id = $10
+                marked = $9,
+                image_url = $10
+            WHERE id = $11
             RETURNING
                 id,
                 name,
@@ -179,7 +220,8 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 unit,
                 stock,
                 min_stock,
-                COALESCE(NULLIF(image_url, ''), $11) AS image
+                COALESCE(marked, false) AS marked,
+                COALESCE(NULLIF(image_url, ''), $12) AS image
             `,
             [
                 name,
@@ -190,6 +232,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 unit,
                 stock,
                 minStock,
+                marked,
                 image,
                 productId,
                 DEFAULT_PRODUCT_IMAGE,
