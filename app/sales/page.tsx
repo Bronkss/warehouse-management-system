@@ -38,6 +38,46 @@ const formatCurrency = (amount: number | undefined | null): string => {
     }).format(safeAmount)
 }
 
+const formatQuantityNumber = (amount: number | undefined | null, maximumFractionDigits = 3): string => {
+    const safeAmount = typeof amount === 'number' && Number.isFinite(amount) ? amount : 0
+
+    return new Intl.NumberFormat('ru-RU', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits,
+    }).format(safeAmount)
+}
+
+const isWeightReceiptItem = (item: ReceiptItem): boolean => {
+    const unit = String(item.unit || '').trim().toLowerCase()
+
+    return ['weight', 'kg', 'кг', 'килограмм', 'килограммы'].includes(unit)
+}
+
+const getSoldItemsCount = (item: ReceiptItem): number => {
+    if (isWeightReceiptItem(item)) {
+        return 1
+    }
+
+    const quantity = Number(item.quantity)
+
+    return Number.isFinite(quantity) && quantity > 0 ? quantity : 0
+}
+
+const formatReceiptItemQuantity = (item: ReceiptItem): React.ReactNode => {
+    if (isWeightReceiptItem(item)) {
+        return (
+            <span className="inline-flex flex-col items-end gap-0.5">
+                <span className="font-semibold">1 ед.</span>
+                <span className="text-xs text-gray-400">
+                    {formatQuantityNumber(item.quantity, 3)} кг
+                </span>
+            </span>
+        )
+    }
+
+    return formatQuantityNumber(item.quantity, 3)
+}
+
 export default function Page() {
     const [receipts, setReceipts] = React.useState<Receipt[]>([])
     const [isLoading, setIsLoading] = React.useState(true)
@@ -122,7 +162,7 @@ export default function Page() {
         .reduce((sum, receipt) => sum + receipt.total, 0)
 
     const totalItems = filteredReceipts.reduce((sum, receipt) => {
-        return sum + receipt.items.reduce((itemSum, item) => itemSum + item.quantity, 0)
+        return sum + receipt.items.reduce((itemSum, item) => itemSum + getSoldItemsCount(item), 0)
     }, 0)
 
     const clearFilters = () => {
@@ -174,7 +214,7 @@ export default function Page() {
                         </div>
 
                         <div className="sales-stat-value text-3xl font-bold text-emerald-700">
-                            {totalItems}
+                            {formatQuantityNumber(totalItems, 3)}
                         </div>
                     </div>
 
@@ -366,7 +406,7 @@ export default function Page() {
                                                     data-label="Кол-во"
                                                     className="py-3 pr-4 text-right"
                                                 >
-                                                    {item.quantity}
+                                                    {formatReceiptItemQuantity(item)}
                                                 </td>
 
                                                 <td

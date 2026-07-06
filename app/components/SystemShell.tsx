@@ -424,8 +424,8 @@ export default function SystemShell({ children }: Props) {
 
     return (
         <div className="system-root min-h-screen w-full bg-[#ececec] m-0 p-0">
-            <div className="system-wrapper min-h-[calc(100vh-16px)] overflow-x-hidden bg-[#ececec]">
-                <header className="system-header sticky top-0 z-[90] bg-[#e5765d] px-4 py-4 shadow-sm md:px-6">
+            <div className="system-wrapper min-h-screen overflow-x-hidden bg-[#ececec] pt-[76px] md:pt-[84px]">
+                <header className="system-header fixed left-0 right-0 top-0 z-[50] bg-[#e5765d] px-4 py-4 shadow-[0_8px_22px_rgba(0,0,0,0.12)] md:px-6">
                     <div className="system-header-content mx-auto grid max-w-[1800px] grid-cols-[auto_1fr_auto] items-center gap-4">
                         <div className="system-header-left flex min-w-0 shrink-0 items-center gap-3">
                             <Link
@@ -587,7 +587,7 @@ export default function SystemShell({ children }: Props) {
                     )}
                 </header>
 
-                <main className="system-main min-h-[calc(100vh-92px)] bg-[#ececec]">
+                <main className="system-main min-h-[calc(100vh-76px)] bg-[#ececec]">
                     {hasPageContent ? children : (
                         <div className="welcome-section px-6 pb-10 pt-6 md:px-8">
                             <div className="mx-auto max-w-[1700px]">
@@ -714,7 +714,7 @@ export default function SystemShell({ children }: Props) {
             </div>
 
             {isTrainingOpen && (
-                <div className="fixed inset-0 z-[140] flex items-center justify-center overflow-hidden overscroll-none bg-gray-950/55 px-3 py-4 backdrop-blur-[2px]">
+                <div className="fixed inset-0 z-[240] flex items-center justify-center overflow-hidden overscroll-none bg-gray-950/55 px-3 py-4 backdrop-blur-[2px]">
                     <div className="flex max-h-[calc(100dvh-32px)] w-full max-w-[980px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
                         <div className="border-b border-gray-100 px-5 py-5 sm:px-6">
                             <div className="flex items-start justify-between gap-4">
@@ -799,7 +799,7 @@ export default function SystemShell({ children }: Props) {
             )}
 
             {isUpdateModalOpen && (
-                <div className="fixed inset-0 z-[130] flex items-center justify-center overflow-hidden overscroll-none bg-gray-950/55 px-3 py-4 backdrop-blur-[2px]">
+                <div className="fixed inset-0 z-[230] flex items-center justify-center overflow-hidden overscroll-none bg-gray-950/55 px-3 py-4 backdrop-blur-[2px]">
                     <div className="flex max-h-[calc(100dvh-32px)] w-full max-w-[880px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
                         <div className="border-b border-gray-100 bg-white px-5 py-5 sm:px-6">
                             <div className="flex items-start justify-between gap-4">
@@ -891,6 +891,10 @@ export default function SystemShell({ children }: Props) {
             )}
 
             <style jsx>{`
+                .system-header {
+                    transform: translateZ(0);
+                }
+
                 .system-mobile-menu-button {
                     display: none;
                 }
@@ -929,6 +933,10 @@ export default function SystemShell({ children }: Props) {
                 @media (max-width: 767px) {
                     .system-header {
                         padding: 14px 16px;
+                    }
+
+                    .system-wrapper {
+                        padding-top: 72px;
                     }
 
                     .system-header-content {
@@ -1014,6 +1022,10 @@ export default function SystemShell({ children }: Props) {
                 }
 
                 @media (min-width: 768px) and (max-width: 1280px) {
+                    .system-wrapper {
+                        padding-top: 136px;
+                    }
+
                     .system-header-content {
                         grid-template-columns: auto auto;
                     }

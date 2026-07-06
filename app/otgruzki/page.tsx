@@ -414,6 +414,25 @@ export default function Page() {
         })
     }, [isModalOpen, isModalHydrated, modalConsignee, modalRows, modalShipper, selectedShipment])
 
+    useEffect(() => {
+        const hasOpenModal = isHistoryModalOpen || isModalOpen
+
+        if (!hasOpenModal) {
+            return
+        }
+
+        const bodyOverflow = document.body.style.overflow
+        const htmlOverflow = document.documentElement.style.overflow
+
+        document.body.style.overflow = 'hidden'
+        document.documentElement.style.overflow = 'hidden'
+
+        return () => {
+            document.body.style.overflow = bodyOverflow
+            document.documentElement.style.overflow = htmlOverflow
+        }
+    }, [isHistoryModalOpen, isModalOpen])
+
     const openHistoryModal = () => {
         setIsHistoryModalOpen(true)
         setError(null)
@@ -555,7 +574,7 @@ export default function Page() {
 
     return (
         <System>
-            <section className="relative z-0 w-full min-h-screen bg-gray-50 p-4">
+            <section className="relative w-full min-h-screen bg-gray-50 p-4">
                 <div className="mx-auto max-w-[1600px] space-y-4">
                     <div className="rounded-2xl bg-white p-5 shadow-sm">
                         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -607,7 +626,7 @@ export default function Page() {
                 </div>
 
                 {isHistoryModalOpen && (
-                    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 px-3 py-4">
+                    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 px-3 py-4">
                         <div className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
                             <div className="border-b border-gray-100 bg-gray-50 px-5 py-4">
                                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -720,7 +739,7 @@ export default function Page() {
                 )}
 
                 {isModalOpen && (
-                    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 px-3 py-4">
+                    <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/50 px-3 py-4">
                         <div className="flex max-h-[92vh] w-full max-w-[1500px] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
                             <div className="border-b border-gray-100 bg-gray-50 px-5 py-4">
                                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">

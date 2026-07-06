@@ -84,7 +84,11 @@ const normalizeIntegerString = (value: string): string => {
 }
 
 const normalizeCigaretteBarcode = (value: string): string => {
-    return value.replace(/\D/g, '').slice(0, 8)
+    return value.replace(/\D/g, '').slice(0, 13)
+}
+
+const isValidCigaretteBarcode = (value: string): boolean => {
+    return /^(?:\d{8}|\d{13})$/.test(value)
 }
 
 const looksLikeDataMatrix = (value: string): boolean => {
@@ -202,7 +206,7 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
         if (looksLikeDataMatrix(value)) {
             setErrors(prev => ({
                 ...prev,
-                barcode: 'Это похоже на DataMatrix с пачки. Здесь нужен только 8-значный штрихкод товара для поиска в кассе.',
+                barcode: 'Это похоже на DataMatrix с пачки. Здесь нужен только обычный 8- или 13-значный штрихкод товара для поиска в кассе.',
             }))
         } else {
             clearFieldError('barcode')
@@ -312,9 +316,9 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
         }
 
         if (!barcode) {
-            newErrors.barcode = 'Отсканируйте или введите 8-значный штрихкод пачки'
-        } else if (!/^\d{8}$/.test(barcode)) {
-            newErrors.barcode = 'Штрихкод сигарет должен состоять строго из 8 цифр'
+            newErrors.barcode = 'Отсканируйте или введите 8- или 13-значный штрихкод пачки'
+        } else if (!isValidCigaretteBarcode(barcode)) {
+            newErrors.barcode = 'Штрихкод сигарет должен состоять из 8 или 13 цифр'
         }
 
         if (!formState.purchasePrice || parsePrice(formState.purchasePrice) <= 0) {
@@ -382,7 +386,7 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
                         </h3>
 
                         <p className="mt-1 text-xs leading-5 text-red-800">
-                            Товар будет сохранён как штучный, категория “Табачные изделия”, маркировка Честный ЗНАК включена всегда. В это поле сохраняется только 8-значный штрихкод товара для поиска в кассе. DataMatrix с пачки здесь не сохраняем.
+                            Товар будет сохранён как штучный, категория “Табачные изделия”, маркировка Честный ЗНАК включена всегда. В это поле сохраняется только обычный 8- или 13-значный штрихкод товара для поиска в кассе. DataMatrix с пачки здесь не сохраняем.
                         </p>
                     </div>
                 </div>
@@ -509,7 +513,7 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
 
             <div>
                 <label className="mb-2 block text-sm font-medium text-gray-700">
-                    8-значный штрихкод пачки *
+                    Штрихкод пачки — 8 или 13 цифр *
                 </label>
 
                 <input
@@ -517,8 +521,8 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
                     inputMode="numeric"
                     value={formState.barcode}
                     onChange={event => updateBarcode(event.target.value)}
-                    placeholder="Например: 12345678"
-                    maxLength={8}
+                    placeholder="Например: 12345678 или 4601234567890"
+                    maxLength={13}
                     className={`w-full rounded-lg border px-4 py-2 font-mono text-lg tracking-wider focus:outline-none focus:ring-2 focus:ring-red-500 ${
                         errors.barcode ? 'border-red-500' : 'border-gray-300'
                     }`}
