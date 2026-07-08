@@ -146,7 +146,7 @@ const REMEMBER_ME_KEY = 'warehouse_remember_me';
 const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug';
 const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name';
 const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type';
-const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location';
+const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-locations';
 const DEFAULT_LOCATION_SLUG = 'tochka';
 const DEFAULT_LOCATION_NAME = 'ТОЧКА';
 

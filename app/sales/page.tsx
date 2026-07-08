@@ -30,7 +30,7 @@ type Receipt = {
 
 const LOCATION_SLUG_KEY = 'warehouse_location_slug'
 const LOCATION_NAME_KEY = 'warehouse_location_name'
-const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location'
+const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-locations'
 const DEFAULT_LOCATION_SLUG = 'tochka'
 const DEFAULT_LOCATION_NAME = 'ТОЧКА'
 

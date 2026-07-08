@@ -319,7 +319,7 @@ export default function Products() {
                  * Важный момент:
                  * после полной фоновой синхронизации перечитываем товары из IndexedDB
                  * и обновляем React state. За счёт этого страница обновляется сама,
-                 * без window.location.reload() и без ручной перезагрузки браузера.
+                 * без window.locations.reload() и без ручной перезагрузки браузера.
                  */
                 await refreshProductsFromIndexedDb()
             })

@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server'
 
 export const DEFAULT_WAREHOUSE_LOCATION_SLUG = 'tochka'
 export const WAREHOUSE_LOCATION_COOKIE = 'warehouse_location_slug'
-export const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location'
+export const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-locations'
 
 export type WarehouseLocation = {
     id: number
