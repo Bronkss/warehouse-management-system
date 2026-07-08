@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
+import { resolveWarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -115,6 +116,8 @@ function normalizeImageUrl(value: unknown): string {
 }
 
 export async function PUT(request: NextRequest, context: RouteContext) {
+    const client = await pool.connect()
+
     try {
         const productId = await getProductId(context)
 
@@ -126,6 +129,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
         }
 
         const body = await request.json()
+        const location = await resolveWarehouseLocation(client, request)
 
         const name = String(body.name || '').trim()
         const category = String(body.category || '').trim()
@@ -195,7 +199,22 @@ export async function PUT(request: NextRequest, context: RouteContext) {
             )
         }
 
-        const result = await pool.query<ProductRow>(
+        await client.query('BEGIN')
+
+        const existingStockResult = await client.query<{ stock: string }>(
+            `
+            SELECT COALESCE(stock, 0) AS stock
+            FROM product_stocks
+            WHERE product_id = $1 AND location_id = $2
+            LIMIT 1
+            `,
+            [productId, location.id]
+        )
+
+        const previousStock = Number(existingStockResult.rows[0]?.stock ?? 0)
+        const quantityDelta = stock - previousStock
+
+        const result = await client.query<{ id: number }>(
             `
             UPDATE products
             SET
@@ -205,23 +224,13 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 purchase_price = $4,
                 selling_price = $5,
                 unit = $6,
-                stock = $7,
+                stock = CASE WHEN $12 = 'tochka' THEN $7 ELSE stock END,
                 min_stock = $8,
                 marked = $9,
-                image_url = $10
+                image_url = $10,
+                updated_at = NOW()
             WHERE id = $11
-            RETURNING
-                id,
-                name,
-                category,
-                barcode,
-                purchase_price,
-                selling_price,
-                unit,
-                stock,
-                min_stock,
-                COALESCE(marked, false) AS marked,
-                COALESCE(NULLIF(image_url, ''), $12) AS image
+            RETURNING id
             `,
             [
                 name,
@@ -235,19 +244,80 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 marked,
                 image,
                 productId,
-                DEFAULT_PRODUCT_IMAGE,
+                location.slug,
             ]
         )
 
         if (result.rowCount === 0) {
+            await client.query('ROLLBACK')
+
             return NextResponse.json(
                 { message: 'Товар не найден' },
                 { status: 404 }
             )
         }
 
-        return NextResponse.json(mapProduct(result.rows[0]))
+        await client.query(
+            `
+            INSERT INTO product_stocks (product_id, location_id, stock)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (product_id, location_id) DO UPDATE
+            SET stock = EXCLUDED.stock,
+                updated_at = NOW()
+            `,
+            [productId, location.id, stock]
+        )
+
+        if (quantityDelta !== 0) {
+            await client.query(
+                `
+                INSERT INTO stock_movements (
+                    product_id,
+                    location_id,
+                    movement_type,
+                    quantity_delta,
+                    stock_after,
+                    document_type,
+                    document_id,
+                    comment,
+                    created_by
+                )
+                VALUES ($1, $2, 'stock_manual_update', $3, $4, 'products', $1, $5, 'products-api')
+                `,
+                [productId, location.id, quantityDelta, stock, `Ручное изменение остатка товара в зоне ${location.name}`]
+            )
+        }
+
+        const selected = await client.query<ProductRow>(
+            `
+            SELECT
+                p.id,
+                p.name,
+                p.category,
+                p.barcode,
+                p.purchase_price,
+                p.selling_price,
+                p.unit,
+                COALESCE(ps.stock, 0) AS stock,
+                p.min_stock,
+                COALESCE(p.marked, false) AS marked,
+                COALESCE(NULLIF(p.image_url, ''), NULLIF(p.image, ''), $3) AS image
+            FROM products p
+            LEFT JOIN product_stocks ps
+                ON ps.product_id = p.id
+               AND ps.location_id = $2
+            WHERE p.id = $1
+            LIMIT 1
+            `,
+            [productId, location.id, DEFAULT_PRODUCT_IMAGE]
+        )
+
+        await client.query('COMMIT')
+
+        return NextResponse.json(mapProduct(selected.rows[0]))
     } catch (error: any) {
+        await client.query('ROLLBACK').catch(() => undefined)
+
         console.error('PUT /api/products/[id] error:', error)
 
         if (error?.code === '23505') {
@@ -265,9 +335,11 @@ export async function PUT(request: NextRequest, context: RouteContext) {
         }
 
         return NextResponse.json(
-            { message: 'Ошибка при изменении товара' },
+            { message: error instanceof Error ? error.message : 'Ошибка при изменении товара' },
             { status: 500 }
         )
+    } finally {
+        client.release()
     }
 }
 

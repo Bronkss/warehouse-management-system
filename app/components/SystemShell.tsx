@@ -3,11 +3,20 @@
 import * as React from 'react'
 import Image from 'next/image'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import type { ReactNode } from 'react'
 
 const TRAINING_STORAGE_KEY = 'warehouse.system.training.seen.v1.2026_07_01'
 const CURRENT_UPDATE_STORAGE_KEY = 'warehouse.system.current_update.seen.v5.2026_07_01_kassa_news_cards_fixed'
+
+const AUTH_USER_KEY = 'warehouse_auth_user'
+const AUTH_LOGIN_KEY = 'warehouse_auth_login'
+const REMEMBER_ME_KEY = 'warehouse_remember_me'
+const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug'
+const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name'
+const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type'
+const LOCATION_COOKIE_NAME = 'warehouse_location_slug'
+const DEFAULT_LOCATION_NAME = 'ТОЧКА'
 
 const menuItems = [
     { title: 'Товары', icon: '/icons/tovar.png', linkName: 'products' },
@@ -223,8 +232,38 @@ function CloseButton({ onClick }: { onClick: () => void }) {
     )
 }
 
+
+function readCurrentLocationName() {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_NAME
+    }
+
+    return (
+        localStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+        sessionStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+        DEFAULT_LOCATION_NAME
+    )
+}
+
+function readCurrentLocationType() {
+    if (typeof window === 'undefined') {
+        return 'store'
+    }
+
+    return (
+        localStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+        sessionStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+        'store'
+    )
+}
+
+function clearCookie(name: string) {
+    document.cookie = `${name}=; path=/; max-age=0; SameSite=Lax`
+}
+
 export default function SystemShell({ children }: Props) {
     const pathname = usePathname()
+    const router = useRouter()
     const swipeStartXRef = React.useRef<number | null>(null)
     const touchStartXRef = React.useRef<number | null>(null)
 
@@ -233,12 +272,19 @@ export default function SystemShell({ children }: Props) {
     const [isUpdateModalOpen, setIsUpdateModalOpen] = React.useState(false)
     const [activeTrainingIndex, setActiveTrainingIndex] = React.useState(0)
     const [activeUpdateIndex, setActiveUpdateIndex] = React.useState(0)
+    const [currentLocationName, setCurrentLocationName] = React.useState(DEFAULT_LOCATION_NAME)
+    const [currentLocationType, setCurrentLocationType] = React.useState('store')
 
     const hasPageContent = React.Children.count(children) > 0
     const activeTraining = trainingSections[activeTrainingIndex] || trainingSections[0]
 
     React.useEffect(() => {
         setIsMenuOpen(false)
+    }, [pathname])
+
+    React.useEffect(() => {
+        setCurrentLocationName(readCurrentLocationName())
+        setCurrentLocationType(readCurrentLocationType())
     }, [pathname])
 
     React.useEffect(() => {
@@ -292,6 +338,23 @@ export default function SystemShell({ children }: Props) {
     const closeUpdateModal = () => {
         localStorage.setItem(CURRENT_UPDATE_STORAGE_KEY, 'read')
         setIsUpdateModalOpen(false)
+    }
+
+    const handleLogout = () => {
+        localStorage.removeItem(AUTH_USER_KEY)
+        localStorage.removeItem(AUTH_LOGIN_KEY)
+        localStorage.removeItem(REMEMBER_ME_KEY)
+        localStorage.removeItem(AUTH_LOCATION_SLUG_KEY)
+        localStorage.removeItem(AUTH_LOCATION_NAME_KEY)
+        localStorage.removeItem(AUTH_LOCATION_TYPE_KEY)
+
+        sessionStorage.removeItem(AUTH_USER_KEY)
+        sessionStorage.removeItem(AUTH_LOCATION_SLUG_KEY)
+        sessionStorage.removeItem(AUTH_LOCATION_NAME_KEY)
+        sessionStorage.removeItem(AUTH_LOCATION_TYPE_KEY)
+
+        clearCookie(LOCATION_COOKIE_NAME)
+        router.replace('/auth')
     }
 
     const goToUpdate = (index: number) => {
@@ -442,7 +505,7 @@ export default function SystemShell({ children }: Props) {
                                     Складской учёт
                                 </div>
                                 <div className="truncate text-lg font-bold leading-5 text-white">
-                                    ТОЧКА
+                                    {currentLocationName}
                                 </div>
                             </div>
 
@@ -489,6 +552,17 @@ export default function SystemShell({ children }: Props) {
                         </nav>
 
                         <div className="system-header-actions ml-auto flex shrink-0 items-center justify-end gap-2">
+                            <div className="system-location-pill hidden h-11 items-center rounded-2xl bg-white/18 px-4 text-left text-white ring-1 ring-white/20 lg:flex">
+                                <div>
+                                    <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/70">
+                                        Зона
+                                    </div>
+                                    <div className="max-w-[150px] truncate text-sm font-extrabold leading-4">
+                                        {currentLocationName}
+                                    </div>
+                                </div>
+                            </div>
+
                             <Link
                                 href="/online-kassa"
                                 className={`system-kassa-button flex h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
@@ -508,6 +582,14 @@ export default function SystemShell({ children }: Props) {
                             >
                                 <NewsIcon />
                                 <span>Новости</span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={handleLogout}
+                                className="system-logout-button flex h-11 items-center justify-center rounded-2xl border border-white/24 bg-white/14 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-white/22"
+                            >
+                                Выйти
                             </button>
                         </div>
                     </div>
@@ -544,6 +626,18 @@ export default function SystemShell({ children }: Props) {
 
                                     <span className="truncate">Касса</span>
                                 </Link>
+
+                                <div className="rounded-2xl bg-white/12 px-4 py-3 text-sm text-white shadow-sm">
+                                    <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/60">
+                                        Текущая зона
+                                    </div>
+                                    <div className="mt-1 font-extrabold">
+                                        {currentLocationName}
+                                    </div>
+                                    <div className="mt-0.5 text-xs text-white/70">
+                                        {currentLocationType === 'warehouse' ? 'Склад' : 'Торговая точка'}
+                                    </div>
+                                </div>
 
                                 {menuItems.map((item) => {
                                     const href = `/${item.linkName}`
@@ -582,6 +676,14 @@ export default function SystemShell({ children }: Props) {
                                 >
                                     Новости
                                 </button>
+
+                                <button
+                                    type="button"
+                                    onClick={handleLogout}
+                                    className="rounded-2xl bg-white/16 px-4 py-3 text-sm font-bold text-white shadow-sm hover:bg-white/22"
+                                >
+                                    Выйти из зоны
+                                </button>
                             </nav>
                         </div>
                     )}
@@ -608,11 +710,11 @@ export default function SystemShell({ children }: Props) {
                                                 </div>
 
                                                 <h1 className="welcome-title text-[30px] font-semibold leading-tight text-[#2f2f2f]">
-                                                    ТОЧКА — складской учёт
+                                                    {currentLocationName} — складской учёт
                                                 </h1>
 
                                                 <p className="welcome-text mt-3 max-w-4xl text-[16px] leading-7 text-[#646464]">
-                                                    Здесь собраны разделы системы, обучение и новости обновлений. Рабочие страницы открываются из верхнего меню.
+                                                    Здесь собраны разделы системы, обучение и новости обновлений. Все операции выполняются в текущей зоне: {currentLocationName}.
                                                 </p>
                                             </div>
                                         </div>
@@ -962,6 +1064,10 @@ export default function SystemShell({ children }: Props) {
 
                     .system-kassa-button span,
                     .system-news-button span {
+                        display: none;
+                    }
+
+                    .system-logout-button {
                         display: none;
                     }
 

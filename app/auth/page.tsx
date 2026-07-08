@@ -7,12 +7,64 @@ import { useRouter } from 'next/navigation'
 const AUTH_USER_KEY = 'warehouse_auth_user'
 const AUTH_LOGIN_KEY = 'warehouse_auth_login'
 const REMEMBER_ME_KEY = 'warehouse_remember_me'
+const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug'
+const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name'
+const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type'
+const LOCATION_COOKIE_NAME = 'warehouse_location_slug'
+
+const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
+
+type WarehouseLocation = {
+    slug: string
+    name: string
+    type: 'warehouse' | 'store'
+    login: string
+    password: string
+}
+
+const WAREHOUSE_LOCATIONS: WarehouseLocation[] = [
+    {
+        slug: 'main-warehouse',
+        name: 'Главный склад',
+        type: 'warehouse',
+        login: 'sklad',
+        password: 'sklad112233',
+    },
+    {
+        slug: 'tochka',
+        name: 'ТОЧКА',
+        type: 'store',
+        login: 'tochka',
+        password: 'tochka112233',
+    },
+    {
+        slug: 'rodnik',
+        name: 'Родник',
+        type: 'store',
+        login: 'rodnik',
+        password: 'rodnik112233',
+    },
+]
+
+function findLocation(slug: string): WarehouseLocation {
+    return WAREHOUSE_LOCATIONS.find(location => location.slug === slug) || WAREHOUSE_LOCATIONS[1]
+}
+
+function setCookie(name: string, value: string, remember: boolean) {
+    const maxAge = remember ? `; max-age=${COOKIE_MAX_AGE_SECONDS}` : ''
+    document.cookie = `${name}=${encodeURIComponent(value)}; path=/; SameSite=Lax${maxAge}`
+}
+
+function clearCookie(name: string) {
+    document.cookie = `${name}=; path=/; max-age=0; SameSite=Lax`
+}
 
 export default function Auth() {
     const router = useRouter()
 
     const [login, setLogin] = React.useState('')
     const [password, setPassword] = React.useState('')
+    const [selectedLocationSlug, setSelectedLocationSlug] = React.useState('tochka')
     const [rememberMe, setRememberMe] = React.useState(false)
     const [error, setError] = React.useState('')
 
@@ -21,6 +73,8 @@ export default function Auth() {
         const savedLogin = localStorage.getItem(AUTH_LOGIN_KEY)
         const savedLocalUser = localStorage.getItem(AUTH_USER_KEY)
         const savedSessionUser = sessionStorage.getItem(AUTH_USER_KEY)
+        const savedLocalLocation = localStorage.getItem(AUTH_LOCATION_SLUG_KEY)
+        const savedSessionLocation = sessionStorage.getItem(AUTH_LOCATION_SLUG_KEY)
 
         if (savedRememberMe) {
             setRememberMe(true)
@@ -30,7 +84,11 @@ export default function Auth() {
             }
         }
 
-        if (savedLocalUser === 'admin' || savedSessionUser === 'admin') {
+        if (savedLocalLocation || savedSessionLocation) {
+            setSelectedLocationSlug(savedLocalLocation || savedSessionLocation || 'tochka')
+        }
+
+        if ((savedLocalUser || savedSessionUser) && (savedLocalLocation || savedSessionLocation)) {
             router.replace('/system')
         }
     }, [router])
@@ -39,32 +97,61 @@ export default function Auth() {
         e.preventDefault()
 
         const normalizedLogin = login.trim()
+        const selectedLocation = findLocation(selectedLocationSlug)
 
-        if (normalizedLogin === 'admin' && password === '112233') {
+        const isLocationCredentialValid =
+            normalizedLogin === selectedLocation.login &&
+            password === selectedLocation.password
+
+        /**
+         * Временная страховка, чтобы старый доступ не потерялся во время миграции.
+         * Позже лучше убрать и оставить только серверную авторизацию с хешами паролей.
+         */
+        const isLegacyAdminValid = normalizedLogin === 'admin' && password === '112233'
+
+        if (isLocationCredentialValid || isLegacyAdminValid) {
+            const authUser = isLegacyAdminValid ? 'admin' : selectedLocation.login
+
             setError('')
+            clearCookie(LOCATION_COOKIE_NAME)
+            setCookie(LOCATION_COOKIE_NAME, selectedLocation.slug, rememberMe)
 
             if (rememberMe) {
-                localStorage.setItem(AUTH_USER_KEY, 'admin')
+                localStorage.setItem(AUTH_USER_KEY, authUser)
                 localStorage.setItem(AUTH_LOGIN_KEY, normalizedLogin)
                 localStorage.setItem(REMEMBER_ME_KEY, 'true')
+                localStorage.setItem(AUTH_LOCATION_SLUG_KEY, selectedLocation.slug)
+                localStorage.setItem(AUTH_LOCATION_NAME_KEY, selectedLocation.name)
+                localStorage.setItem(AUTH_LOCATION_TYPE_KEY, selectedLocation.type)
+
                 sessionStorage.removeItem(AUTH_USER_KEY)
+                sessionStorage.removeItem(AUTH_LOCATION_SLUG_KEY)
+                sessionStorage.removeItem(AUTH_LOCATION_NAME_KEY)
+                sessionStorage.removeItem(AUTH_LOCATION_TYPE_KEY)
             } else {
-                sessionStorage.setItem(AUTH_USER_KEY, 'admin')
+                sessionStorage.setItem(AUTH_USER_KEY, authUser)
+                sessionStorage.setItem(AUTH_LOCATION_SLUG_KEY, selectedLocation.slug)
+                sessionStorage.setItem(AUTH_LOCATION_NAME_KEY, selectedLocation.name)
+                sessionStorage.setItem(AUTH_LOCATION_TYPE_KEY, selectedLocation.type)
+
                 localStorage.removeItem(AUTH_USER_KEY)
                 localStorage.removeItem(AUTH_LOGIN_KEY)
                 localStorage.removeItem(REMEMBER_ME_KEY)
+                localStorage.removeItem(AUTH_LOCATION_SLUG_KEY)
+                localStorage.removeItem(AUTH_LOCATION_NAME_KEY)
+                localStorage.removeItem(AUTH_LOCATION_TYPE_KEY)
             }
 
             router.push('/system')
             return
         }
 
-        setError('Неверный логин или пароль')
+        setError('Неверный логин, пароль или выбранная торговая зона')
     }
 
     return (
         <div className="auth-page min-h-screen bg-[#cfcfcf] flex items-center justify-center px-4">
-            <div className="auth-card w-full max-w-[520px] relative rounded-[32px] border-[3px] border-[#e67c63] bg-white shadow-[0_8px_20px_rgba(0,0,0,0.12)] px-10 py-8">
+            <div className="auth-card w-full max-w-[560px] relative rounded-[32px] border-[3px] border-[#e67c63] bg-white shadow-[0_8px_20px_rgba(0,0,0,0.12)] px-10 py-8">
                 <div className="auth-logo absolute left-1/2 -translate-x-1/2 -top-[50px] w-[460px] max-w-[95%] h-[250px] pointer-events-none select-none">
                     <Image
                         src="/logo.gif"
@@ -78,6 +165,25 @@ export default function Auth() {
 
                 <form onSubmit={handleSubmit} className="auth-form flex flex-col pt-[80px]">
                     <label className="auth-label text-[18px] text-[#222] mb-3">
+                        Торговая зона
+                    </label>
+
+                    <select
+                        value={selectedLocationSlug}
+                        onChange={(e) => {
+                            setSelectedLocationSlug(e.target.value)
+                            if (error) setError('')
+                        }}
+                        className="auth-input h-[70px] rounded-[26px] border-[3px] border-[#e67c63] bg-white px-8 text-[20px] text-[#222] outline-none mb-7"
+                    >
+                        {WAREHOUSE_LOCATIONS.map(location => (
+                            <option key={location.slug} value={location.slug}>
+                                {location.name}
+                            </option>
+                        ))}
+                    </select>
+
+                    <label className="auth-label text-[18px] text-[#222] mb-3">
                         Логин
                     </label>
 
@@ -90,7 +196,7 @@ export default function Auth() {
                         }}
                         placeholder="Введите логин"
                         autoComplete="username"
-                        className="auth-input h-[78px] rounded-[26px] border-[3px] border-[#e67c63] px-8 text-[20px] text-[#222] placeholder:text-[#c9c9c9] outline-none mb-7"
+                        className="auth-input h-[70px] rounded-[26px] border-[3px] border-[#e67c63] px-8 text-[20px] text-[#222] placeholder:text-[#c9c9c9] outline-none mb-7"
                     />
 
                     <label className="auth-label text-[18px] text-[#222] mb-3">
@@ -106,15 +212,12 @@ export default function Auth() {
                         }}
                         placeholder="Введите пароль"
                         autoComplete="current-password"
-                        className="auth-input h-[78px] rounded-[26px] border-[3px] border-[#e67c63] px-8 text-[20px] text-[#222] placeholder:text-[#c9c9c9] outline-none"
+                        className="auth-input h-[70px] rounded-[26px] border-[3px] border-[#e67c63] px-8 text-[20px] text-[#222] placeholder:text-[#c9c9c9] outline-none"
                     />
 
-                    <button
-                        type="button"
-                        className="auth-forgot self-end mt-2 text-[16px] text-[#8d8d8d] hover:text-[#666] transition"
-                    >
-                        Забыли пароль?
-                    </button>
+                    <div className="mt-4 rounded-2xl bg-[#fff7f4] px-4 py-3 text-sm leading-6 text-[#8a3f2e]">
+                        Тестовые доступы: sklad/sklad112233, tochka/tochka112233, rodnik/rodnik112233. Старый admin/112233 временно оставлен для подстраховки.
+                    </div>
 
                     <label className="auth-remember flex items-center gap-4 mt-5 mb-4 cursor-pointer">
                         <input
@@ -143,14 +246,9 @@ export default function Auth() {
                             Войти
                         </button>
 
-                        <button
-                            type="button"
-                            className="auth-register text-left text-[18px] leading-[1.4] text-[#3b3b3b] hover:text-[#e67c63] transition"
-                        >
-                            Впервые в Точке?
-                            <br />
-                            Зарегистрироваться
-                        </button>
+                        <div className="auth-location-hint text-left text-[15px] leading-[1.45] text-[#6b6b6b]">
+                            Все остатки, продажи, приёмки и списания будут относиться к выбранной зоне.
+                        </div>
                     </div>
                 </form>
             </div>
@@ -184,15 +282,11 @@ export default function Auth() {
                     }
 
                     .auth-input {
-                        height: 66px;
+                        height: 62px;
                         border-radius: 22px;
                         padding-left: 22px;
                         padding-right: 22px;
                         font-size: 18px;
-                    }
-
-                    .auth-forgot {
-                        font-size: 15px;
                     }
 
                     .auth-remember {
@@ -221,10 +315,8 @@ export default function Auth() {
                         font-size: 24px;
                     }
 
-                    .auth-register {
-                        width: 100%;
+                    .auth-location-hint {
                         text-align: center;
-                        font-size: 17px;
                     }
                 }
 
@@ -256,21 +348,12 @@ export default function Auth() {
                     }
 
                     .auth-input {
-                        height: 58px;
+                        height: 56px;
                         border-width: 2px;
                         border-radius: 18px;
                         padding-left: 18px;
                         padding-right: 18px;
                         font-size: 16px;
-                    }
-
-                    .auth-input:first-of-type {
-                        margin-bottom: 22px;
-                    }
-
-                    .auth-forgot {
-                        margin-top: 8px;
-                        font-size: 14px;
                     }
 
                     .auth-remember {
@@ -299,10 +382,6 @@ export default function Auth() {
                         height: 52px;
                         font-size: 22px;
                     }
-
-                    .auth-register {
-                        font-size: 16px;
-                    }
                 }
 
                 @media (max-width: 360px) {
@@ -325,7 +404,7 @@ export default function Auth() {
                     }
 
                     .auth-input {
-                        height: 54px;
+                        height: 52px;
                         font-size: 15px;
                     }
 
@@ -334,7 +413,6 @@ export default function Auth() {
                         font-size: 20px;
                     }
 
-                    .auth-register,
                     .auth-remember-text {
                         font-size: 15px;
                     }

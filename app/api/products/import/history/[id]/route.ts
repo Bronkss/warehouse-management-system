@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
+import type { QueryResult, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
+import { resolveWarehouseLocation, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -32,7 +34,7 @@ type IncomingRow = {
     error?: string | null
 }
 
-type ProductDbRow = {
+type ProductDbRow = QueryResultRow & {
     id: number
     name: string
     category: string
@@ -42,10 +44,11 @@ type ProductDbRow = {
     unit: ProductUnit
     stock: string
     min_stock: string
-    image: string
+    image?: string | null
+    image_url?: string | null
 }
 
-type AcceptanceItemDbRow = {
+type AcceptanceItemDbRow = QueryResultRow & {
     id: number
     acceptance_id: number
     row_number: number
@@ -69,6 +72,39 @@ type AcceptanceItemDbRow = {
     applied_quantity: string
     created_product: boolean
     error: string | null
+}
+
+type HeaderRow = QueryResultRow & {
+    id: number
+    number: string
+    source_file_name: string | null
+    supplier: string | null
+    invoice_number: string | null
+    comment: string | null
+    total_rows: number | null
+    created_count: number | null
+    updated_count: number | null
+    skipped_count: number | null
+    error_count: number | null
+    status: string
+    errors: unknown
+    created_at: string
+    updated_at: string
+    location_id: number
+    location_name?: string
+    location_slug?: string
+}
+
+type StockRow = QueryResultRow & {
+    stock: string
+}
+
+type DbClient = {
+    query<T extends QueryResultRow = QueryResultRow>(
+        text: string,
+        params?: readonly unknown[]
+    ): Promise<QueryResult<T>>
+    release(): void
 }
 
 function normalizeText(value: unknown) {
@@ -105,6 +141,14 @@ function makeAutoBarcode(acceptanceId: number, rowNumber: number) {
     return `AUTO-${acceptanceId}-${rowNumber}-${Date.now()}`
 }
 
+function makeAcceptanceItemResult(action: ImportAction, createdProduct: boolean, error: string | null) {
+    if (error) return 'error'
+    if (action === 'skip') return 'skipped'
+    if (createdProduct) return 'created'
+    if (action === 'update') return 'updated'
+    return 'success'
+}
+
 function productSnapshot(row: ProductDbRow | null) {
     if (!row) return null
 
@@ -118,30 +162,190 @@ function productSnapshot(row: ProductDbRow | null) {
         unit: row.unit,
         stock: Number(row.stock ?? 0),
         minStock: Number(row.min_stock ?? 0),
-        image: row.image ?? '',
+        image: row.image_url || row.image || '',
     }
 }
 
-async function reverseOldEffect(client: any, item: AcceptanceItemDbRow) {
+async function ensureProductStockRows(
+    client: DbClient,
+    productId: number,
+    locationId: number,
+    currentLocationInitialStock = 0
+) {
+    await client.query(
+        `
+        INSERT INTO product_stocks (product_id, location_id, stock)
+        SELECT
+            $1,
+            l.id,
+            CASE WHEN l.id = $2 THEN $3 ELSE 0 END
+        FROM locations l
+        WHERE l.is_active = TRUE
+        ON CONFLICT (product_id, location_id) DO NOTHING
+        `,
+        [productId, locationId, currentLocationInitialStock]
+    )
+}
+
+async function getProductWithLocationStockForUpdate(
+    client: DbClient,
+    productId: number,
+    locationId: number
+): Promise<ProductDbRow | null> {
+    const productResult = await client.query<ProductDbRow>(
+        `
+        SELECT
+            id,
+            name,
+            category,
+            barcode,
+            purchase_price,
+            selling_price,
+            unit,
+            stock,
+            min_stock,
+            image,
+            image_url
+        FROM products
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [productId]
+    )
+
+    if (productResult.rowCount === 0) {
+        return null
+    }
+
+    await ensureProductStockRows(client, productId, locationId, 0)
+
+    const stockResult = await client.query<StockRow>(
+        `
+        SELECT stock
+        FROM product_stocks
+        WHERE product_id = $1 AND location_id = $2
+        FOR UPDATE
+        `,
+        [productId, locationId]
+    )
+
+    return {
+        ...productResult.rows[0],
+        stock: String(stockResult.rows[0]?.stock ?? 0),
+    }
+}
+
+async function addLocationStock(
+    client: DbClient,
+    productId: number,
+    location: WarehouseLocation,
+    quantityDelta: number,
+    acceptanceId: number,
+    comment: string
+): Promise<number> {
+    await ensureProductStockRows(client, productId, location.id, 0)
+
+    const stockResult = await client.query<StockRow>(
+        `
+        UPDATE product_stocks
+        SET
+            stock = COALESCE(stock, 0) + $3,
+            updated_at = NOW()
+        WHERE product_id = $1 AND location_id = $2
+        RETURNING stock
+        `,
+        [productId, location.id, quantityDelta]
+    )
+
+    const stockAfter = Number(stockResult.rows[0]?.stock ?? 0)
+
+    await client.query(
+        `
+        INSERT INTO stock_movements (
+            product_id,
+            location_id,
+            movement_type,
+            quantity_delta,
+            stock_after,
+            document_type,
+            document_id,
+            comment,
+            created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `,
+        [
+            productId,
+            location.id,
+            quantityDelta >= 0 ? 'acceptance_edit' : 'acceptance_edit_reverse',
+            quantityDelta,
+            stockAfter,
+            'product_acceptance',
+            acceptanceId,
+            comment,
+            'system',
+        ]
+    )
+
+    return stockAfter
+}
+
+async function updateLegacyProductStockIfNeeded(
+    client: DbClient,
+    productId: number,
+    location: WarehouseLocation,
+    quantityDelta: number
+) {
+    if (location.slug !== 'tochka') {
+        return
+    }
+
+    await client.query(
+        `
+        UPDATE products
+        SET stock = COALESCE(stock, 0) + $1
+        WHERE id = $2
+        `,
+        [quantityDelta, productId]
+    )
+}
+
+async function reverseOldEffect(
+    client: DbClient,
+    location: WarehouseLocation,
+    acceptanceId: number,
+    item: AcceptanceItemDbRow
+) {
     const oldProductId = toNullableId(item.product_id)
     const oldQuantity = toNumber(item.applied_quantity, 0)
 
     if (!oldProductId || oldQuantity <= 0) return
 
-    await client.query(
-        `UPDATE products
-         SET stock = COALESCE(stock, 0) - $1
-         WHERE id = $2`,
-        [oldQuantity, oldProductId]
+    await getProductWithLocationStockForUpdate(client, oldProductId, location.id)
+
+    await addLocationStock(
+        client,
+        oldProductId,
+        location,
+        -oldQuantity,
+        acceptanceId,
+        `Откат старой строки приёмки ${location.name}`
     )
+
+    await updateLegacyProductStockIfNeeded(client, oldProductId, location, -oldQuantity)
 }
 
-async function applyRowEffect(client: any, acceptanceId: number, row: IncomingRow, existingItem?: AcceptanceItemDbRow) {
+async function applyRowEffect(
+    client: DbClient,
+    location: WarehouseLocation,
+    acceptanceId: number,
+    row: IncomingRow,
+    existingItem?: AcceptanceItemDbRow
+) {
     const rowNumber = Number(row.rowNumber || existingItem?.row_number || 0)
     const action = normalizeAction(row.action)
     const quantity = toNumber(row.stock, 0)
     const purchasePrice = toNumber(row.purchasePrice, 0)
-    const sellingPrice = toNumber(row.sellingPrice, 0)
+    const sellingPrice = Math.round(toNumber(row.sellingPrice, 0))
     const unit = normalizeUnit(row.unit)
     const minStock = toNumber(row.minStock, 0)
     const name = normalizeText(row.name)
@@ -167,6 +371,14 @@ async function applyRowEffect(client: any, acceptanceId: number, row: IncomingRo
         throw new Error('Количество должно быть больше 0')
     }
 
+    if (purchasePrice <= 0) {
+        throw new Error('Цена закупки должна быть больше 0')
+    }
+
+    if (sellingPrice <= 0) {
+        throw new Error('Цена продажи должна быть больше 0')
+    }
+
     if (action === 'update') {
         const productId = toNullableId(row.matchedProductId) ?? toNullableId(row.productId) ?? existingItem?.product_id ?? null
 
@@ -174,45 +386,41 @@ async function applyRowEffect(client: any, acceptanceId: number, row: IncomingRo
             throw new Error('Для обновления нужно выбрать товар из БД')
         }
 
-        const beforeResult = await client.query(
-            'SELECT * FROM products WHERE id = $1 FOR UPDATE',
-            [productId]
-        )
+        const productBefore = await getProductWithLocationStockForUpdate(client, productId, location.id)
 
-        if (beforeResult.rowCount === 0) {
+        if (!productBefore) {
             throw new Error(`Товар ID ${productId} не найден`)
         }
 
-        const productBefore = beforeResult.rows[0]
         const barcode = normalizeText(row.barcode)
 
-        const afterResult = await client.query(
+        const productResult = await client.query<ProductDbRow>(
             `UPDATE products
              SET
-                stock = COALESCE(stock, 0) + $1,
-                purchase_price = $2,
-                selling_price = $3,
-                unit = $4,
-                min_stock = $5,
-                name = COALESCE(NULLIF($6, ''), name),
-                category = COALESCE(NULLIF($7, ''), category),
-                barcode = COALESCE(NULLIF($8, ''), barcode),
-                image = COALESCE(NULLIF($9, ''), image)
-             WHERE id = $10
-             RETURNING *`,
-            [
-                quantity,
-                purchasePrice,
-                sellingPrice,
-                unit,
-                minStock,
-                name,
-                category,
-                barcode,
-                image,
-                productId,
-            ]
+                purchase_price = $1,
+                selling_price = $2,
+                unit = $3,
+                min_stock = $4,
+                name = COALESCE(NULLIF($5, ''), name),
+                category = COALESCE(NULLIF($6, ''), category),
+                barcode = COALESCE(NULLIF($7, ''), barcode),
+                image = COALESCE(NULLIF($8, ''), image),
+                image_url = COALESCE(NULLIF($8, ''), image_url)
+             WHERE id = $9
+             RETURNING id, name, category, barcode, purchase_price, selling_price, unit, stock, min_stock, image, image_url`,
+            [purchasePrice, sellingPrice, unit, minStock, name, category, barcode, image, productId]
         )
+
+        const stockAfter = await addLocationStock(
+            client,
+            productId,
+            location,
+            quantity,
+            acceptanceId,
+            `Редактирование приёмки ${location.name}`
+        )
+
+        await updateLegacyProductStockIfNeeded(client, productId, location, quantity)
 
         return {
             action,
@@ -221,7 +429,10 @@ async function applyRowEffect(client: any, acceptanceId: number, row: IncomingRo
             matchedProductName: normalizeText(row.matchedProductName) || productBefore.name,
             matchedProductBarcode: normalizeText(row.matchedProductBarcode) || productBefore.barcode,
             productBefore,
-            productAfter: afterResult.rows[0],
+            productAfter: {
+                ...productResult.rows[0],
+                stock: String(stockAfter),
+            },
             appliedQuantity: quantity,
             createdProduct: existingItem?.created_product ?? false,
             barcode,
@@ -235,33 +446,41 @@ async function applyRowEffect(client: any, acceptanceId: number, row: IncomingRo
     const existingProductId = existingItem?.product_id ?? toNullableId(row.productId)
 
     if (existingProductId) {
-        const beforeResult = await client.query(
-            'SELECT * FROM products WHERE id = $1 FOR UPDATE',
-            [existingProductId]
-        )
+        const productBefore = await getProductWithLocationStockForUpdate(client, existingProductId, location.id)
 
-        if (beforeResult.rowCount === 0) {
+        if (!productBefore) {
             throw new Error(`Товар ID ${existingProductId} не найден`)
         }
 
-        const barcode = normalizeText(row.barcode) || beforeResult.rows[0].barcode || makeAutoBarcode(acceptanceId, rowNumber)
+        const barcode = normalizeText(row.barcode) || productBefore.barcode || makeAutoBarcode(acceptanceId, rowNumber)
 
-        const afterResult = await client.query(
+        const productResult = await client.query<ProductDbRow>(
             `UPDATE products
              SET
-                stock = COALESCE(stock, 0) + $1,
-                purchase_price = $2,
-                selling_price = $3,
-                unit = $4,
-                min_stock = $5,
-                name = $6,
-                category = $7,
-                barcode = $8,
-                image = $9
-             WHERE id = $10
-             RETURNING *`,
-            [quantity, purchasePrice, sellingPrice, unit, minStock, name, category, barcode, image, existingProductId]
+                purchase_price = $1,
+                selling_price = $2,
+                unit = $3,
+                min_stock = $4,
+                name = $5,
+                category = $6,
+                barcode = $7,
+                image = $8,
+                image_url = $8
+             WHERE id = $9
+             RETURNING id, name, category, barcode, purchase_price, selling_price, unit, stock, min_stock, image, image_url`,
+            [purchasePrice, sellingPrice, unit, minStock, name, category, barcode, image, existingProductId]
         )
+
+        const stockAfter = await addLocationStock(
+            client,
+            existingProductId,
+            location,
+            quantity,
+            acceptanceId,
+            `Редактирование созданного товара в приёмке ${location.name}`
+        )
+
+        await updateLegacyProductStockIfNeeded(client, existingProductId, location, quantity)
 
         return {
             action,
@@ -269,8 +488,11 @@ async function applyRowEffect(client: any, acceptanceId: number, row: IncomingRo
             matchedProductId: null,
             matchedProductName: '',
             matchedProductBarcode: '',
-            productBefore: beforeResult.rows[0],
-            productAfter: afterResult.rows[0],
+            productBefore,
+            productAfter: {
+                ...productResult.rows[0],
+                stock: String(stockAfter),
+            },
             appliedQuantity: quantity,
             createdProduct: existingItem?.created_product ?? true,
             barcode,
@@ -278,8 +500,9 @@ async function applyRowEffect(client: any, acceptanceId: number, row: IncomingRo
     }
 
     const barcode = normalizeText(row.barcode) || makeAutoBarcode(acceptanceId, rowNumber)
+    const legacyStock = location.slug === 'tochka' ? quantity : 0
 
-    const afterResult = await client.query(
+    const productResult = await client.query<ProductDbRow>(
         `INSERT INTO products (
             name,
             category,
@@ -289,31 +512,54 @@ async function applyRowEffect(client: any, acceptanceId: number, row: IncomingRo
             unit,
             stock,
             min_stock,
-            image
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING *`,
-        [name, category, barcode, purchasePrice, sellingPrice, unit, quantity, minStock, image]
+            image,
+            image_url
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+        RETURNING id, name, category, barcode, purchase_price, selling_price, unit, stock, min_stock, image, image_url`,
+        [name, category, barcode, purchasePrice, sellingPrice, unit, legacyStock, minStock, image]
+    )
+
+    const productId = Number(productResult.rows[0].id)
+
+    await ensureProductStockRows(client, productId, location.id, 0)
+    const stockAfter = await addLocationStock(
+        client,
+        productId,
+        location,
+        quantity,
+        acceptanceId,
+        `Создание товара через редактирование приёмки ${location.name}`
     )
 
     return {
         action,
-        productId: Number(afterResult.rows[0].id),
+        productId,
         matchedProductId: null,
         matchedProductName: '',
         matchedProductBarcode: '',
-        productBefore: null,
-        productAfter: afterResult.rows[0],
+        productBefore: null as ProductDbRow | null,
+        productAfter: {
+            ...productResult.rows[0],
+            stock: String(stockAfter),
+        },
         appliedQuantity: quantity,
         createdProduct: true,
         barcode,
     }
 }
 
-async function upsertAcceptanceItem(client: any, acceptanceId: number, row: IncomingRow, effect: Awaited<ReturnType<typeof applyRowEffect>>, error: string | null) {
+async function upsertAcceptanceItem(
+    client: DbClient,
+    acceptanceId: number,
+    row: IncomingRow,
+    effect: Awaited<ReturnType<typeof applyRowEffect>>,
+    error: string | null
+) {
     const acceptanceItemId = toNullableId(row.acceptanceItemId)
     const rowNumber = Number(row.rowNumber || 0)
     const status = error ? 'error' : normalizeStatus(row.status)
     const action = normalizeAction(row.action)
+    const result = makeAcceptanceItemResult(action, effect.createdProduct, error)
 
     const values = [
         rowNumber,
@@ -331,13 +577,14 @@ async function upsertAcceptanceItem(client: any, acceptanceId: number, row: Inco
         normalizeText(row.category),
         effect.barcode || normalizeText(row.barcode),
         toNumber(row.purchasePrice, 0),
-        toNumber(row.sellingPrice, 0),
+        Math.round(toNumber(row.sellingPrice, 0)),
         normalizeUnit(row.unit),
         toNumber(row.stock, 0),
         toNumber(row.minStock, 0),
         normalizeText(row.image),
         effect.appliedQuantity,
         effect.createdProduct,
+        result,
         error,
     ]
 
@@ -367,9 +614,10 @@ async function upsertAcceptanceItem(client: any, acceptanceId: number, row: Inco
                 image = $20,
                 applied_quantity = $21,
                 created_product = $22,
-                error = $23,
+                result = $23,
+                error = $24,
                 updated_at = NOW()
-             WHERE id = $24 AND acceptance_id = $25`,
+             WHERE id = $25 AND acceptance_id = $26`,
             [...values, acceptanceItemId, acceptanceId]
         )
     } else {
@@ -397,53 +645,63 @@ async function upsertAcceptanceItem(client: any, acceptanceId: number, row: Inco
                 image,
                 applied_quantity,
                 created_product,
+                result,
                 error,
                 acceptance_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb,
-                $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+                $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
             )`,
             [...values, acceptanceId]
         )
     }
 }
 
+async function getReceiptId(context: { params: Promise<{ id: string }> | { id: string } }): Promise<number | null> {
+    const params = await context.params
+    return toNullableId(params.id)
+}
+
 export async function GET(
-    _request: NextRequest,
-    context: { params: Promise<{ id: string }> }
+    request: NextRequest,
+    context: { params: Promise<{ id: string }> | { id: string } }
 ) {
     try {
-        const { id } = await context.params
-        const acceptanceId = toNullableId(id)
+        const location = await resolveWarehouseLocation(pool, request)
+        const acceptanceId = await getReceiptId(context)
 
         if (!acceptanceId) {
             return NextResponse.json({ message: 'Некорректный ID приёмки' }, { status: 400 })
         }
 
-        const headerResult = await pool.query(
+        const headerResult = await pool.query<HeaderRow>(
             `SELECT
-                id,
-                number,
-                source_file_name,
-                supplier,
-                invoice_number,
-                comment,
-                total_rows,
-                created_count,
-                updated_count,
-                skipped_count,
-                error_count,
-                status,
-                errors,
-                created_at,
-                updated_at
-             FROM product_acceptances
-             WHERE id = $1`,
-            [acceptanceId]
+                pa.id,
+                pa.number,
+                pa.source_file_name,
+                pa.supplier,
+                pa.invoice_number,
+                pa.comment,
+                pa.total_rows,
+                pa.created_count,
+                pa.updated_count,
+                pa.skipped_count,
+                pa.error_count,
+                pa.status,
+                pa.errors,
+                pa.created_at,
+                pa.updated_at,
+                pa.location_id,
+                l.name AS location_name,
+                l.slug AS location_slug
+             FROM product_acceptances pa
+             JOIN locations l ON l.id = pa.location_id
+             WHERE pa.id = $1 AND pa.location_id = $2`,
+            [acceptanceId, location.id]
         )
 
         if (headerResult.rowCount === 0) {
-            return NextResponse.json({ message: 'Приёмка не найдена' }, { status: 404 })
+            return NextResponse.json({ message: 'Приёмка не найдена в текущей зоне' }, { status: 404 })
         }
 
         const itemsResult = await pool.query(
@@ -452,14 +710,15 @@ export async function GET(
                 p.name AS product_name,
                 p.category AS product_category,
                 p.barcode AS product_barcode,
-                p.stock AS product_stock,
+                COALESCE(ps.stock, 0) AS product_stock,
                 p.purchase_price AS product_purchase_price,
                 p.selling_price AS product_selling_price
              FROM product_acceptance_items i
              LEFT JOIN products p ON p.id = COALESCE(i.matched_product_id, i.product_id)
+             LEFT JOIN product_stocks ps ON ps.product_id = p.id AND ps.location_id = $2
              WHERE i.acceptance_id = $1
              ORDER BY i.row_number ASC, i.id ASC`,
-            [acceptanceId]
+            [acceptanceId, location.id]
         )
 
         const header = headerResult.rows[0]
@@ -479,6 +738,9 @@ export async function GET(
             status: header.status,
             createdAt: header.created_at,
             updatedAt: header.updated_at,
+            locationId: Number(header.location_id),
+            locationName: header.location_name,
+            locationSlug: header.location_slug,
             rows: itemsResult.rows.map((row: any, index: number) => ({
                 acceptanceItemId: Number(row.id),
                 productId: row.product_id ? Number(row.product_id) : null,
@@ -527,13 +789,13 @@ export async function GET(
 
 export async function PUT(
     request: NextRequest,
-    context: { params: Promise<{ id: string }> }
+    context: { params: Promise<{ id: string }> | { id: string } }
 ) {
-    const client = await pool.connect()
+    const client = await pool.connect() as unknown as DbClient
 
     try {
-        const { id } = await context.params
-        const acceptanceId = toNullableId(id)
+        const location = await resolveWarehouseLocation(client, request)
+        const acceptanceId = await getReceiptId(context)
 
         if (!acceptanceId) {
             return NextResponse.json({ message: 'Некорректный ID приёмки' }, { status: 400 })
@@ -549,16 +811,16 @@ export async function PUT(
         await client.query('BEGIN')
 
         const headerResult = await client.query(
-            'SELECT id FROM product_acceptances WHERE id = $1 FOR UPDATE',
-            [acceptanceId]
+            'SELECT id FROM product_acceptances WHERE id = $1 AND location_id = $2 FOR UPDATE',
+            [acceptanceId, location.id]
         )
 
         if (headerResult.rowCount === 0) {
             await client.query('ROLLBACK')
-            return NextResponse.json({ message: 'Приёмка не найдена' }, { status: 404 })
+            return NextResponse.json({ message: 'Приёмка не найдена в текущей зоне' }, { status: 404 })
         }
 
-        const existingItemsResult = await client.query(
+        const existingItemsResult = await client.query<AcceptanceItemDbRow>(
             'SELECT * FROM product_acceptance_items WHERE acceptance_id = $1 FOR UPDATE',
             [acceptanceId]
         )
@@ -581,10 +843,10 @@ export async function PUT(
 
             try {
                 if (existingItem) {
-                    await reverseOldEffect(client, existingItem)
+                    await reverseOldEffect(client, location, acceptanceId, existingItem)
                 }
 
-                const effect = await applyRowEffect(client, acceptanceId, row, existingItem)
+                const effect = await applyRowEffect(client, location, acceptanceId, row, existingItem)
                 await upsertAcceptanceItem(client, acceptanceId, row, effect, null)
             } catch (error) {
                 const message = `Строка ${rowNumber}: ${error instanceof Error ? error.message : 'ошибка обработки'}`
@@ -596,7 +858,7 @@ export async function PUT(
             const itemId = Number(item.id)
 
             if (!submittedExistingIds.has(itemId)) {
-                await reverseOldEffect(client, item)
+                await reverseOldEffect(client, location, acceptanceId, item)
                 await client.query(
                     'DELETE FROM product_acceptance_items WHERE id = $1 AND acceptance_id = $2',
                     [itemId, acceptanceId]
@@ -630,7 +892,7 @@ export async function PUT(
                 errors = $9::jsonb,
                 status = $10,
                 updated_at = NOW()
-             WHERE id = $11`,
+             WHERE id = $11 AND location_id = $12`,
             [
                 normalizeText(body.supplier) || null,
                 normalizeText(body.invoiceNumber) || null,
@@ -643,6 +905,7 @@ export async function PUT(
                 JSON.stringify(errors),
                 finalStatus,
                 acceptanceId,
+                location.id,
             ]
         )
 
@@ -650,6 +913,8 @@ export async function PUT(
 
         return NextResponse.json({
             acceptanceId,
+            locationId: location.id,
+            locationName: location.name,
             totalRows,
             created,
             updated,

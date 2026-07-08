@@ -143,6 +143,12 @@ const SEARCH_LIMIT = 30;
 const AUTH_USER_KEY = 'warehouse_auth_user';
 const AUTH_LOGIN_KEY = 'warehouse_auth_login';
 const REMEMBER_ME_KEY = 'warehouse_remember_me';
+const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug';
+const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name';
+const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type';
+const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location';
+const DEFAULT_LOCATION_SLUG = 'tochka';
+const DEFAULT_LOCATION_NAME = 'ТОЧКА';
 
 const DEFAULT_FISCAL_AGENT_URL = 'http://127.0.0.1:3108';
 const FISCAL_AGENT_URL_KEY = 'pos_fiscal_agent_url';
@@ -150,6 +156,36 @@ const FISCAL_AGENT_TOKEN_KEY = 'pos_fiscal_agent_token';
 const SHIFT_STATUS_KEY = 'pos_kkt_shift_status';
 
 type ShiftStatus = 'unknown' | 'open' | 'closed';
+
+const getCurrentLocationSlug = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_SLUG;
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        localStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        DEFAULT_LOCATION_SLUG
+    ).trim() || DEFAULT_LOCATION_SLUG;
+};
+
+const getCurrentLocationName = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_NAME;
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+        localStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+        DEFAULT_LOCATION_NAME
+    ).trim() || DEFAULT_LOCATION_NAME;
+};
+
+const getLocationHeaders = (): HeadersInit => {
+    return {
+        [WAREHOUSE_LOCATION_HEADER]: getCurrentLocationSlug(),
+    };
+};
 
 const safeParseNumber = (value: unknown): number => {
     if (typeof value === 'number') {
@@ -538,6 +574,7 @@ const fetchProductsPage = async ({
     const response = await fetch(`/api/products?${params.toString()}`, {
         method: 'GET',
         cache: 'no-store',
+        headers: getLocationHeaders(),
         signal,
     });
 
@@ -592,6 +629,8 @@ export default function PosPage() {
     const router = useRouter();
 
     const [isAuthChecked, setIsAuthChecked] = useState(false);
+    const [warehouseLocationName, setWarehouseLocationName] = useState(DEFAULT_LOCATION_NAME);
+    const [warehouseLocationSlug, setWarehouseLocationSlug] = useState(DEFAULT_LOCATION_SLUG);
     const [shiftStatus, setShiftStatus] = useState<ShiftStatus>('unknown');
     const [isShiftActionLoading, setIsShiftActionLoading] = useState(false);
     const [fiscalConfirmModal, setFiscalConfirmModal] = useState(false);
@@ -693,11 +732,15 @@ export default function PosPage() {
     useEffect(() => {
         const savedLocalUser = localStorage.getItem(AUTH_USER_KEY);
         const savedSessionUser = sessionStorage.getItem(AUTH_USER_KEY);
+        const authUser = savedLocalUser || savedSessionUser;
 
-        if (savedLocalUser !== 'admin' && savedSessionUser !== 'admin') {
+        if (!authUser) {
             router.replace('/auth');
             return;
         }
+
+        setWarehouseLocationName(getCurrentLocationName());
+        setWarehouseLocationSlug(getCurrentLocationSlug());
 
         const savedShiftStatus = localStorage.getItem(SHIFT_STATUS_KEY);
 
@@ -870,6 +913,7 @@ export default function PosPage() {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                ...getLocationHeaders(),
             },
             body: JSON.stringify(receipt),
         });
@@ -887,7 +931,14 @@ export default function PosPage() {
         localStorage.removeItem(AUTH_USER_KEY);
         localStorage.removeItem(AUTH_LOGIN_KEY);
         localStorage.removeItem(REMEMBER_ME_KEY);
+        localStorage.removeItem(AUTH_LOCATION_SLUG_KEY);
+        localStorage.removeItem(AUTH_LOCATION_NAME_KEY);
+        localStorage.removeItem(AUTH_LOCATION_TYPE_KEY);
         sessionStorage.removeItem(AUTH_USER_KEY);
+        sessionStorage.removeItem(AUTH_LOCATION_SLUG_KEY);
+        sessionStorage.removeItem(AUTH_LOCATION_NAME_KEY);
+        sessionStorage.removeItem(AUTH_LOCATION_TYPE_KEY);
+        document.cookie = `${AUTH_LOCATION_SLUG_KEY}=; path=/; max-age=0; SameSite=Lax`;
         router.replace('/auth');
     };
 
@@ -2232,9 +2283,15 @@ export default function PosPage() {
                         Вернуться в склад
                     </button>
 
-                    <h1 className="text-3xl font-bold text-indigo-800 text-center sm:flex-1">
-                        ТОЧКА онлайн - касса
-                    </h1>
+                    <div className="text-center sm:flex-1">
+                        <h1 className="text-3xl font-bold text-indigo-800">
+                            {warehouseLocationName} онлайн-касса
+                        </h1>
+
+                        <div className="mt-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-bold text-indigo-700 shadow-sm">
+                            Текущая зона: {warehouseLocationName} · {warehouseLocationSlug}
+                        </div>
+                    </div>
 
                     <div className="hidden min-w-[168px] sm:block" />
                 </div>

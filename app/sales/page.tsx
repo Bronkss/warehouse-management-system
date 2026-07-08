@@ -27,6 +27,43 @@ type Receipt = {
     change?: number
 }
 
+
+const LOCATION_SLUG_KEY = 'warehouse_location_slug'
+const LOCATION_NAME_KEY = 'warehouse_location_name'
+const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location'
+const DEFAULT_LOCATION_SLUG = 'tochka'
+const DEFAULT_LOCATION_NAME = 'ТОЧКА'
+
+const getCurrentLocationSlug = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_SLUG
+    }
+
+    return String(
+        sessionStorage.getItem(LOCATION_SLUG_KEY) ||
+        localStorage.getItem(LOCATION_SLUG_KEY) ||
+        DEFAULT_LOCATION_SLUG
+    ).trim() || DEFAULT_LOCATION_SLUG
+}
+
+const getCurrentLocationName = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_NAME
+    }
+
+    return String(
+        sessionStorage.getItem(LOCATION_NAME_KEY) ||
+        localStorage.getItem(LOCATION_NAME_KEY) ||
+        DEFAULT_LOCATION_NAME
+    ).trim() || DEFAULT_LOCATION_NAME
+}
+
+const getLocationHeaders = (): HeadersInit => {
+    return {
+        [WAREHOUSE_LOCATION_HEADER]: getCurrentLocationSlug(),
+    }
+}
+
 const formatCurrency = (amount: number | undefined | null): string => {
     const safeAmount = typeof amount === 'number' && Number.isFinite(amount) ? amount : 0
 
@@ -86,6 +123,8 @@ export default function Page() {
     const [paymentFilter, setPaymentFilter] = React.useState<'all' | PaymentMethod>('all')
     const [dateFrom, setDateFrom] = React.useState(new Date().toISOString().split('T')[0])
     const [dateTo, setDateTo] = React.useState('')
+    const [locationName, setLocationName] = React.useState(DEFAULT_LOCATION_NAME)
+    const [locationSlug, setLocationSlug] = React.useState(DEFAULT_LOCATION_SLUG)
 
     const fetchReceipts = React.useCallback(async () => {
         try {
@@ -94,6 +133,7 @@ export default function Page() {
 
             const response = await fetch('/api/sales', {
                 cache: 'no-store',
+                headers: getLocationHeaders(),
             })
 
             const data = await response.json()
@@ -109,6 +149,11 @@ export default function Page() {
         } finally {
             setIsLoading(false)
         }
+    }, [])
+
+    React.useEffect(() => {
+        setLocationName(getCurrentLocationName())
+        setLocationSlug(getCurrentLocationSlug())
     }, [])
 
     React.useEffect(() => {
@@ -178,8 +223,12 @@ export default function Page() {
                 <div className="sales-header mb-6 flex items-start justify-between gap-4">
                     <div>
                         <h1 className="sales-title text-3xl font-bold text-gray-800">
-                            Все онлайн продажи в магазине ТОЧКА .
+                            Все онлайн продажи: {locationName}
                         </h1>
+
+                        <div className="mt-2 inline-flex rounded-full bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-700">
+                            Текущая зона: {locationName} · {locationSlug}
+                        </div>
                     </div>
 
                     <button
