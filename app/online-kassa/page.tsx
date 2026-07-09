@@ -465,6 +465,44 @@ const getProductCategory = (product: Product): string => {
     return category || "Без категории";
 };
 
+const splitProductBarcodeList = (value: unknown): string[] => {
+    return String(value || "")
+        .split(/[\n,;|]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+};
+
+const normalizePlainBarcode = (value: unknown): string => {
+    return String(value || "").replace(/\D/g, "");
+};
+
+const getCigarettePackBarcode = (product: Product): string => {
+    return splitProductBarcodeList(product.barcode)[0] || "";
+};
+
+const getCigaretteBlockBarcode = (product: Product): string => {
+    return splitProductBarcodeList(product.barcode)[1] || "";
+};
+
+const isCigaretteProduct = (product: Product): boolean => {
+    return getProductCategory(product).toLowerCase().includes("табач");
+};
+
+const isCigaretteBlockBarcodeScan = (product: Product, rawQuery: string): boolean => {
+    if (!isCigaretteProduct(product)) {
+        return false;
+    }
+
+    const blockBarcode = normalizePlainBarcode(getCigaretteBlockBarcode(product));
+    const query = normalizePlainBarcode(rawQuery);
+
+    return Boolean(blockBarcode && query && blockBarcode === query);
+};
+
+const getMarkingPackageModeFromBarcodeScan = (product: Product, rawQuery = ""): MarkingPackageMode => {
+    return isCigaretteBlockBarcodeScan(product, rawQuery) ? "block" : "single";
+};
+
 const normalizeSearchText = (value: unknown): string => {
     return String(value ?? "")
         .trim()
@@ -690,12 +728,17 @@ const fiscalizeReceipt = async (receipt: Receipt): Promise<FiscalResult> => {
 
 const precheckMarkingCode = async (
     markingCode: string,
+    packageMode: MarkingPackageMode = "single",
 ): Promise<MarkingPrecheckResult> => {
     const data = await callFiscalAgent<MarkingPrecheckResult>(
         "/marking/precheck",
         {
             method: "POST",
-            body: JSON.stringify({ markingCode }),
+            body: JSON.stringify({
+                markingCode,
+                markingPackageMode: packageMode,
+                markingPackageQuantity: packageMode === "block" ? CIGARETTE_BLOCK_QUANTITY : 1,
+            }),
         },
     );
 
@@ -896,6 +939,7 @@ export default function PosPage() {
     const [backgroundMarkingCheck, setBackgroundMarkingCheck] = useState<{
         productName: string;
         codePreview: string;
+        packageMode: MarkingPackageMode;
     } | null>(null);
 
     const [isPriceLabelModalOpen, setIsPriceLabelModalOpen] = useState(false);
@@ -1571,7 +1615,7 @@ export default function PosPage() {
         );
     };
 
-    const openMarkingScanModal = (product: Product) => {
+    const openMarkingScanModal = (product: Product, packageMode: MarkingPackageMode = "single") => {
         if (isCheckingMarking) {
             setError("Дождитесь завершения проверки предыдущей маркировки");
             return;
@@ -1582,7 +1626,7 @@ export default function PosPage() {
         setMarkingModalProduct(safeProduct);
         setMarkingCodeInput("");
         setMarkingCheckResult(null);
-        setMarkingPackageMode("single");
+        setMarkingPackageMode(packageMode);
         setError(null);
         setNotice(null);
     };
@@ -1665,49 +1709,18 @@ export default function PosPage() {
             return;
         }
 
-        if (packageMode === "block") {
-            setCheckoutItems((prevItems) => [
-                ...prevItems,
-                {
-                    product: safeProduct,
-                    id: `${safeProduct.id}-block-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-                    quantity: saleQuantity,
-                    markingCode,
-                    markingStatus: "M+",
-                    markingMessage: `Блок сигарет: ${CIGARETTE_BLOCK_QUANTITY} пачек. Предварительная проверка Честного ЗНАКа пропущена, контроль пройдёт при фискализации чека.`,
-                    markingCheckedAt: new Date().toISOString(),
-                    markingPackageMode: "block",
-                    markingPackageQuantity: CIGARETTE_BLOCK_QUANTITY,
-                },
-            ]);
-
-            setMarkingModalProduct(null);
-            setMarkingCodeInput("");
-            setMarkingCheckResult(null);
-            setMarkingPackageMode("single");
-            setSearchQuery("");
-            setFoundProducts([]);
-            setError(null);
-            setNotice(
-                `Блок сигарет «${safeProduct.name}» добавлен в чек как ${CIGARETTE_BLOCK_QUANTITY} шт. Чек всё равно будет отправлен на ККТ.`,
-            );
-
-            requestAnimationFrame(() => {
-                searchInputRef.current?.focus();
-            });
-
-            return;
-        }
-
         try {
             setIsCheckingMarking(true);
             setBackgroundMarkingCheck({
                 productName: safeProduct.name,
                 codePreview: formatMarkingCodePreview(markingCode),
+                packageMode,
             });
             setError(null);
             setNotice(
-                "Проверяю код маркировки в фоне. Поле поиска очищено — можно сканировать следующий обычный товар.",
+                packageMode === "block"
+                    ? "Проверяю КМ блока сигарет в фоне. Поле поиска очищено — можно сканировать следующий обычный товар."
+                    : "Проверяю код маркировки в фоне. Поле поиска очищено — можно сканировать следующий обычный товар.",
             );
             setMarkingCheckResult(null);
             setMarkingModalProduct(null);
@@ -1719,7 +1732,7 @@ export default function PosPage() {
                 searchInputRef.current?.focus();
             });
 
-            const checkResult = await precheckMarkingCode(markingCode);
+            const checkResult = await precheckMarkingCode(markingCode, packageMode);
             const status = checkResult.markingStatus || "M";
 
             setMarkingCheckResult({
@@ -1747,10 +1760,13 @@ export default function PosPage() {
                     quantity: saleQuantity,
                     markingCode: safeMarkingCode,
                     markingStatus: "M+",
-                    markingMessage: checkResult.message || "КМ проверен успешно",
+                    markingMessage:
+                        packageMode === "block"
+                            ? checkResult.message || `КМ блока сигарет проверен успешно [M+]. В чек добавлено ${CIGARETTE_BLOCK_QUANTITY} шт.`
+                            : checkResult.message || "КМ проверен успешно",
                     markingCheckedAt: new Date().toISOString(),
-                    markingPackageMode: "single",
-                    markingPackageQuantity: 1,
+                    markingPackageMode: packageMode,
+                    markingPackageQuantity: saleQuantity,
                 },
             ]);
 
@@ -1762,7 +1778,9 @@ export default function PosPage() {
             setFoundProducts([]);
             setError(null);
             setNotice(
-                `Маркировка проверена [M+]. Товар «${safeProduct.name}» добавлен в чек.`,
+                packageMode === "block"
+                    ? `КМ блока проверен [M+]. Блок «${safeProduct.name}» добавлен в чек как ${CIGARETTE_BLOCK_QUANTITY} шт.`
+                    : `Маркировка проверена [M+]. Товар «${safeProduct.name}» добавлен в чек.`,
             );
 
             requestAnimationFrame(() => {
@@ -1864,11 +1882,14 @@ export default function PosPage() {
         });
     };
 
-    const addToCheckout = (product: Product) => {
+    const addToCheckout = (product: Product, sourceQuery = "") => {
         const safeProduct = normalizeProduct(product);
 
         if (isMarkedProduct(safeProduct)) {
-            openMarkingScanModal(safeProduct);
+            openMarkingScanModal(
+                safeProduct,
+                getMarkingPackageModeFromBarcodeScan(safeProduct, sourceQuery),
+            );
             return;
         }
 
@@ -2081,7 +2102,7 @@ export default function PosPage() {
             );
 
             if (exactFromCurrentResults) {
-                addToCheckout(exactFromCurrentResults);
+                addToCheckout(exactFromCurrentResults, query);
                 return;
             }
 
@@ -2094,12 +2115,12 @@ export default function PosPage() {
             );
 
             if (exactBarcodeProduct) {
-                addToCheckout(exactBarcodeProduct);
+                addToCheckout(exactBarcodeProduct, query);
                 return;
             }
 
             if (products.length === 1) {
-                addToCheckout(products[0]);
+                addToCheckout(products[0], query);
                 return;
             }
 
@@ -3043,7 +3064,10 @@ export default function PosPage() {
                                 </div>
 
                                 <div className="mt-1 truncate text-base font-extrabold text-gray-900">
-                                    В фоне проверяется: {backgroundMarkingCheck.productName}
+                                    {backgroundMarkingCheck.packageMode === "block"
+                                        ? "В фоне проверяется КМ блока: "
+                                        : "В фоне проверяется: "}
+                                    {backgroundMarkingCheck.productName}
                                 </div>
 
                                 <div className="mt-1 text-sm font-semibold text-purple-700">
@@ -3379,7 +3403,7 @@ export default function PosPage() {
                                                 }`}
                                                 onClick={() => {
                                                     if (!isBlockedByStock) {
-                                                        addToCheckout(product);
+                                                        addToCheckout(product, searchQuery);
                                                     }
                                                 }}
                                             >
@@ -3431,7 +3455,7 @@ export default function PosPage() {
                                                         e.stopPropagation();
 
                                                         if (!isBlockedByStock) {
-                                                            addToCheckout(product);
+                                                            addToCheckout(product, searchQuery);
                                                         }
                                                     }}
                                                     className="ml-4 text-indigo-600 hover:text-indigo-800 text-lg disabled:text-gray-300"
@@ -3675,61 +3699,25 @@ export default function PosPage() {
                                 {markingModalProduct.name}
                             </div>
 
-                            <div className="mb-5 rounded-xl border border-purple-100 bg-purple-50 p-4 text-sm text-purple-800">
-                                Этот товар отмечен как маркированный. Для продажи отсканируйте
-                                DataMatrix с упаковки. Для пачки используйте обычный режим, для
-                                блока сигарет выберите режим “Блок 10 шт.”.
-                            </div>
-
-                            <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                <button
-                                    type="button"
-                                    disabled={isCheckingMarking}
-                                    onClick={() => {
-                                        setMarkingPackageMode("single");
-                                        setMarkingCheckResult(null);
-                                        setError(null);
-                                    }}
-                                    className={`rounded-xl border px-4 py-3 text-left transition ${
-                                        markingPackageMode === "single"
-                                            ? "border-purple-500 bg-purple-50 text-purple-800 ring-2 ring-purple-100"
-                                            : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
-                                    } disabled:opacity-60`}
-                                >
-                                    <div className="font-bold">Пачка</div>
-                                    <div className="mt-1 text-xs">
-                                        1 шт. · обычная проверка [M+]
-                                    </div>
-                                </button>
-
-                                <button
-                                    type="button"
-                                    disabled={isCheckingMarking}
-                                    onClick={() => {
-                                        setMarkingPackageMode("block");
-                                        setMarkingCheckResult(null);
-                                        setError(null);
-                                    }}
-                                    className={`rounded-xl border px-4 py-3 text-left transition ${
-                                        markingPackageMode === "block"
-                                            ? "border-amber-500 bg-amber-50 text-amber-800 ring-2 ring-amber-100"
-                                            : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
-                                    } disabled:opacity-60`}
-                                >
-                                    <div className="font-bold">Блок сигарет</div>
-                                    <div className="mt-1 text-xs">
-                                        10 шт. · без предварительной проверки ЧЗ
-                                    </div>
-                                </button>
-                            </div>
-
-                            {markingPackageMode === "block" && (
-                                <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
-                                    Режим блока нужен для продажи целого блока сигарет. В чек
-                                    добавится {CIGARETTE_BLOCK_QUANTITY} шт. товара с одним
-                                    DataMatrix блока. Чек всё равно будет отправлен на ККТ.
+                            <div
+                                className={`mb-5 rounded-xl border p-4 text-sm ${
+                                    markingPackageMode === "block"
+                                        ? "border-amber-200 bg-amber-50 text-amber-800"
+                                        : "border-purple-100 bg-purple-50 text-purple-800"
+                                }`}
+                            >
+                                <div className="font-bold">
+                                    {markingPackageMode === "block"
+                                        ? `Режим: блок сигарет · ${CIGARETTE_BLOCK_QUANTITY} шт.`
+                                        : "Режим: пачка сигарет · 1 шт."}
                                 </div>
-                            )}
+
+                                <div className="mt-1 leading-5">
+                                    Режим определяется автоматически по отсканированному штрихкоду товара.
+                                    Сейчас нужно отсканировать DataMatrix с {markingPackageMode === "block" ? "блока" : "пачки"}.
+                                    Проверка Честного ЗНАКа будет выполнена строго в фоне, как для обычной пачки.
+                                </div>
+                            </div>
 
                             <label className="mb-2 block text-sm font-medium text-gray-700">
                                 DataMatrix / КМ

@@ -13,6 +13,7 @@ interface ProductFormData {
     name: string
     category: string
     barcode: string
+    blockBarcode?: string
     purchasePrice: string
     sellingPrice: string
     unit: 'piece' | 'weight'
@@ -32,6 +33,7 @@ interface AddCigaretteFormProps {
 interface CigaretteFormState {
     name: string
     barcode: string
+    blockBarcode: string
     purchasePrice: string
     sellingPrice: string
     stock: string
@@ -87,6 +89,20 @@ const normalizeCigaretteBarcode = (value: string): string => {
     return value.replace(/\D/g, '').slice(0, 13)
 }
 
+const splitSavedBarcodes = (value: string): string[] => {
+    return String(value || '')
+        .split(/[\n,;|]+/)
+        .map(item => normalizeCigaretteBarcode(item))
+        .filter(Boolean)
+}
+
+const joinSavedBarcodes = (packBarcode: string, blockBarcode: string): string => {
+    return [packBarcode, blockBarcode]
+        .map(item => normalizeCigaretteBarcode(item))
+        .filter(Boolean)
+        .join(', ')
+}
+
 const isValidCigaretteBarcode = (value: string): boolean => {
     return /^(?:\d{8}|\d{13})$/.test(value)
 }
@@ -105,9 +121,12 @@ const looksLikeDataMatrix = (value: string): boolean => {
 }
 
 const getInitialState = (data?: ProductFormData): CigaretteFormState => {
+    const savedBarcodes = splitSavedBarcodes(data?.barcode || '')
+
     return {
         name: data?.name || '',
-        barcode: normalizeCigaretteBarcode(data?.barcode || ''),
+        barcode: savedBarcodes[0] || normalizeCigaretteBarcode(data?.barcode || ''),
+        blockBarcode: normalizeCigaretteBarcode(data?.blockBarcode || savedBarcodes[1] || ''),
         purchasePrice: data?.purchasePrice || '',
         sellingPrice: data?.sellingPrice || '',
         stock: data?.stock || '0',
@@ -206,7 +225,7 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
         if (looksLikeDataMatrix(value)) {
             setErrors(prev => ({
                 ...prev,
-                barcode: 'Это похоже на DataMatrix с пачки. Здесь нужен только обычный 8- или 13-значный штрихкод товара для поиска в кассе.',
+                barcode: 'Это похоже на DataMatrix с пачки. Здесь нужен только обычный 8- или 13-значный штрихкод пачки для поиска в кассе.',
             }))
         } else {
             clearFieldError('barcode')
@@ -215,6 +234,22 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
         setFormState(prev => ({
             ...prev,
             barcode: normalizeCigaretteBarcode(value),
+        }))
+    }
+
+    const updateBlockBarcode = (value: string) => {
+        if (looksLikeDataMatrix(value)) {
+            setErrors(prev => ({
+                ...prev,
+                blockBarcode: 'Это похоже на DataMatrix. Здесь нужен обычный штрихкод блока, не код маркировки.',
+            }))
+        } else {
+            clearFieldError('blockBarcode')
+        }
+
+        setFormState(prev => ({
+            ...prev,
+            blockBarcode: normalizeCigaretteBarcode(value),
         }))
     }
 
@@ -310,6 +345,7 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
 
         const name = formState.name.trim()
         const barcode = normalizeCigaretteBarcode(formState.barcode)
+        const blockBarcode = normalizeCigaretteBarcode(formState.blockBarcode)
 
         if (!name) {
             newErrors.name = 'Введите название сигарет'
@@ -318,7 +354,15 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
         if (!barcode) {
             newErrors.barcode = 'Отсканируйте или введите 8- или 13-значный штрихкод пачки'
         } else if (!isValidCigaretteBarcode(barcode)) {
-            newErrors.barcode = 'Штрихкод сигарет должен состоять из 8 или 13 цифр'
+            newErrors.barcode = 'Штрихкод пачки должен состоять из 8 или 13 цифр'
+        }
+
+        if (blockBarcode && !isValidCigaretteBarcode(blockBarcode)) {
+            newErrors.blockBarcode = 'Штрихкод блока должен состоять из 8 или 13 цифр'
+        }
+
+        if (blockBarcode && barcode && blockBarcode === barcode) {
+            newErrors.blockBarcode = 'Штрихкод блока должен отличаться от штрихкода пачки'
         }
 
         if (!formState.purchasePrice || parsePrice(formState.purchasePrice) <= 0) {
@@ -355,7 +399,8 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
             await onSave({
                 name,
                 category: CIGARETTE_CATEGORY,
-                barcode,
+                barcode: joinSavedBarcodes(barcode, blockBarcode),
+                blockBarcode,
                 purchasePrice: normalizeNumberString(formState.purchasePrice),
                 sellingPrice: finalSellingPrice,
                 unit: 'piece',
@@ -386,7 +431,7 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
                         </h3>
 
                         <p className="mt-1 text-xs leading-5 text-red-800">
-                            Товар будет сохранён как штучный, категория “Табачные изделия”, маркировка Честный ЗНАК включена всегда. В это поле сохраняется только обычный 8- или 13-значный штрихкод товара для поиска в кассе. DataMatrix с пачки здесь не сохраняем.
+                            Товар будет сохранён как штучный, категория “Табачные изделия”, маркировка Честный ЗНАК включена всегда. Сохраняем обычный штрихкод пачки и, если есть, отдельный штрихкод блока. DataMatrix с пачки или блока здесь не сохраняем — кассир сканирует его только при продаже.
                         </p>
                     </div>
                 </div>
@@ -511,28 +556,58 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
                 </div>
             </div>
 
-            <div>
-                <label className="mb-2 block text-sm font-medium text-gray-700">
-                    Штрихкод пачки — 8 или 13 цифр *
-                </label>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                    <label className="mb-2 block text-sm font-medium text-gray-700">
+                        Штрихкод пачки — 8 или 13 цифр *
+                    </label>
 
-                <input
-                    type="text"
-                    inputMode="numeric"
-                    value={formState.barcode}
-                    onChange={event => updateBarcode(event.target.value)}
-                    placeholder="Например: 12345678 или 4601234567890"
-                    maxLength={13}
-                    className={`w-full rounded-lg border px-4 py-2 font-mono text-lg tracking-wider focus:outline-none focus:ring-2 focus:ring-red-500 ${
-                        errors.barcode ? 'border-red-500' : 'border-gray-300'
-                    }`}
-                />
+                    <input
+                        type="text"
+                        inputMode="numeric"
+                        value={formState.barcode}
+                        onChange={event => updateBarcode(event.target.value)}
+                        placeholder="Например: 12345678 или 4601234567890"
+                        maxLength={13}
+                        className={`w-full rounded-lg border px-4 py-2 font-mono text-lg tracking-wider focus:outline-none focus:ring-2 focus:ring-red-500 ${
+                            errors.barcode ? 'border-red-500' : 'border-gray-300'
+                        }`}
+                    />
 
-                {errors.barcode && <p className="mt-1 text-sm text-red-500">{errors.barcode}</p>}
+                    {errors.barcode && <p className="mt-1 text-sm text-red-500">{errors.barcode}</p>}
 
-                <p className="mt-1 text-xs text-gray-500">
-                    Этот код нужен только для поиска товара в кассе. В фискальный чек по маркировке должен уходить DataMatrix, который кассир сканирует при продаже.
-                </p>
+                    <p className="mt-1 text-xs text-gray-500">
+                        При сканировании этого штрихкода касса откроет продажу одной пачки.
+                    </p>
+                </div>
+
+                <div>
+                    <label className="mb-2 block text-sm font-medium text-gray-700">
+                        Штрихкод блока — 8 или 13 цифр
+                    </label>
+
+                    <input
+                        type="text"
+                        inputMode="numeric"
+                        value={formState.blockBarcode}
+                        onChange={event => updateBlockBarcode(event.target.value)}
+                        placeholder="Отдельный штрихкод блока"
+                        maxLength={13}
+                        className={`w-full rounded-lg border px-4 py-2 font-mono text-lg tracking-wider focus:outline-none focus:ring-2 focus:ring-amber-500 ${
+                            errors.blockBarcode ? 'border-red-500' : 'border-gray-300'
+                        }`}
+                    />
+
+                    {errors.blockBarcode && <p className="mt-1 text-sm text-red-500">{errors.blockBarcode}</p>}
+
+                    <p className="mt-1 text-xs text-gray-500">
+                        Если этот штрихкод отсканировать в кассе, система автоматически поймёт, что продаётся блок 10 шт. без выбора в модалке.
+                    </p>
+                </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-900">
+                В карточке товара оба штрихкода сохраняются в одно поле через запятую: сначала пачка, потом блок. Это нужно, чтобы существующая база и поиск по нескольким штрихкодам работали без миграции БД.
             </div>
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -651,8 +726,13 @@ export default function AddCigaretteForm({ onSave, onCancel, initialData }: AddC
                         </p>
 
                         <p>
-                            <span className="text-gray-500">Штрихкод товара:</span>{' '}
+                            <span className="text-gray-500">Штрихкод пачки:</span>{' '}
                             {formState.barcode || '—'}
+                        </p>
+
+                        <p>
+                            <span className="text-gray-500">Штрихкод блока:</span>{' '}
+                            {formState.blockBarcode || '—'}
                         </p>
 
                         <p>
