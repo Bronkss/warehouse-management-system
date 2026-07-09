@@ -801,6 +801,10 @@ export default function PosPage() {
     const [markingCodeInput, setMarkingCodeInput] = useState('');
     const [markingCheckResult, setMarkingCheckResult] = useState<MarkingPrecheckResult | null>(null);
     const [isCheckingMarking, setIsCheckingMarking] = useState(false);
+    const [backgroundMarkingCheck, setBackgroundMarkingCheck] = useState<{
+        productName: string;
+        codePreview: string;
+    } | null>(null);
 
     const [isPriceLabelModalOpen, setIsPriceLabelModalOpen] = useState(false);
     const [priceLabelSearch, setPriceLabelSearch] = useState('');
@@ -820,6 +824,7 @@ export default function PosPage() {
     const removeHeldCheckout = usePosCheckoutStore(state => state.removeHeldCheckout);
 
     const searchInputRef = useRef<HTMLInputElement>(null);
+    const newSaleButtonRef = useRef<HTMLButtonElement>(null);
 
     const total = calculateTotal(checkoutItems);
     const cashReceivedNumber = safeParseNumber(cashReceived);
@@ -1062,6 +1067,93 @@ export default function PosPage() {
             window.removeEventListener('keydown', handleEscape);
         };
     }, []);
+
+    useEffect(() => {
+        if (!lastReceipt) {
+            return;
+        }
+
+        const focusFrame = requestAnimationFrame(() => {
+            newSaleButtonRef.current?.focus();
+        });
+
+        const handleLastReceiptEnter = (event: globalThis.KeyboardEvent) => {
+            if (event.key !== 'Enter' || isShiftActionLoading) {
+                return;
+            }
+
+            if (event.target === newSaleButtonRef.current) {
+                return;
+            }
+
+            event.preventDefault();
+            setLastReceipt(null);
+            setError(null);
+
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
+        };
+
+        window.addEventListener('keydown', handleLastReceiptEnter);
+
+        return () => {
+            cancelAnimationFrame(focusFrame);
+            window.removeEventListener('keydown', handleLastReceiptEnter);
+        };
+    }, [isShiftActionLoading, lastReceipt]);
+
+    useEffect(() => {
+        const handleIdleEnterFocus = (event: globalThis.KeyboardEvent) => {
+            if (event.key !== 'Enter') {
+                return;
+            }
+
+            if (
+                lastReceipt ||
+                paymentModal ||
+                fiscalConfirmModal ||
+                weightModalProduct ||
+                markingModalProduct ||
+                isPriceLabelModalOpen ||
+                isHeldReceiptsModalOpen ||
+                isAtolSetupOpen
+            ) {
+                return;
+            }
+
+            const target = event.target as HTMLElement | null;
+            const tagName = target?.tagName?.toLowerCase();
+
+            if (
+                tagName === 'input' ||
+                tagName === 'textarea' ||
+                tagName === 'select' ||
+                tagName === 'button' ||
+                target?.isContentEditable
+            ) {
+                return;
+            }
+
+            event.preventDefault();
+            searchInputRef.current?.focus();
+        };
+
+        window.addEventListener('keydown', handleIdleEnterFocus);
+
+        return () => {
+            window.removeEventListener('keydown', handleIdleEnterFocus);
+        };
+    }, [
+        fiscalConfirmModal,
+        isAtolSetupOpen,
+        isHeldReceiptsModalOpen,
+        isPriceLabelModalOpen,
+        lastReceipt,
+        markingModalProduct,
+        paymentModal,
+        weightModalProduct,
+    ]);
 
     const createSaleInDb = async (receipt: Receipt): Promise<Receipt> => {
         const response = await fetch('/api/sales', {
@@ -1412,11 +1504,17 @@ export default function PosPage() {
 
         try {
             setIsCheckingMarking(true);
+            setBackgroundMarkingCheck({
+                productName: safeProduct.name,
+                codePreview: formatMarkingCodePreview(markingCode),
+            });
             setError(null);
-            setNotice('Код маркировки отправлен на проверку. Можно продолжать пробивать обычные товары.');
+            setNotice('Проверяю код маркировки в фоне. Поле поиска очищено — можно сканировать следующий обычный товар.');
             setMarkingCheckResult(null);
             setMarkingModalProduct(null);
             setMarkingCodeInput('');
+            setSearchQuery('');
+            setFoundProducts([]);
 
             requestAnimationFrame(() => {
                 searchInputRef.current?.focus();
@@ -1477,6 +1575,7 @@ export default function PosPage() {
             setError(message);
         } finally {
             setIsCheckingMarking(false);
+            setBackgroundMarkingCheck(null);
         }
     };
 
@@ -2073,7 +2172,7 @@ export default function PosPage() {
             setLastReceipt(savedReceipt);
 
             requestAnimationFrame(() => {
-                searchInputRef.current?.focus();
+                newSaleButtonRef.current?.focus();
             });
         } catch (err) {
             console.error(err);
@@ -2658,6 +2757,36 @@ export default function PosPage() {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
+            {isCheckingMarking && backgroundMarkingCheck && (
+                <div className="pointer-events-none fixed inset-x-0 top-4 z-[430] flex justify-center px-4" role="status" aria-live="polite">
+                    <div className="pointer-events-auto w-full max-w-2xl rounded-3xl border border-purple-200 bg-white p-4 shadow-2xl ring-4 ring-purple-100">
+                        <div className="flex items-center gap-4">
+                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-purple-50">
+                                <div className="h-7 w-7 animate-spin rounded-full border-4 border-purple-200 border-t-purple-600" />
+                            </div>
+
+                            <div className="min-w-0 flex-1">
+                                <div className="text-xs font-black uppercase tracking-[0.14em] text-purple-700">
+                                    Проверка Честного ЗНАКа
+                                </div>
+
+                                <div className="mt-1 truncate text-base font-extrabold text-gray-900">
+                                    В фоне проверяется: {backgroundMarkingCheck.productName}
+                                </div>
+
+                                <div className="mt-1 text-sm font-semibold text-purple-700">
+                                    Поле поиска очищено. Можно сканировать следующий обычный товар.
+                                </div>
+                            </div>
+
+                            <div className="hidden max-w-[180px] shrink-0 rounded-2xl bg-purple-50 px-3 py-2 text-right text-xs font-bold text-purple-700 sm:block">
+                                КМ: {backgroundMarkingCheck.codePreview}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {isDeliveryAlertOpen && deliveryAlerts.length > 0 && (
                 <div className="fixed inset-0 z-[400] flex items-start justify-center bg-black/25 px-4 py-4 pointer-events-none">
                     <div className="mt-4 w-full max-w-xl rounded-3xl border border-blue-200 bg-white p-5 shadow-2xl pointer-events-auto">
@@ -4299,9 +4428,11 @@ export default function PosPage() {
                                 )}
 
                                 <button
+                                    ref={newSaleButtonRef}
                                     type="button"
+                                    autoFocus
                                     onClick={clearReceipt}
-                                    className="px-6 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                                    className="px-6 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-200"
                                 >
                                     Новая продажа
                                 </button>
