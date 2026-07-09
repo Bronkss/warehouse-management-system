@@ -1,16 +1,26 @@
-'use client';
+"use client";
 
-import AtolAgentSetup from '@/app/components/AtolAgentSetup';
+import AtolAgentSetup from "@/app/components/AtolAgentSetup";
 import {
     usePosCheckoutStore,
     type HeldCheckout,
     type StoredCheckoutItem,
-} from './pos-checkout-store';
-import JsBarcode from 'jsbarcode';
-import { useRouter } from 'next/navigation';
-import { canUseWarehouseSection, getFirstAllowedRouteForLocation } from '@/app/lib/warehouseAccess';
-import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+} from "./pos-checkout-store";
+import JsBarcode from "jsbarcode";
+import { useRouter } from "next/navigation";
+import {
+    canUseWarehouseSection,
+    getFirstAllowedRouteForLocation,
+} from "@/app/lib/warehouseAccess";
+import {
+    useState,
+    useEffect,
+    useMemo,
+    useRef,
+    useCallback,
+    type KeyboardEvent,
+} from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
     AiOutlineDelete,
     AiOutlinePlus,
@@ -18,13 +28,13 @@ import {
     AiOutlineScan,
     AiOutlineSearch,
     AiOutlinePrinter,
-} from 'react-icons/ai';
+} from "react-icons/ai";
 import {
     getBarcodeDisplay,
     getPrimaryBarcode,
     hasBarcodeSearchMatch,
     hasExactBarcode,
-} from '../utils/barcodes';
+} from "../utils/barcodes";
 
 type ProductId = string | number;
 
@@ -37,7 +47,7 @@ type Product = {
     purchase_price?: number | string;
     sellingPrice?: number | string;
     selling_price?: number | string;
-    unit?: 'piece' | 'weight' | string;
+    unit?: "piece" | "weight" | string;
     stock?: number | string;
     minStock?: number | string;
     min_stock?: number | string;
@@ -67,7 +77,10 @@ type DeliveryAlertOrder = {
     createdAt: string;
 };
 
-type MarkingStatus = 'M+' | 'M-' | 'M';
+type MarkingStatus = "M+" | "M-" | "M";
+type MarkingPackageMode = "single" | "block";
+
+const CIGARETTE_BLOCK_QUANTITY = 10;
 
 type CheckoutItem = {
     product: Product;
@@ -77,9 +90,11 @@ type CheckoutItem = {
     markingStatus?: MarkingStatus;
     markingMessage?: string;
     markingCheckedAt?: string;
+    markingPackageMode?: MarkingPackageMode;
+    markingPackageQuantity?: number;
 };
 
-type PaymentMethod = 'card' | 'cash' | 'transfer';
+type PaymentMethod = "card" | "cash" | "transfer";
 
 type ReceiptItem = {
     productId: ProductId;
@@ -96,6 +111,8 @@ type ReceiptItem = {
     markingCode?: string;
     markingStatus?: MarkingStatus;
     markingMessage?: string;
+    markingPackageMode?: MarkingPackageMode;
+    markingPackageQuantity?: number;
 };
 
 type FiscalParams = {
@@ -135,7 +152,7 @@ type Receipt = {
     receivedAmount?: number;
     change?: number;
     fiscalizationRequested?: boolean;
-    fiscalStatus?: 'success' | 'skipped' | 'failed';
+    fiscalStatus?: "success" | "skipped" | "failed";
     fiscalUuid?: string;
     fiscalParams?: FiscalParams;
     fiscalRaw?: unknown;
@@ -149,109 +166,114 @@ type ApiError = {
     message?: string;
 };
 
-type PrintMode = 'selected' | 'filtered' | 'all';
-type PrintLayout = 'a4' | 'thermal';
+type PrintMode = "selected" | "filtered" | "all";
+type PrintLayout = "a4" | "thermal";
 
 type PriceLabelQuantityMap = Record<string, number>;
 
 const PRODUCTS_PAGE_LIMIT = 100;
 const SEARCH_LIMIT = 30;
 
-const AUTH_USER_KEY = 'warehouse_auth_user';
-const AUTH_LOGIN_KEY = 'warehouse_auth_login';
-const REMEMBER_ME_KEY = 'warehouse_remember_me';
-const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug';
-const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name';
-const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type';
-const AUTH_USER_NAME_KEY = 'warehouse_user_name';
-const AUTH_USER_ROLE_KEY = 'warehouse_user_role';
-const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location';
-const WAREHOUSE_USER_LOGIN_HEADER = 'x-warehouse-user-login';
-const WAREHOUSE_USER_ROLE_HEADER = 'x-warehouse-user-role';
-const DEFAULT_LOCATION_SLUG = 'tochka';
-const DEFAULT_LOCATION_NAME = 'ТОЧКА';
+const AUTH_USER_KEY = "warehouse_auth_user";
+const AUTH_LOGIN_KEY = "warehouse_auth_login";
+const REMEMBER_ME_KEY = "warehouse_remember_me";
+const AUTH_LOCATION_SLUG_KEY = "warehouse_location_slug";
+const AUTH_LOCATION_NAME_KEY = "warehouse_location_name";
+const AUTH_LOCATION_TYPE_KEY = "warehouse_location_type";
+const AUTH_USER_NAME_KEY = "warehouse_user_name";
+const AUTH_USER_ROLE_KEY = "warehouse_user_role";
+const WAREHOUSE_LOCATION_HEADER = "x-warehouse-location";
+const WAREHOUSE_USER_LOGIN_HEADER = "x-warehouse-user-login";
+const WAREHOUSE_USER_ROLE_HEADER = "x-warehouse-user-role";
+const DEFAULT_LOCATION_SLUG = "tochka";
+const DEFAULT_LOCATION_NAME = "ТОЧКА";
 
-const DEFAULT_FISCAL_AGENT_URL = 'http://127.0.0.1:3108';
-const FISCAL_AGENT_URL_KEY = 'pos_fiscal_agent_url';
-const FISCAL_AGENT_TOKEN_KEY = 'pos_fiscal_agent_token';
-const SHIFT_STATUS_KEY = 'pos_kkt_shift_status';
+const DEFAULT_FISCAL_AGENT_URL = "http://127.0.0.1:3108";
+const FISCAL_AGENT_URL_KEY = "pos_fiscal_agent_url";
+const FISCAL_AGENT_TOKEN_KEY = "pos_fiscal_agent_token";
+const SHIFT_STATUS_KEY = "pos_kkt_shift_status";
 
-type ShiftStatus = 'unknown' | 'open' | 'closed';
+type ShiftStatus = "unknown" | "open" | "closed";
 
 const getCurrentLocationSlug = (): string => {
-    if (typeof window === 'undefined') {
+    if (typeof window === "undefined") {
         return DEFAULT_LOCATION_SLUG;
     }
 
-    return String(
-        sessionStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
-        localStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
-        DEFAULT_LOCATION_SLUG
-    ).trim() || DEFAULT_LOCATION_SLUG;
+    return (
+        String(
+            sessionStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+            localStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+            DEFAULT_LOCATION_SLUG,
+        ).trim() || DEFAULT_LOCATION_SLUG
+    );
 };
 
 const getCurrentLocationName = (): string => {
-    if (typeof window === 'undefined') {
+    if (typeof window === "undefined") {
         return DEFAULT_LOCATION_NAME;
     }
 
-    return String(
-        sessionStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
-        localStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
-        DEFAULT_LOCATION_NAME
-    ).trim() || DEFAULT_LOCATION_NAME;
+    return (
+        String(
+            sessionStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+            localStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+            DEFAULT_LOCATION_NAME,
+        ).trim() || DEFAULT_LOCATION_NAME
+    );
 };
 
 const getCurrentLocationType = (): string => {
-    if (typeof window === 'undefined') {
-        return 'store';
+    if (typeof window === "undefined") {
+        return "store";
     }
 
-    return String(
-        sessionStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
-        localStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
-        'store'
-    ).trim() || 'store';
+    return (
+        String(
+            sessionStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+            localStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+            "store",
+        ).trim() || "store"
+    );
 };
 
 const getCurrentUserLogin = (): string => {
-    if (typeof window === 'undefined') {
-        return '';
+    if (typeof window === "undefined") {
+        return "";
     }
 
     return String(
         sessionStorage.getItem(AUTH_USER_KEY) ||
         localStorage.getItem(AUTH_USER_KEY) ||
         localStorage.getItem(AUTH_LOGIN_KEY) ||
-        ''
+        "",
     ).trim();
 };
 
 const getCurrentUserName = (): string => {
-    if (typeof window === 'undefined') {
-        return 'Кассир';
+    if (typeof window === "undefined") {
+        return "Кассир";
     }
 
     return String(
         sessionStorage.getItem(AUTH_USER_NAME_KEY) ||
         localStorage.getItem(AUTH_USER_NAME_KEY) ||
         getCurrentUserLogin() ||
-        'Кассир'
+        "Кассир",
     ).trim();
 };
 
 const getCurrentUserRole = (): string => {
-    if (typeof window === 'undefined') {
-        return 'cashier';
+    if (typeof window === "undefined") {
+        return "cashier";
     }
 
     return String(
         sessionStorage.getItem(AUTH_USER_ROLE_KEY) ||
         localStorage.getItem(AUTH_USER_ROLE_KEY) ||
-        'cashier'
+        "cashier",
     ).trim();
 };
-
 
 const getLocationHeaders = (): HeadersInit => {
     return {
@@ -262,12 +284,12 @@ const getLocationHeaders = (): HeadersInit => {
 };
 
 const safeParseNumber = (value: unknown): number => {
-    if (typeof value === 'number') {
+    if (typeof value === "number") {
         return Number.isFinite(value) ? value : 0;
     }
 
-    if (typeof value === 'string') {
-        const parsed = parseFloat(value.replace(',', '.').replace(/\s/g, ''));
+    if (typeof value === "string") {
+        const parsed = parseFloat(value.replace(",", ".").replace(/\s/g, ""));
         return Number.isFinite(parsed) ? parsed : 0;
     }
 
@@ -291,18 +313,20 @@ const getMinStock = (product: Product): number => {
 };
 
 const normalizeBooleanFlag = (value: unknown): boolean => {
-    if (typeof value === 'boolean') {
+    if (typeof value === "boolean") {
         return value;
     }
 
-    if (typeof value === 'number') {
+    if (typeof value === "number") {
         return value === 1;
     }
 
-    if (typeof value === 'string') {
+    if (typeof value === "string") {
         const normalized = value.trim().toLowerCase();
 
-        return ['1', 'true', 'yes', 'y', 'да', 'маркированный', 'marked'].includes(normalized);
+        return ["1", "true", "yes", "y", "да", "маркированный", "marked"].includes(
+            normalized,
+        );
     }
 
     return false;
@@ -314,16 +338,16 @@ const isMarkedProduct = (product: Product): boolean => {
         product.isMarked ??
         product.is_marked ??
         product.marking ??
-        product.markedProduct
+        product.markedProduct,
     );
 };
 
 const normalizeMarkingCode = (value: unknown): string => {
-    return String(value ?? '')
-        .replaceAll('\\u001d', '\u001d')
-        .replaceAll('\\x1d', '\u001d')
-        .replaceAll('<GS>', '\u001d')
-        .replaceAll('[GS]', '\u001d')
+    return String(value ?? "")
+        .replaceAll("\\u001d", "\u001d")
+        .replaceAll("\\x1d", "\u001d")
+        .replaceAll("<GS>", "\u001d")
+        .replaceAll("[GS]", "\u001d")
         .trim();
 };
 
@@ -344,10 +368,10 @@ const normalizeProduct = (product: Product): Product => {
         purchasePrice: getPurchasePrice(product),
         stock: getStock(product),
         minStock: getMinStock(product),
-        unit: product.unit || 'piece',
-        category: product.category || 'Другое',
-        barcode: product.barcode || '',
-        image: product.image || '',
+        unit: product.unit || "piece",
+        category: product.category || "Другое",
+        barcode: product.barcode || "",
+        image: product.image || "",
         marked: isMarkedProduct(product),
     };
 };
@@ -363,9 +387,9 @@ const normalizeProductsApiResponse = (data: unknown): ProductsApiResponse => {
     }
 
     if (
-        typeof data === 'object' &&
+        typeof data === "object" &&
         data !== null &&
-        'items' in data &&
+        "items" in data &&
         Array.isArray((data as ProductsApiResponse).items)
     ) {
         const response = data as ProductsApiResponse;
@@ -387,28 +411,32 @@ const normalizeProductsApiResponse = (data: unknown): ProductsApiResponse => {
     };
 };
 
-
 const getMeasureCode = (unit: unknown): number => {
-    return String(unit || '').trim().toLowerCase() === 'weight' ? 11 : 0;
+    return String(unit || "")
+        .trim()
+        .toLowerCase() === "weight"
+        ? 11
+        : 0;
 };
 
 const getMeasureName = (unit: unknown): string => {
-    return getMeasureCode(unit) === 11 ? 'кг' : 'шт.';
+    return getMeasureCode(unit) === 11 ? "кг" : "шт.";
 };
 
 const formatCurrency = (amount: number | undefined | null): string => {
-    const safeAmount = typeof amount === 'number' && Number.isFinite(amount) ? amount : 0;
+    const safeAmount =
+        typeof amount === "number" && Number.isFinite(amount) ? amount : 0;
 
-    return new Intl.NumberFormat('ru-RU', {
-        style: 'currency',
-        currency: 'RUB',
+    return new Intl.NumberFormat("ru-RU", {
+        style: "currency",
+        currency: "RUB",
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     }).format(safeAmount);
 };
 
 const isWeightProduct = (product: Product): boolean => {
-    return product.unit === 'weight';
+    return product.unit === "weight";
 };
 
 const canSellIntoNegativeStock = (product: Product): boolean => {
@@ -420,28 +448,33 @@ const roundQuantity = (value: number): number => {
 };
 
 const formatQuantity = (quantity: number, unit?: string): string => {
-    if (unit === 'weight') {
-        return `${quantity.toFixed(3).replace(/\.?0+$/, '')} кг`;
+    if (unit === "weight") {
+        return `${quantity.toFixed(3).replace(/\.?0+$/, "")} кг`;
     }
 
     return `${quantity} шт.`;
 };
 
 const getUnitPriceLabel = (product: Product): string => {
-    return product.unit === 'weight' ? 'за 1 кг' : 'за 1 шт.';
+    return product.unit === "weight" ? "за 1 кг" : "за 1 шт.";
 };
 
 const getProductCategory = (product: Product): string => {
-    const category = String(product.category || '').trim();
+    const category = String(product.category || "").trim();
 
-    return category || 'Без категории';
+    return category || "Без категории";
 };
 
 const normalizeSearchText = (value: unknown): string => {
-    return String(value ?? '').trim().toLowerCase();
+    return String(value ?? "")
+        .trim()
+        .toLowerCase();
 };
 
-const doesProductMatchPriceLabelSearch = (product: Product, rawQuery: string): boolean => {
+const doesProductMatchPriceLabelSearch = (
+    product: Product,
+    rawQuery: string,
+): boolean => {
     const query = normalizeSearchText(rawQuery);
 
     if (!query) {
@@ -449,14 +482,16 @@ const doesProductMatchPriceLabelSearch = (product: Product, rawQuery: string): b
     }
 
     const tokens = query.split(/\s+/).filter(Boolean);
-    const searchableText = normalizeSearchText([
-        product.name,
-        getProductCategory(product),
-        getSellingPrice(product),
-        product.unit === 'weight' ? 'кг весовой' : 'шт штука',
-    ].join(' '));
+    const searchableText = normalizeSearchText(
+        [
+            product.name,
+            getProductCategory(product),
+            getSellingPrice(product),
+            product.unit === "weight" ? "кг весовой" : "шт штука",
+        ].join(" "),
+    );
 
-    return tokens.every(token => {
+    return tokens.every((token) => {
         return (
             searchableText.includes(token) ||
             hasBarcodeSearchMatch(product.barcode, token)
@@ -464,17 +499,22 @@ const doesProductMatchPriceLabelSearch = (product: Product, rawQuery: string): b
     });
 };
 
-const doesProductMatchPriceLabelCategory = (product: Product, categoryFilter: string): boolean => {
-    return categoryFilter === 'all' || getProductCategory(product) === categoryFilter;
+const doesProductMatchPriceLabelCategory = (
+    product: Product,
+    categoryFilter: string,
+): boolean => {
+    return (
+        categoryFilter === "all" || getProductCategory(product) === categoryFilter
+    );
 };
 
 const escapeHtml = (value: unknown): string => {
-    return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
 };
 
 const calculateTotal = (items: CheckoutItem[]): number => {
@@ -485,26 +525,32 @@ const calculateTotal = (items: CheckoutItem[]): number => {
 
 const createReceiptId = (): string => {
     const date = new Date();
-    const datePart = date.toISOString().slice(0, 10).replaceAll('-', '');
+    const datePart = date.toISOString().slice(0, 10).replaceAll("-", "");
     const timePart = String(date.getTime()).slice(-6);
 
     return `${datePart}-${timePart}`;
 };
 
-const normalizeStoredCheckoutItem = (item: StoredCheckoutItem): CheckoutItem | null => {
+const normalizeStoredCheckoutItem = (
+    item: StoredCheckoutItem,
+): CheckoutItem | null => {
     if (!item || !item.product) {
         return null;
     }
 
     const product = normalizeProduct(item.product as Product);
 
-    if (product.id === undefined || product.id === null || !String(product.name || '').trim()) {
+    if (
+        product.id === undefined ||
+        product.id === null ||
+        !String(product.name || "").trim()
+    ) {
         return null;
     }
 
     const quantity = isMarkedProduct(product)
         ? 1
-        : product.unit === 'weight'
+        : product.unit === "weight"
             ? roundQuantity(safeParseNumber(item.quantity))
             : Math.floor(safeParseNumber(item.quantity));
 
@@ -512,18 +558,33 @@ const normalizeStoredCheckoutItem = (item: StoredCheckoutItem): CheckoutItem | n
         return null;
     }
 
+    const storedMarking = item as StoredCheckoutItem & {
+        markingPackageMode?: MarkingPackageMode;
+        markingPackageQuantity?: number;
+    };
+
     return {
         product,
-        id: String(item.id || `${product.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`),
+        id: String(
+            item.id ||
+            `${product.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        ),
         quantity,
-        markingCode: item.markingCode ? normalizeMarkingCode(item.markingCode) : undefined,
+        markingCode: item.markingCode
+            ? normalizeMarkingCode(item.markingCode)
+            : undefined,
         markingStatus: item.markingStatus,
         markingMessage: item.markingMessage,
         markingCheckedAt: item.markingCheckedAt,
+        markingPackageMode: storedMarking.markingPackageMode,
+        markingPackageQuantity:
+            safeParseNumber(storedMarking.markingPackageQuantity) || undefined,
     };
 };
 
-const normalizeStoredCheckoutItems = (items: StoredCheckoutItem[]): CheckoutItem[] => {
+const normalizeStoredCheckoutItems = (
+    items: StoredCheckoutItem[],
+): CheckoutItem[] => {
     return items
         .map(normalizeStoredCheckoutItem)
         .filter((item): item is CheckoutItem => Boolean(item));
@@ -540,31 +601,31 @@ const getHeldCheckoutTitle = (held: HeldCheckout): string => {
         return String(firstItemName);
     }
 
-    return 'Отложенный чек';
+    return "Отложенный чек";
 };
 
 const readJsonSafe = async <T,>(response: Response): Promise<T | null> => {
     try {
-        return await response.json() as T;
+        return (await response.json()) as T;
     } catch {
         return null;
     }
 };
 
 const getPaymentLabel = (method: PaymentMethod): string => {
-    if (method === 'card') {
-        return 'Карта';
+    if (method === "card") {
+        return "Карта";
     }
 
-    if (method === 'transfer') {
-        return 'Перевод';
+    if (method === "transfer") {
+        return "Перевод";
     }
 
-    return 'Наличные';
+    return "Наличные";
 };
 
 const getFiscalAgentUrl = (): string => {
-    if (typeof window === 'undefined') {
+    if (typeof window === "undefined") {
         return DEFAULT_FISCAL_AGENT_URL;
     }
 
@@ -572,34 +633,39 @@ const getFiscalAgentUrl = (): string => {
 };
 
 const getFiscalAgentToken = (): string => {
-    if (typeof window === 'undefined') {
-        return '';
+    if (typeof window === "undefined") {
+        return "";
     }
 
-    return localStorage.getItem(FISCAL_AGENT_TOKEN_KEY) || '';
+    return localStorage.getItem(FISCAL_AGENT_TOKEN_KEY) || "";
 };
 
-const callFiscalAgent = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+const callFiscalAgent = async <T,>(
+    path: string,
+    init?: RequestInit,
+): Promise<T> => {
     let response: Response;
 
     try {
         response = await fetch(`${getFiscalAgentUrl()}${path}`, {
             ...init,
             headers: {
-                'Content-Type': 'application/json',
-                'X-POS-Agent-Token': getFiscalAgentToken(),
+                "Content-Type": "application/json",
+                "X-POS-Agent-Token": getFiscalAgentToken(),
                 ...(init?.headers || {}),
             },
-            cache: 'no-store',
+            cache: "no-store",
         });
     } catch {
-        throw new Error('Локальный агент ККТ недоступен. Проверьте, что он запущен на ПК кассы.');
+        throw new Error(
+            "Локальный агент ККТ недоступен. Проверьте, что он запущен на ПК кассы.",
+        );
     }
 
     const data = await readJsonSafe<T & ApiError>(response);
 
     if (!response.ok) {
-        throw new Error(data?.message || 'Локальный агент ККТ недоступен');
+        throw new Error(data?.message || "Локальный агент ККТ недоступен");
     }
 
     return data as T;
@@ -610,23 +676,28 @@ const fiscalizeReceipt = async (receipt: Receipt): Promise<FiscalResult> => {
         ok?: boolean;
         fiscal?: FiscalResult;
         message?: string;
-    }>('/fiscal/sell', {
-        method: 'POST',
+    }>("/fiscal/sell", {
+        method: "POST",
         body: JSON.stringify(receipt),
     });
 
     if (!data?.fiscal) {
-        throw new Error(data?.message || 'ККТ не фискализировала чек');
+        throw new Error(data?.message || "ККТ не фискализировала чек");
     }
 
     return data.fiscal;
 };
 
-const precheckMarkingCode = async (markingCode: string): Promise<MarkingPrecheckResult> => {
-    const data = await callFiscalAgent<MarkingPrecheckResult>('/marking/precheck', {
-        method: 'POST',
-        body: JSON.stringify({ markingCode }),
-    });
+const precheckMarkingCode = async (
+    markingCode: string,
+): Promise<MarkingPrecheckResult> => {
+    const data = await callFiscalAgent<MarkingPrecheckResult>(
+        "/marking/precheck",
+        {
+            method: "POST",
+            body: JSON.stringify({ markingCode }),
+        },
+    );
 
     return data;
 };
@@ -644,37 +715,42 @@ const fetchProductsPage = async ({
 }): Promise<ProductsApiResponse> => {
     const params = new URLSearchParams();
 
-    params.set('limit', String(limit));
+    params.set("limit", String(limit));
 
     if (search) {
-        params.set('search', search);
+        params.set("search", search);
     }
 
     if (cursor) {
-        params.set('cursor', String(cursor));
+        params.set("cursor", String(cursor));
     }
 
     const response = await fetch(`/api/products?${params.toString()}`, {
-        method: 'GET',
-        cache: 'no-store',
+        method: "GET",
+        cache: "no-store",
         headers: getLocationHeaders(),
         signal,
     });
 
-    const data = await readJsonSafe<ProductsApiResponse | Product[] | ApiError>(response);
+    const data = await readJsonSafe<ProductsApiResponse | Product[] | ApiError>(
+        response,
+    );
 
     if (!response.ok) {
         throw new Error(
-            data && typeof data === 'object' && 'message' in data && data.message
+            data && typeof data === "object" && "message" in data && data.message
                 ? data.message
-                : 'Не удалось загрузить товары'
+                : "Не удалось загрузить товары",
         );
     }
 
     return normalizeProductsApiResponse(data);
 };
 
-const searchProducts = async (query: string, signal?: AbortSignal): Promise<Product[]> => {
+const searchProducts = async (
+    query: string,
+    signal?: AbortSignal,
+): Promise<Product[]> => {
     const page = await fetchProductsPage({
         search: query,
         limit: SEARCH_LIMIT,
@@ -708,11 +784,10 @@ const fetchAllProducts = async (): Promise<Product[]> => {
     return allProducts;
 };
 
-
 function formatDeliveryAlertMoney(value: number) {
-    return new Intl.NumberFormat('ru-RU', {
-        style: 'currency',
-        currency: 'RUB',
+    return new Intl.NumberFormat("ru-RU", {
+        style: "currency",
+        currency: "RUB",
         minimumFractionDigits: 0,
         maximumFractionDigits: 0,
     }).format(Math.round(value || 0));
@@ -720,7 +795,10 @@ function formatDeliveryAlertMoney(value: number) {
 
 function playDeliveryAlertTone() {
     try {
-        const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        const AudioContextCtor =
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext?: typeof AudioContext })
+                .webkitAudioContext;
 
         if (!AudioContextCtor) {
             return;
@@ -739,7 +817,7 @@ function playDeliveryAlertTone() {
             const oscillator = audioContext.createOscillator();
             const gain = audioContext.createGain();
 
-            oscillator.type = 'square';
+            oscillator.type = "square";
             oscillator.frequency.setValueAtTime(frequency, startAt);
 
             gain.gain.setValueAtTime(0.0001, startAt);
@@ -760,7 +838,7 @@ function playDeliveryAlertTone() {
             void audioContext.close().catch(() => undefined);
         }, 1400);
     } catch (error) {
-        console.warn('Delivery alert sound was blocked by browser:', error);
+        console.warn("Delivery alert sound was blocked by browser:", error);
     }
 }
 
@@ -768,20 +846,28 @@ export default function PosPage() {
     const router = useRouter();
 
     const [isAuthChecked, setIsAuthChecked] = useState(false);
-    const [warehouseLocationName, setWarehouseLocationName] = useState(DEFAULT_LOCATION_NAME);
-    const [warehouseLocationSlug, setWarehouseLocationSlug] = useState(DEFAULT_LOCATION_SLUG);
-    const [warehouseUserName, setWarehouseUserName] = useState('Кассир');
-    const [warehouseUserLogin, setWarehouseUserLogin] = useState('');
-    const [deliveryAlerts, setDeliveryAlerts] = useState<DeliveryAlertOrder[]>([]);
+    const [warehouseLocationName, setWarehouseLocationName] = useState(
+        DEFAULT_LOCATION_NAME,
+    );
+    const [warehouseLocationSlug, setWarehouseLocationSlug] = useState(
+        DEFAULT_LOCATION_SLUG,
+    );
+    const [warehouseUserName, setWarehouseUserName] = useState("Кассир");
+    const [warehouseUserLogin, setWarehouseUserLogin] = useState("");
+    const [deliveryAlerts, setDeliveryAlerts] = useState<DeliveryAlertOrder[]>(
+        [],
+    );
     const [isDeliveryAlertOpen, setIsDeliveryAlertOpen] = useState(false);
-    const [isAcceptingDeliveryId, setIsAcceptingDeliveryId] = useState<string | null>(null);
-    const [shiftStatus, setShiftStatus] = useState<ShiftStatus>('unknown');
+    const [isAcceptingDeliveryId, setIsAcceptingDeliveryId] = useState<
+        string | null
+    >(null);
+    const [shiftStatus, setShiftStatus] = useState<ShiftStatus>("unknown");
     const [isShiftActionLoading, setIsShiftActionLoading] = useState(false);
     const [fiscalConfirmModal, setFiscalConfirmModal] = useState(false);
 
     const [checkoutItems, setCheckoutItems] = useState<CheckoutItem[]>([]);
     const [allProducts, setAllProducts] = useState<Product[]>([]);
-    const [searchQuery, setSearchQuery] = useState('');
+    const [searchQuery, setSearchQuery] = useState("");
     const [foundProducts, setFoundProducts] = useState<Product[]>([]);
 
     const [isLoading, setIsLoading] = useState(false);
@@ -791,55 +877,80 @@ export default function PosPage() {
     const [notice, setNotice] = useState<string | null>(null);
 
     const [paymentModal, setPaymentModal] = useState<PaymentMethod | null>(null);
-    const [cashReceived, setCashReceived] = useState('');
+    const [cashReceived, setCashReceived] = useState("");
     const [lastReceipt, setLastReceipt] = useState<Receipt | null>(null);
 
-    const [weightModalProduct, setWeightModalProduct] = useState<Product | null>(null);
-    const [weightQuantity, setWeightQuantity] = useState('');
+    const [weightModalProduct, setWeightModalProduct] = useState<Product | null>(
+        null,
+    );
+    const [weightQuantity, setWeightQuantity] = useState("");
 
-    const [markingModalProduct, setMarkingModalProduct] = useState<Product | null>(null);
-    const [markingCodeInput, setMarkingCodeInput] = useState('');
-    const [markingCheckResult, setMarkingCheckResult] = useState<MarkingPrecheckResult | null>(null);
+    const [markingModalProduct, setMarkingModalProduct] =
+        useState<Product | null>(null);
+    const [markingCodeInput, setMarkingCodeInput] = useState("");
+    const [markingCheckResult, setMarkingCheckResult] =
+        useState<MarkingPrecheckResult | null>(null);
+    const [markingPackageMode, setMarkingPackageMode] =
+        useState<MarkingPackageMode>("single");
     const [isCheckingMarking, setIsCheckingMarking] = useState(false);
+    const [backgroundMarkingCheck, setBackgroundMarkingCheck] = useState<{
+        productName: string;
+        codePreview: string;
+    } | null>(null);
 
     const [isPriceLabelModalOpen, setIsPriceLabelModalOpen] = useState(false);
-    const [priceLabelSearch, setPriceLabelSearch] = useState('');
-    const [priceLabelCategoryFilter, setPriceLabelCategoryFilter] = useState('all');
-    const [selectedPriceLabelIds, setSelectedPriceLabelIds] = useState<string[]>([]);
-    const [priceLabelQuantities, setPriceLabelQuantities] = useState<PriceLabelQuantityMap>({});
+    const [priceLabelSearch, setPriceLabelSearch] = useState("");
+    const [priceLabelCategoryFilter, setPriceLabelCategoryFilter] =
+        useState("all");
+    const [selectedPriceLabelIds, setSelectedPriceLabelIds] = useState<string[]>(
+        [],
+    );
+    const [priceLabelQuantities, setPriceLabelQuantities] =
+        useState<PriceLabelQuantityMap>({});
     const [isRefreshingLabels, setIsRefreshingLabels] = useState(false);
 
     const [isAtolSetupOpen, setIsAtolSetupOpen] = useState(false);
     const [isHeldReceiptsModalOpen, setIsHeldReceiptsModalOpen] = useState(false);
     const [isCheckoutStoreReady, setIsCheckoutStoreReady] = useState(false);
 
-    const heldCheckouts = usePosCheckoutStore(state => state.heldCheckouts);
-    const setStoredCheckoutItems = usePosCheckoutStore(state => state.setCurrentItems);
-    const clearStoredCheckoutItems = usePosCheckoutStore(state => state.clearCurrentItems);
-    const holdCheckoutInStore = usePosCheckoutStore(state => state.holdCheckout);
-    const removeHeldCheckout = usePosCheckoutStore(state => state.removeHeldCheckout);
+    const heldCheckouts = usePosCheckoutStore((state) => state.heldCheckouts);
+    const setStoredCheckoutItems = usePosCheckoutStore(
+        (state) => state.setCurrentItems,
+    );
+    const clearStoredCheckoutItems = usePosCheckoutStore(
+        (state) => state.clearCurrentItems,
+    );
+    const holdCheckoutInStore = usePosCheckoutStore(
+        (state) => state.holdCheckout,
+    );
+    const removeHeldCheckout = usePosCheckoutStore(
+        (state) => state.removeHeldCheckout,
+    );
 
     const searchInputRef = useRef<HTMLInputElement>(null);
+    const newSaleButtonRef = useRef<HTMLButtonElement>(null);
 
     const total = calculateTotal(checkoutItems);
     const cashReceivedNumber = safeParseNumber(cashReceived);
     const change = cashReceivedNumber - total;
-    const isShiftOpen = shiftStatus === 'open';
-    const hasMarkedCheckoutItems = checkoutItems.some(item => isMarkedProduct(item.product));
-    const hasUnsafeMarkedCheckoutItems = checkoutItems.some(item =>
-        isMarkedProduct(item.product) && item.markingStatus !== 'M+'
+    const isShiftOpen = shiftStatus === "open";
+    const hasMarkedCheckoutItems = checkoutItems.some((item) =>
+        isMarkedProduct(item.product),
+    );
+    const hasUnsafeMarkedCheckoutItems = checkoutItems.some(
+        (item) => isMarkedProduct(item.product) && item.markingStatus !== "M+",
     );
 
     const priceLabelCategories = useMemo(() => {
         const categories = allProducts.map(getProductCategory);
 
         return Array.from(new Set<string>(categories)).sort((a, b) =>
-            a.localeCompare(b, 'ru')
+            a.localeCompare(b, "ru"),
         );
     }, [allProducts]);
 
     const priceLabelProducts = useMemo(() => {
-        return allProducts.filter(product => {
+        return allProducts.filter((product) => {
             return (
                 doesProductMatchPriceLabelCategory(product, priceLabelCategoryFilter) &&
                 doesProductMatchPriceLabelSearch(product, priceLabelSearch)
@@ -857,13 +968,19 @@ export default function PosPage() {
         return Math.min(999, Math.floor(quantity));
     };
 
-    const selectedPriceLabelPrintCount = selectedPriceLabelIds.reduce((sum, productId) => {
-        return sum + getPriceLabelQuantity(productId);
-    }, 0);
+    const selectedPriceLabelPrintCount = selectedPriceLabelIds.reduce(
+        (sum, productId) => {
+            return sum + getPriceLabelQuantity(productId);
+        },
+        0,
+    );
 
-    const filteredPriceLabelPrintCount = priceLabelProducts.reduce((sum, product) => {
-        return sum + getPriceLabelQuantity(product.id);
-    }, 0);
+    const filteredPriceLabelPrintCount = priceLabelProducts.reduce(
+        (sum, product) => {
+            return sum + getPriceLabelQuantity(product.id);
+        },
+        0,
+    );
 
     const refreshProducts = async (): Promise<Product[]> => {
         const products = await fetchAllProducts();
@@ -879,7 +996,7 @@ export default function PosPage() {
         const authUser = savedLocalUser || savedSessionUser;
 
         if (!authUser) {
-            router.replace('/auth');
+            router.replace("/auth");
             return;
         }
 
@@ -887,8 +1004,19 @@ export default function PosPage() {
         const currentLocationName = getCurrentLocationName();
         const currentLocationType = getCurrentLocationType();
 
-        if (!canUseWarehouseSection(currentLocationSlug, currentLocationType, 'online-kassa')) {
-            router.replace(getFirstAllowedRouteForLocation(currentLocationSlug, currentLocationType));
+        if (
+            !canUseWarehouseSection(
+                currentLocationSlug,
+                currentLocationType,
+                "online-kassa",
+            )
+        ) {
+            router.replace(
+                getFirstAllowedRouteForLocation(
+                    currentLocationSlug,
+                    currentLocationType,
+                ),
+            );
             return;
         }
 
@@ -899,11 +1027,11 @@ export default function PosPage() {
 
         const savedShiftStatus = localStorage.getItem(SHIFT_STATUS_KEY);
 
-        if (savedShiftStatus === 'open' || savedShiftStatus === 'closed') {
+        if (savedShiftStatus === "open" || savedShiftStatus === "closed") {
             setShiftStatus(savedShiftStatus);
         } else {
-            setShiftStatus('closed');
-            localStorage.setItem(SHIFT_STATUS_KEY, 'closed');
+            setShiftStatus("closed");
+            localStorage.setItem(SHIFT_STATUS_KEY, "closed");
         }
 
         setIsAuthChecked(true);
@@ -931,7 +1059,12 @@ export default function PosPage() {
         }
 
         setStoredCheckoutItems(checkoutItems as unknown as StoredCheckoutItem[]);
-    }, [checkoutItems, clearStoredCheckoutItems, isCheckoutStoreReady, setStoredCheckoutItems]);
+    }, [
+        checkoutItems,
+        clearStoredCheckoutItems,
+        isCheckoutStoreReady,
+        setStoredCheckoutItems,
+    ]);
 
     useEffect(() => {
         if (!isAuthChecked) {
@@ -955,7 +1088,9 @@ export default function PosPage() {
                 console.error(err);
 
                 if (!cancelled) {
-                    setError(err instanceof Error ? err.message : 'Не удалось загрузить товары');
+                    setError(
+                        err instanceof Error ? err.message : "Не удалось загрузить товары",
+                    );
                 }
             } finally {
                 if (!cancelled) {
@@ -972,31 +1107,38 @@ export default function PosPage() {
     }, [isAuthChecked]);
 
     useEffect(() => {
-        if (paymentModal !== 'cash') {
+        if (paymentModal !== "cash") {
             return;
         }
 
         const handleEnterPayment = (event: globalThis.KeyboardEvent) => {
-            if (event.key !== 'Enter' || isPaying) {
+            if (event.key !== "Enter" || isPaying) {
                 return;
             }
 
             event.preventDefault();
 
             if (cashReceivedNumber < total) {
-                setError('Полученная сумма меньше суммы чека');
+                setError("Полученная сумма меньше суммы чека");
                 return;
             }
 
             setFiscalConfirmModal(true);
         };
 
-        window.addEventListener('keydown', handleEnterPayment);
+        window.addEventListener("keydown", handleEnterPayment);
 
         return () => {
-            window.removeEventListener('keydown', handleEnterPayment);
+            window.removeEventListener("keydown", handleEnterPayment);
         };
-    }, [paymentModal, isPaying, cashReceivedNumber, total, checkoutItems, shiftStatus]);
+    }, [
+        paymentModal,
+        isPaying,
+        cashReceivedNumber,
+        total,
+        checkoutItems,
+        shiftStatus,
+    ]);
 
     useEffect(() => {
         const query = searchQuery.trim();
@@ -1018,13 +1160,13 @@ export default function PosPage() {
 
                 setFoundProducts(products);
             } catch (err) {
-                if (err instanceof Error && err.name === 'AbortError') {
+                if (err instanceof Error && err.name === "AbortError") {
                     return;
                 }
 
                 console.error(err);
                 setFoundProducts([]);
-                setError(err instanceof Error ? err.message : 'Ошибка поиска товара');
+                setError(err instanceof Error ? err.message : "Ошибка поиска товара");
             } finally {
                 if (!controller.signal.aborted) {
                     setIsSearchLoading(false);
@@ -1040,7 +1182,7 @@ export default function PosPage() {
 
     useEffect(() => {
         const handleEscape = (event: globalThis.KeyboardEvent) => {
-            if (event.key !== 'Escape') {
+            if (event.key !== "Escape") {
                 return;
             }
 
@@ -1048,26 +1190,114 @@ export default function PosPage() {
             setFiscalConfirmModal(false);
             setWeightModalProduct(null);
             setMarkingModalProduct(null);
-            setMarkingCodeInput('');
+            setMarkingCodeInput("");
             setMarkingCheckResult(null);
+            setMarkingPackageMode("single");
             setIsPriceLabelModalOpen(false);
             setIsHeldReceiptsModalOpen(false);
             setLastReceipt(null);
             setIsAtolSetupOpen(false);
         };
 
-        window.addEventListener('keydown', handleEscape);
+        window.addEventListener("keydown", handleEscape);
 
         return () => {
-            window.removeEventListener('keydown', handleEscape);
+            window.removeEventListener("keydown", handleEscape);
         };
     }, []);
 
+    useEffect(() => {
+        if (!lastReceipt) {
+            return;
+        }
+
+        const focusFrame = requestAnimationFrame(() => {
+            newSaleButtonRef.current?.focus();
+        });
+
+        const handleLastReceiptEnter = (event: globalThis.KeyboardEvent) => {
+            if (event.key !== "Enter" || isShiftActionLoading) {
+                return;
+            }
+
+            if (event.target === newSaleButtonRef.current) {
+                return;
+            }
+
+            event.preventDefault();
+            setLastReceipt(null);
+            setError(null);
+
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
+        };
+
+        window.addEventListener("keydown", handleLastReceiptEnter);
+
+        return () => {
+            cancelAnimationFrame(focusFrame);
+            window.removeEventListener("keydown", handleLastReceiptEnter);
+        };
+    }, [isShiftActionLoading, lastReceipt]);
+
+    useEffect(() => {
+        const handleIdleEnterFocus = (event: globalThis.KeyboardEvent) => {
+            if (event.key !== "Enter") {
+                return;
+            }
+
+            if (
+                lastReceipt ||
+                paymentModal ||
+                fiscalConfirmModal ||
+                weightModalProduct ||
+                markingModalProduct ||
+                isPriceLabelModalOpen ||
+                isHeldReceiptsModalOpen ||
+                isAtolSetupOpen
+            ) {
+                return;
+            }
+
+            const target = event.target as HTMLElement | null;
+            const tagName = target?.tagName?.toLowerCase();
+
+            if (
+                tagName === "input" ||
+                tagName === "textarea" ||
+                tagName === "select" ||
+                tagName === "button" ||
+                target?.isContentEditable
+            ) {
+                return;
+            }
+
+            event.preventDefault();
+            searchInputRef.current?.focus();
+        };
+
+        window.addEventListener("keydown", handleIdleEnterFocus);
+
+        return () => {
+            window.removeEventListener("keydown", handleIdleEnterFocus);
+        };
+    }, [
+        fiscalConfirmModal,
+        isAtolSetupOpen,
+        isHeldReceiptsModalOpen,
+        isPriceLabelModalOpen,
+        lastReceipt,
+        markingModalProduct,
+        paymentModal,
+        weightModalProduct,
+    ]);
+
     const createSaleInDb = async (receipt: Receipt): Promise<Receipt> => {
-        const response = await fetch('/api/sales', {
-            method: 'POST',
+        const response = await fetch("/api/sales", {
+            method: "POST",
             headers: {
-                'Content-Type': 'application/json',
+                "Content-Type": "application/json",
                 ...getLocationHeaders(),
             },
             body: JSON.stringify(receipt),
@@ -1076,13 +1306,13 @@ export default function PosPage() {
         const data = await readJsonSafe<Receipt & ApiError>(response);
 
         if (!response.ok) {
-            throw new Error(data?.message || 'Не удалось сохранить чек');
+            throw new Error(data?.message || "Не удалось сохранить чек");
         }
 
         return data || receipt;
     };
 
-    const isTochkaLocation = warehouseLocationSlug === 'tochka';
+    const isTochkaLocation = warehouseLocationSlug === "tochka";
 
     const loadDeliveryAlerts = useCallback(async () => {
         if (!isTochkaLocation) {
@@ -1092,22 +1322,30 @@ export default function PosPage() {
         }
 
         try {
-            const response = await fetch('/api/deliveries/notifications', {
-                method: 'GET',
-                cache: 'no-store',
+            const response = await fetch("/api/deliveries/notifications", {
+                method: "GET",
+                cache: "no-store",
             });
 
-            const data = await response.json().catch(() => null) as { orders?: DeliveryAlertOrder[] } | { message?: string } | null;
+            const data = (await response.json().catch(() => null)) as
+                { orders?: DeliveryAlertOrder[] } | { message?: string } | null;
 
             if (!response.ok) {
-                throw new Error(data && 'message' in data ? data.message || 'Не удалось проверить доставки' : 'Не удалось проверить доставки');
+                throw new Error(
+                    data && "message" in data
+                        ? data.message || "Не удалось проверить доставки"
+                        : "Не удалось проверить доставки",
+                );
             }
 
-            const orders = data && 'orders' in data && Array.isArray(data.orders) ? data.orders : [];
+            const orders =
+                data && "orders" in data && Array.isArray(data.orders)
+                    ? data.orders
+                    : [];
             setDeliveryAlerts(orders);
             setIsDeliveryAlertOpen(orders.length > 0);
         } catch (error) {
-            console.error('Delivery notification check error:', error);
+            console.error("Delivery notification check error:", error);
         }
     }, [isTochkaLocation]);
 
@@ -1137,10 +1375,10 @@ export default function PosPage() {
             void loadDeliveryAlerts();
         };
 
-        window.addEventListener('deliveries-updated', handleDeliveriesUpdated);
+        window.addEventListener("deliveries-updated", handleDeliveriesUpdated);
 
         return () => {
-            window.removeEventListener('deliveries-updated', handleDeliveriesUpdated);
+            window.removeEventListener("deliveries-updated", handleDeliveriesUpdated);
         };
     }, [loadDeliveryAlerts]);
 
@@ -1163,27 +1401,31 @@ export default function PosPage() {
             setIsAcceptingDeliveryId(orderId);
 
             const response = await fetch(`/api/deliveries/${orderId}`, {
-                method: 'PATCH',
+                method: "PATCH",
                 headers: {
-                    'Content-Type': 'application/json',
+                    "Content-Type": "application/json",
                 },
                 body: JSON.stringify({
-                    status: 'accepted',
+                    status: "accepted",
                     changedByName: warehouseUserName,
                 }),
             });
 
-            const data = await response.json().catch(() => null) as { message?: string } | null;
+            const data = (await response.json().catch(() => null)) as {
+                message?: string;
+            } | null;
 
             if (!response.ok) {
-                throw new Error(data?.message || 'Не удалось принять доставку');
+                throw new Error(data?.message || "Не удалось принять доставку");
             }
 
             await loadDeliveryAlerts();
-            window.dispatchEvent(new CustomEvent('deliveries-updated'));
+            window.dispatchEvent(new CustomEvent("deliveries-updated"));
         } catch (error) {
-            console.error('Accept delivery error:', error);
-            alert(error instanceof Error ? error.message : 'Не удалось принять доставку');
+            console.error("Accept delivery error:", error);
+            alert(
+                error instanceof Error ? error.message : "Не удалось принять доставку",
+            );
         } finally {
             setIsAcceptingDeliveryId(null);
         }
@@ -1205,7 +1447,7 @@ export default function PosPage() {
         sessionStorage.removeItem(AUTH_USER_NAME_KEY);
         sessionStorage.removeItem(AUTH_USER_ROLE_KEY);
         document.cookie = `${AUTH_LOCATION_SLUG_KEY}=; path=/; max-age=0; SameSite=Lax`;
-        router.replace('/auth');
+        router.replace("/auth");
     };
 
     const checkFiscalAgent = async () => {
@@ -1214,13 +1456,13 @@ export default function PosPage() {
             setError(null);
             setNotice(null);
 
-            await callFiscalAgent('/health');
+            await callFiscalAgent("/health");
 
-            setNotice('Связь с локальным агентом ККТ есть');
+            setNotice("Связь с локальным агентом ККТ есть");
         } catch (err) {
             console.error(err);
             setNotice(null);
-            setError(err instanceof Error ? err.message : 'Не удалось проверить ККТ');
+            setError(err instanceof Error ? err.message : "Не удалось проверить ККТ");
         } finally {
             setIsShiftActionLoading(false);
         }
@@ -1232,15 +1474,19 @@ export default function PosPage() {
             setError(null);
             setNotice(null);
 
-            await callFiscalAgent('/service/repeat-last-receipt', {
-                method: 'POST',
+            await callFiscalAgent("/service/repeat-last-receipt", {
+                method: "POST",
             });
 
-            setNotice('Копия последнего фискального чека отправлена на ККТ');
+            setNotice("Копия последнего фискального чека отправлена на ККТ");
         } catch (err) {
             console.error(err);
             setNotice(null);
-            setError(err instanceof Error ? err.message : 'Не удалось напечатать копию последнего чека');
+            setError(
+                err instanceof Error
+                    ? err.message
+                    : "Не удалось напечатать копию последнего чека",
+            );
         } finally {
             setIsShiftActionLoading(false);
 
@@ -1256,17 +1502,17 @@ export default function PosPage() {
             setError(null);
             setNotice(null);
 
-            await callFiscalAgent('/service/open-shift', {
-                method: 'POST',
+            await callFiscalAgent("/service/open-shift", {
+                method: "POST",
             });
 
-            setShiftStatus('open');
-            localStorage.setItem(SHIFT_STATUS_KEY, 'open');
-            setNotice('Смена ККТ открыта');
+            setShiftStatus("open");
+            localStorage.setItem(SHIFT_STATUS_KEY, "open");
+            setNotice("Смена ККТ открыта");
         } catch (err) {
             console.error(err);
             setNotice(null);
-            setError(err instanceof Error ? err.message : 'Не удалось открыть смену');
+            setError(err instanceof Error ? err.message : "Не удалось открыть смену");
         } finally {
             setIsShiftActionLoading(false);
 
@@ -1282,17 +1528,17 @@ export default function PosPage() {
             setError(null);
             setNotice(null);
 
-            await callFiscalAgent('/service/close-shift', {
-                method: 'POST',
+            await callFiscalAgent("/service/close-shift", {
+                method: "POST",
             });
 
-            setShiftStatus('closed');
-            localStorage.setItem(SHIFT_STATUS_KEY, 'closed');
-            setNotice('Смена ККТ закрыта');
+            setShiftStatus("closed");
+            localStorage.setItem(SHIFT_STATUS_KEY, "closed");
+            setNotice("Смена ККТ закрыта");
         } catch (err) {
             console.error(err);
             setNotice(null);
-            setError(err instanceof Error ? err.message : 'Не удалось закрыть смену');
+            setError(err instanceof Error ? err.message : "Не удалось закрыть смену");
         } finally {
             setIsShiftActionLoading(false);
 
@@ -1303,66 +1549,74 @@ export default function PosPage() {
     };
 
     const updateLocalStockAfterSale = (items: ReceiptItem[]) => {
-        setAllProducts(prevProducts =>
-            prevProducts.map(product => {
-                const receiptItem = items.find(item =>
-                    String(item.productId) === String(product.id)
+        setAllProducts((prevProducts) =>
+            prevProducts.map((product) => {
+                const receiptItem = items.find(
+                    (item) => String(item.productId) === String(product.id),
                 );
 
                 if (!receiptItem) {
                     return product;
                 }
 
-                const nextStock = roundQuantity(getStock(product) - receiptItem.quantity);
+                const nextStock = roundQuantity(
+                    getStock(product) - receiptItem.quantity,
+                );
 
                 return {
                     ...product,
                     stock: isWeightProduct(product) ? nextStock : Math.max(0, nextStock),
                 };
-            })
+            }),
         );
     };
 
     const openMarkingScanModal = (product: Product) => {
         if (isCheckingMarking) {
-            setError('Дождитесь завершения проверки предыдущей маркировки');
+            setError("Дождитесь завершения проверки предыдущей маркировки");
             return;
         }
 
         const safeProduct = normalizeProduct(product);
 
         setMarkingModalProduct(safeProduct);
-        setMarkingCodeInput('');
+        setMarkingCodeInput("");
         setMarkingCheckResult(null);
+        setMarkingPackageMode("single");
         setError(null);
         setNotice(null);
     };
 
     const getMarkingStatusClassName = (status?: MarkingStatus): string => {
-        if (status === 'M+') {
-            return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+        if (status === "M+") {
+            return "bg-emerald-100 text-emerald-700 border-emerald-200";
         }
 
-        if (status === 'M-') {
-            return 'bg-red-100 text-red-700 border-red-200';
+        if (status === "M-") {
+            return "bg-red-100 text-red-700 border-red-200";
         }
 
-        return 'bg-amber-100 text-amber-700 border-amber-200';
+        return "bg-amber-100 text-amber-700 border-amber-200";
     };
 
-    const addMarkedProductToCheckout = async (product: Product, rawMarkingCode: string) => {
+    const addMarkedProductToCheckout = async (
+        product: Product,
+        rawMarkingCode: string,
+        packageMode: MarkingPackageMode = "single",
+    ) => {
         if (isCheckingMarking) {
-            setError('Дождитесь завершения проверки предыдущей маркировки');
+            setError("Дождитесь завершения проверки предыдущей маркировки");
             return;
         }
 
         const safeProduct = normalizeProduct(product);
         const markingCode = normalizeMarkingCode(rawMarkingCode);
         const stock = getStock(safeProduct);
+        const saleQuantity = packageMode === "block" ? CIGARETTE_BLOCK_QUANTITY : 1;
 
         if (!markingCode) {
             setMarkingCheckResult(null);
-            setError('Отсканируйте DataMatrix маркированного товара');
+            setError("Отсканируйте DataMatrix маркированного товара");
             return;
         }
 
@@ -1370,10 +1624,11 @@ export default function PosPage() {
             setMarkingCheckResult({
                 ok: false,
                 canSell: false,
-                markingStatus: 'M',
-                message: 'DataMatrix выглядит слишком коротким. Проверьте сканирование.',
+                markingStatus: "M",
+                message:
+                    "DataMatrix выглядит слишком коротким. Проверьте сканирование.",
             });
-            setError('DataMatrix выглядит слишком коротким. Проверьте сканирование.');
+            setError("DataMatrix выглядит слишком коротким. Проверьте сканирование.");
             return;
         }
 
@@ -1383,80 +1638,132 @@ export default function PosPage() {
             return;
         }
 
-        const hasSameCode = checkoutItems.some(item =>
-            normalizeMarkingCode(item.markingCode) === markingCode
+        const hasSameCode = checkoutItems.some(
+            (item) => normalizeMarkingCode(item.markingCode) === markingCode,
         );
 
         if (hasSameCode) {
             setMarkingCheckResult({
                 ok: false,
                 canSell: false,
-                markingStatus: 'M-',
-                message: 'Этот DataMatrix уже добавлен в текущий чек',
+                markingStatus: "M-",
+                message: "Этот DataMatrix уже добавлен в текущий чек",
             });
-            setError('Этот DataMatrix уже добавлен в текущий чек');
+            setError("Этот DataMatrix уже добавлен в текущий чек");
             return;
         }
 
         const currentProductQuantity = checkoutItems
-            .filter(item => String(item.product.id) === String(safeProduct.id))
+            .filter((item) => String(item.product.id) === String(safeProduct.id))
             .reduce((sum, item) => sum + item.quantity, 0);
 
-        if (currentProductQuantity + 1 > stock) {
+        if (currentProductQuantity + saleQuantity > stock) {
             setMarkingCheckResult(null);
             setError(
-                `Недостаточно остатка: «${safeProduct.name}». В наличии ${formatQuantity(stock, safeProduct.unit)}`
+                `Недостаточно остатка: «${safeProduct.name}». В наличии ${formatQuantity(stock, safeProduct.unit)}, нужно ${formatQuantity(saleQuantity, safeProduct.unit)}`,
             );
+            return;
+        }
+
+        if (packageMode === "block") {
+            setCheckoutItems((prevItems) => [
+                ...prevItems,
+                {
+                    product: safeProduct,
+                    id: `${safeProduct.id}-block-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                    quantity: saleQuantity,
+                    markingCode,
+                    markingStatus: "M+",
+                    markingMessage: `Блок сигарет: ${CIGARETTE_BLOCK_QUANTITY} пачек. Предварительная проверка Честного ЗНАКа пропущена, контроль пройдёт при фискализации чека.`,
+                    markingCheckedAt: new Date().toISOString(),
+                    markingPackageMode: "block",
+                    markingPackageQuantity: CIGARETTE_BLOCK_QUANTITY,
+                },
+            ]);
+
+            setMarkingModalProduct(null);
+            setMarkingCodeInput("");
+            setMarkingCheckResult(null);
+            setMarkingPackageMode("single");
+            setSearchQuery("");
+            setFoundProducts([]);
+            setError(null);
+            setNotice(
+                `Блок сигарет «${safeProduct.name}» добавлен в чек как ${CIGARETTE_BLOCK_QUANTITY} шт. Чек всё равно будет отправлен на ККТ.`,
+            );
+
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
+
             return;
         }
 
         try {
             setIsCheckingMarking(true);
+            setBackgroundMarkingCheck({
+                productName: safeProduct.name,
+                codePreview: formatMarkingCodePreview(markingCode),
+            });
             setError(null);
-            setNotice('Код маркировки отправлен на проверку. Можно продолжать пробивать обычные товары.');
+            setNotice(
+                "Проверяю код маркировки в фоне. Поле поиска очищено — можно сканировать следующий обычный товар.",
+            );
             setMarkingCheckResult(null);
             setMarkingModalProduct(null);
-            setMarkingCodeInput('');
+            setMarkingCodeInput("");
+            setSearchQuery("");
+            setFoundProducts([]);
 
             requestAnimationFrame(() => {
                 searchInputRef.current?.focus();
             });
 
             const checkResult = await precheckMarkingCode(markingCode);
-            const status = checkResult.markingStatus || 'M';
+            const status = checkResult.markingStatus || "M";
 
             setMarkingCheckResult({
                 ...checkResult,
                 markingStatus: status,
             });
 
-            if (!checkResult.canSell || status !== 'M+') {
-                setError(checkResult.message || `Код маркировки не прошёл проверку: [${status}]`);
+            if (!checkResult.canSell || status !== "M+") {
+                setError(
+                    checkResult.message ||
+                    `Код маркировки не прошёл проверку: [${status}]`,
+                );
                 return;
             }
 
-            const safeMarkingCode = normalizeMarkingCode(checkResult.normalizedMarkingCode || markingCode);
+            const safeMarkingCode = normalizeMarkingCode(
+                checkResult.normalizedMarkingCode || markingCode,
+            );
 
-            setCheckoutItems(prevItems => [
+            setCheckoutItems((prevItems) => [
                 ...prevItems,
                 {
                     product: safeProduct,
                     id: `${safeProduct.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-                    quantity: 1,
+                    quantity: saleQuantity,
                     markingCode: safeMarkingCode,
-                    markingStatus: 'M+',
-                    markingMessage: checkResult.message || 'КМ проверен успешно',
+                    markingStatus: "M+",
+                    markingMessage: checkResult.message || "КМ проверен успешно",
                     markingCheckedAt: new Date().toISOString(),
+                    markingPackageMode: "single",
+                    markingPackageQuantity: 1,
                 },
             ]);
 
             setMarkingModalProduct(null);
-            setMarkingCodeInput('');
+            setMarkingCodeInput("");
             setMarkingCheckResult(null);
-            setSearchQuery('');
+            setMarkingPackageMode("single");
+            setSearchQuery("");
             setFoundProducts([]);
             setError(null);
-            setNotice(`Маркировка проверена [M+]. Товар «${safeProduct.name}» добавлен в чек.`);
+            setNotice(
+                `Маркировка проверена [M+]. Товар «${safeProduct.name}» добавлен в чек.`,
+            );
 
             requestAnimationFrame(() => {
                 searchInputRef.current?.focus();
@@ -1464,19 +1771,21 @@ export default function PosPage() {
         } catch (err) {
             console.error(err);
 
-            const message = err instanceof Error
-                ? err.message
-                : 'Не удалось проверить код маркировки';
+            const message =
+                err instanceof Error
+                    ? err.message
+                    : "Не удалось проверить код маркировки";
 
             setMarkingCheckResult({
                 ok: false,
                 canSell: false,
-                markingStatus: 'M',
+                markingStatus: "M",
                 message,
             });
             setError(message);
         } finally {
             setIsCheckingMarking(false);
+            setBackgroundMarkingCheck(null);
         }
     };
 
@@ -1495,7 +1804,7 @@ export default function PosPage() {
             : Math.floor(quantity);
 
         if (safeQuantity <= 0) {
-            setError('Введите корректное количество товара');
+            setError("Введите корректное количество товара");
             return;
         }
 
@@ -1504,9 +1813,9 @@ export default function PosPage() {
             return;
         }
 
-        setCheckoutItems(prevItems => {
-            const existingItem = prevItems.find(item =>
-                String(item.product.id) === String(safeProduct.id)
+        setCheckoutItems((prevItems) => {
+            const existingItem = prevItems.find(
+                (item) => String(item.product.id) === String(safeProduct.id),
             );
 
             const currentQuantity = existingItem?.quantity || 0;
@@ -1514,7 +1823,7 @@ export default function PosPage() {
 
             if (!allowNegativeStock && nextQuantity > stock) {
                 setError(
-                    `Недостаточно остатка: «${safeProduct.name}». В наличии ${formatQuantity(stock, safeProduct.unit)}`
+                    `Недостаточно остатка: «${safeProduct.name}». В наличии ${formatQuantity(stock, safeProduct.unit)}`,
                 );
                 return prevItems;
             }
@@ -1523,17 +1832,17 @@ export default function PosPage() {
 
             if (allowNegativeStock && nextQuantity > stock) {
                 setNotice(
-                    `Весовой товар «${safeProduct.name}» добавлен с уходом остатка в минус. Это разрешено для погрешности веса.`
+                    `Весовой товар «${safeProduct.name}» добавлен с уходом остатка в минус. Это разрешено для погрешности веса.`,
                 );
             } else {
                 setNotice(null);
             }
 
             if (existingItem) {
-                return prevItems.map(item =>
+                return prevItems.map((item) =>
                     String(item.product.id) === String(safeProduct.id)
                         ? { ...item, quantity: nextQuantity }
-                        : item
+                        : item,
                 );
             }
 
@@ -1547,7 +1856,7 @@ export default function PosPage() {
             ];
         });
 
-        setSearchQuery('');
+        setSearchQuery("");
         setFoundProducts([]);
 
         requestAnimationFrame(() => {
@@ -1565,7 +1874,7 @@ export default function PosPage() {
 
         if (isWeightProduct(safeProduct)) {
             setWeightModalProduct(safeProduct);
-            setWeightQuantity('');
+            setWeightQuantity("");
             setError(null);
             return;
         }
@@ -1574,14 +1883,16 @@ export default function PosPage() {
     };
 
     const changeQuantity = (itemId: string, delta: number) => {
-        setCheckoutItems(prevItems => {
-            return prevItems.map(item => {
+        setCheckoutItems((prevItems) => {
+            return prevItems.map((item) => {
                 if (item.id !== itemId) {
                     return item;
                 }
 
                 if (isMarkedProduct(item.product)) {
-                    setError('Для маркированного товара количество не меняется: один DataMatrix = одна позиция в чеке');
+                    setError(
+                        "Для маркированного товара количество не меняется: один DataMatrix = одна позиция в чеке",
+                    );
                     return item;
                 }
 
@@ -1595,7 +1906,7 @@ export default function PosPage() {
 
                 if (!allowNegativeStock && nextQuantity > stock) {
                     setError(
-                        `Недостаточно остатка: «${item.product.name}». В наличии ${formatQuantity(stock, item.product.unit)}`
+                        `Недостаточно остатка: «${item.product.name}». В наличии ${formatQuantity(stock, item.product.unit)}`,
                     );
                     return item;
                 }
@@ -1604,7 +1915,7 @@ export default function PosPage() {
 
                 if (allowNegativeStock && nextQuantity > stock) {
                     setNotice(
-                        `Весовой товар «${item.product.name}» уходит в минусовой остаток. Это разрешено для погрешности веса.`
+                        `Весовой товар «${item.product.name}» уходит в минусовой остаток. Это разрешено для погрешности веса.`,
                     );
                 }
 
@@ -1619,19 +1930,21 @@ export default function PosPage() {
     const setItemQuantity = (itemId: string, rawValue: string) => {
         const parsed = safeParseNumber(rawValue);
 
-        setCheckoutItems(prevItems => {
-            return prevItems.map(item => {
+        setCheckoutItems((prevItems) => {
+            return prevItems.map((item) => {
                 if (item.id !== itemId) {
                     return item;
                 }
 
                 if (isMarkedProduct(item.product)) {
-                    setError('Для маркированного товара количество не меняется: один DataMatrix = одна позиция в чеке');
+                    setError(
+                        "Для маркированного товара количество не меняется: один DataMatrix = одна позиция в чеке",
+                    );
                     return item;
                 }
 
                 const stock = getStock(item.product);
-                const isWeight = item.product.unit === 'weight';
+                const isWeight = item.product.unit === "weight";
                 const allowNegativeStock = canSellIntoNegativeStock(item.product);
 
                 const nextQuantity = isWeight
@@ -1639,13 +1952,13 @@ export default function PosPage() {
                     : Math.floor(parsed);
 
                 if (nextQuantity <= 0) {
-                    setError('Количество должно быть больше нуля');
+                    setError("Количество должно быть больше нуля");
                     return item;
                 }
 
                 if (!allowNegativeStock && nextQuantity > stock) {
                     setError(
-                        `Недостаточно остатка: «${item.product.name}». В наличии ${formatQuantity(stock, item.product.unit)}`
+                        `Недостаточно остатка: «${item.product.name}». В наличии ${formatQuantity(stock, item.product.unit)}`,
                     );
                     return item;
                 }
@@ -1654,7 +1967,7 @@ export default function PosPage() {
 
                 if (allowNegativeStock && nextQuantity > stock) {
                     setNotice(
-                        `Весовой товар «${item.product.name}» уходит в минусовой остаток. Это разрешено для погрешности веса.`
+                        `Весовой товар «${item.product.name}» уходит в минусовой остаток. Это разрешено для погрешности веса.`,
                     );
                 }
 
@@ -1667,29 +1980,29 @@ export default function PosPage() {
     };
 
     const removeFromCheckout = (itemId: string) => {
-        setCheckoutItems(prev => prev.filter(item => item.id !== itemId));
+        setCheckoutItems((prev) => prev.filter((item) => item.id !== itemId));
     };
 
     const holdCurrentCheckout = () => {
         if (checkoutItems.length === 0) {
-            setError('Нечего откладывать: чек пустой');
+            setError("Нечего откладывать: чек пустой");
             return;
         }
 
         const heldCheckout = holdCheckoutInStore(
             checkoutItems as unknown as StoredCheckoutItem[],
-            total
+            total,
         );
 
         if (!heldCheckout) {
-            setError('Не удалось отложить чек');
+            setError("Не удалось отложить чек");
             return;
         }
 
         setCheckoutItems([]);
         setPaymentModal(null);
         setFiscalConfirmModal(false);
-        setCashReceived('');
+        setCashReceived("");
         setError(null);
         setNotice(`Чек отложен: ${getHeldCheckoutTitle(heldCheckout)}`);
 
@@ -1700,7 +2013,9 @@ export default function PosPage() {
 
     const restoreHeldCheckout = (held: HeldCheckout) => {
         if (checkoutItems.length > 0) {
-            const shouldReplace = confirm('В текущем чеке уже есть товары. Заменить его отложенным чеком?');
+            const shouldReplace = confirm(
+                "В текущем чеке уже есть товары. Заменить его отложенным чеком?",
+            );
 
             if (!shouldReplace) {
                 return;
@@ -1711,7 +2026,7 @@ export default function PosPage() {
 
         if (restoredItems.length === 0) {
             removeHeldCheckout(held.id);
-            setError('Отложенный чек пустой или повреждён, он удалён из списка');
+            setError("Отложенный чек пустой или повреждён, он удалён из списка");
             return;
         }
 
@@ -1719,7 +2034,7 @@ export default function PosPage() {
         setCheckoutItems(restoredItems);
         setPaymentModal(null);
         setFiscalConfirmModal(false);
-        setCashReceived('');
+        setCashReceived("");
         setIsHeldReceiptsModalOpen(false);
         setError(null);
         setNotice(`Отложенный чек восстановлен: ${getHeldCheckoutTitle(held)}`);
@@ -1730,18 +2045,20 @@ export default function PosPage() {
     };
 
     const deleteHeldCheckout = (held: HeldCheckout) => {
-        const shouldDelete = confirm(`Удалить отложенный чек «${getHeldCheckoutTitle(held)}»?`);
+        const shouldDelete = confirm(
+            `Удалить отложенный чек «${getHeldCheckoutTitle(held)}»?`,
+        );
 
         if (!shouldDelete) {
             return;
         }
 
         removeHeldCheckout(held.id);
-        setNotice('Отложенный чек удалён');
+        setNotice("Отложенный чек удалён");
     };
 
     const handleKeyDown = async (e: KeyboardEvent<HTMLInputElement>) => {
-        if (e.key !== 'Enter') {
+        if (e.key !== "Enter") {
             return;
         }
 
@@ -1759,8 +2076,8 @@ export default function PosPage() {
 
             let products = foundProducts;
 
-            const exactFromCurrentResults = products.find(product =>
-                hasExactBarcode(product.barcode, query)
+            const exactFromCurrentResults = products.find((product) =>
+                hasExactBarcode(product.barcode, query),
             );
 
             if (exactFromCurrentResults) {
@@ -1772,8 +2089,8 @@ export default function PosPage() {
 
             setFoundProducts(products);
 
-            const exactBarcodeProduct = products.find(product =>
-                hasExactBarcode(product.barcode, query)
+            const exactBarcodeProduct = products.find((product) =>
+                hasExactBarcode(product.barcode, query),
             );
 
             if (exactBarcodeProduct) {
@@ -1787,14 +2104,14 @@ export default function PosPage() {
             }
 
             if (products.length > 1) {
-                setError('Найдено несколько товаров. Выберите нужный из списка');
+                setError("Найдено несколько товаров. Выберите нужный из списка");
                 return;
             }
 
-            setError('Товар не найден в базе');
+            setError("Товар не найден в базе");
         } catch (err) {
             console.error(err);
-            setError(err instanceof Error ? err.message : 'Ошибка поиска товара');
+            setError(err instanceof Error ? err.message : "Ошибка поиска товара");
         } finally {
             setIsSearchLoading(false);
         }
@@ -1802,60 +2119,65 @@ export default function PosPage() {
 
     const openPayment = (method: PaymentMethod) => {
         if (!isShiftOpen) {
-            setError('Смена ККТ закрыта. Откройте смену перед продажей.');
+            setError("Смена ККТ закрыта. Откройте смену перед продажей.");
             return;
         }
 
         if (checkoutItems.length === 0) {
-            setError('Чек пустой. Добавьте товар перед оплатой');
+            setError("Чек пустой. Добавьте товар перед оплатой");
             return;
         }
 
-        const stockError = checkoutItems.find(item => {
-            return !canSellIntoNegativeStock(item.product) && item.quantity > getStock(item.product);
+        const stockError = checkoutItems.find((item) => {
+            return (
+                !canSellIntoNegativeStock(item.product) &&
+                item.quantity > getStock(item.product)
+            );
         });
 
         if (stockError) {
             setError(
-                `Недостаточно остатка: «${stockError.product.name}». В наличии ${formatQuantity(getStock(stockError.product), stockError.product.unit)}`
+                `Недостаточно остатка: «${stockError.product.name}». В наличии ${formatQuantity(getStock(stockError.product), stockError.product.unit)}`,
             );
             return;
         }
 
-        const unsafeMarkedItem = checkoutItems.find(item =>
-            isMarkedProduct(item.product) && item.markingStatus !== 'M+'
+        const unsafeMarkedItem = checkoutItems.find(
+            (item) => isMarkedProduct(item.product) && item.markingStatus !== "M+",
         );
 
         if (unsafeMarkedItem) {
             setError(
-                `Маркированный товар «${unsafeMarkedItem.product.name}» не прошёл проверку [M+]. Продажа заблокирована.`
+                `Маркированный товар «${unsafeMarkedItem.product.name}» не прошёл проверку [M+]. Продажа заблокирована.`,
             );
             return;
         }
 
         setError(null);
-        setCashReceived('');
+        setCashReceived("");
         setPaymentModal(method);
     };
 
     const buildCommodityReceiptHtml = (receipt: Receipt): string => {
-        const organizationName = 'ORGANIZATION_NAME';
-        const organizationInn = 'ORGANIZATION_INN';
-        const organizationAddress = 'ORGANIZATION_ADDRESS';
-        const organizationPhone = 'ORGANIZATION_PHONE';
-        const createdAt = new Date(receipt.createdAt).toLocaleString('ru-RU');
-        const rows = receipt.items.map(item => {
-            const qty = `${formatQuantity(item.quantity, item.unit || 'piece')}`;
-            const price = formatCurrency(item.price);
-            const sum = formatCurrency(item.total);
+        const organizationName = "ORGANIZATION_NAME";
+        const organizationInn = "ORGANIZATION_INN";
+        const organizationAddress = "ORGANIZATION_ADDRESS";
+        const organizationPhone = "ORGANIZATION_PHONE";
+        const createdAt = new Date(receipt.createdAt).toLocaleString("ru-RU");
+        const rows = receipt.items
+            .map((item) => {
+                const qty = `${formatQuantity(item.quantity, item.unit || "piece")}`;
+                const price = formatCurrency(item.price);
+                const sum = formatCurrency(item.total);
 
-            return `
+                return `
                 <div class="item">
-                    <div class="name">${escapeHtml(String(item.name || 'Товар'))}</div>
+                    <div class="name">${escapeHtml(String(item.name || "Товар"))}</div>
                     <div class="line"><span>${qty} × ${price}</span><strong>${sum}</strong></div>
                 </div>
             `;
-        }).join('');
+            })
+            .join("");
 
         return `
             <!doctype html>
@@ -1901,7 +2223,7 @@ export default function PosPage() {
                     ${rows}
                     <div class="sep"></div>
                     <div class="total"><span>ИТОГО</span><span>${formatCurrency(receipt.total)}</span></div>
-                    ${receipt.paymentMethod === 'cash' ? `<div class="line"><span>Получено</span><span>${formatCurrency(receipt.receivedAmount || 0)}</span></div><div class="line"><span>Сдача</span><span>${formatCurrency(receipt.change || 0)}</span></div>` : ''}
+                    ${receipt.paymentMethod === "cash" ? `<div class="line"><span>Получено</span><span>${formatCurrency(receipt.receivedAmount || 0)}</span></div><div class="line"><span>Сдача</span><span>${formatCurrency(receipt.change || 0)}</span></div>` : ""}
                     <div class="sep"></div>
                     <div class="center">Спасибо за покупку!</div>
                 </div>
@@ -1917,10 +2239,10 @@ export default function PosPage() {
     };
 
     const printCommodityReceipt = (receipt: Receipt) => {
-        const printWindow = window.open('', '_blank', 'width=420,height=720');
+        const printWindow = window.open("", "_blank", "width=420,height=720");
 
         if (!printWindow) {
-            setError('Браузер заблокировал окно печати товарного чека');
+            setError("Браузер заблокировал окно печати товарного чека");
             return;
         }
 
@@ -1929,18 +2251,21 @@ export default function PosPage() {
         printWindow.document.close();
     };
 
-    const completePayment = async (method: PaymentMethod, shouldFiscalize = false) => {
+    const completePayment = async (
+        method: PaymentMethod,
+        shouldFiscalize = false,
+    ) => {
         if (isPaying) {
             return;
         }
 
         if (!isShiftOpen) {
-            setError('Смена ККТ закрыта. Откройте смену перед продажей.');
+            setError("Смена ККТ закрыта. Откройте смену перед продажей.");
             return;
         }
 
-        if (method === 'cash' && cashReceivedNumber < total) {
-            setError('Полученная сумма меньше суммы чека');
+        if (method === "cash" && cashReceivedNumber < total) {
+            setError("Полученная сумма меньше суммы чека");
             return;
         }
 
@@ -1951,9 +2276,9 @@ export default function PosPage() {
 
             const freshProducts = await refreshProducts();
 
-            const validatedItems = checkoutItems.map(item => {
-                const freshProduct = freshProducts.find(product =>
-                    String(product.id) === String(item.product.id)
+            const validatedItems = checkoutItems.map((item) => {
+                const freshProduct = freshProducts.find(
+                    (product) => String(product.id) === String(item.product.id),
                 );
 
                 if (!freshProduct) {
@@ -1965,7 +2290,7 @@ export default function PosPage() {
 
                 if (!allowNegativeStock && freshStock < item.quantity) {
                     throw new Error(
-                        `Недостаточно остатка: «${freshProduct.name}». В наличии ${formatQuantity(freshStock, freshProduct.unit)}, в чеке ${formatQuantity(item.quantity, freshProduct.unit)}`
+                        `Недостаточно остатка: «${freshProduct.name}». В наличии ${formatQuantity(freshStock, freshProduct.unit)}, в чеке ${formatQuantity(item.quantity, freshProduct.unit)}`,
                     );
                 }
 
@@ -1975,23 +2300,29 @@ export default function PosPage() {
                 };
             });
 
-            const missingMarkedItem = validatedItems.find(item =>
-                isMarkedProduct(item.product) && !normalizeMarkingCode(item.markingCode)
+            const missingMarkedItem = validatedItems.find(
+                (item) =>
+                    isMarkedProduct(item.product) &&
+                    !normalizeMarkingCode(item.markingCode),
             );
 
             if (missingMarkedItem) {
-                throw new Error(`Для маркированного товара «${missingMarkedItem.product.name}» не отсканирован DataMatrix`);
+                throw new Error(
+                    `Для маркированного товара «${missingMarkedItem.product.name}» не отсканирован DataMatrix`,
+                );
             }
 
-            const unsafeMarkedItem = validatedItems.find(item =>
-                isMarkedProduct(item.product) && item.markingStatus !== 'M+'
+            const unsafeMarkedItem = validatedItems.find(
+                (item) => isMarkedProduct(item.product) && item.markingStatus !== "M+",
             );
 
             if (unsafeMarkedItem) {
-                throw new Error(`Маркированный товар «${unsafeMarkedItem.product.name}» не прошёл проверку [M+]. Продажа заблокирована.`);
+                throw new Error(
+                    `Маркированный товар «${unsafeMarkedItem.product.name}» не прошёл проверку [M+]. Продажа заблокирована.`,
+                );
             }
 
-            const receiptItems: ReceiptItem[] = validatedItems.map(item => {
+            const receiptItems: ReceiptItem[] = validatedItems.map((item) => {
                 const price = getSellingPrice(item.product);
                 const marked = isMarkedProduct(item.product);
                 const markingCode = normalizeMarkingCode(item.markingCode);
@@ -2008,17 +2339,28 @@ export default function PosPage() {
                     price,
                     total: price * item.quantity,
                     marked,
-                    ...(marked && markingCode ? {
-                        markingCode,
-                        markingStatus: item.markingStatus,
-                        markingMessage: item.markingMessage,
-                    } : {}),
+                    ...(marked && markingCode
+                        ? {
+                            markingCode,
+                            markingStatus: item.markingStatus,
+                            markingMessage: item.markingMessage,
+                            markingPackageMode: item.markingPackageMode,
+                            markingPackageQuantity: item.markingPackageQuantity,
+                        }
+                        : {}),
                 };
             });
 
-            const receiptTotal = receiptItems.reduce((sum, item) => sum + item.total, 0);
-            const hasMarkedReceiptItems = receiptItems.some(item => item.marked && item.markingCode);
-            const shouldRunFiscalization = hasMarkedReceiptItems || ((method === 'card' || method === 'cash') && shouldFiscalize);
+            const receiptTotal = receiptItems.reduce(
+                (sum, item) => sum + item.total,
+                0,
+            );
+            const hasMarkedReceiptItems = receiptItems.some(
+                (item) => item.marked && item.markingCode,
+            );
+            const shouldRunFiscalization =
+                hasMarkedReceiptItems ||
+                ((method === "card" || method === "cash") && shouldFiscalize);
 
             const receipt: Receipt = {
                 id: createReceiptId(),
@@ -2027,10 +2369,10 @@ export default function PosPage() {
                 paymentLabel: getPaymentLabel(method),
                 items: receiptItems,
                 total: receiptTotal,
-                receivedAmount: method === 'cash' ? cashReceivedNumber : receiptTotal,
-                change: method === 'cash' ? cashReceivedNumber - receiptTotal : 0,
+                receivedAmount: method === "cash" ? cashReceivedNumber : receiptTotal,
+                change: method === "cash" ? cashReceivedNumber - receiptTotal : 0,
                 fiscalizationRequested: shouldRunFiscalization,
-                fiscalStatus: shouldRunFiscalization ? undefined : 'skipped',
+                fiscalStatus: shouldRunFiscalization ? undefined : "skipped",
                 cashierName: warehouseUserName,
                 cashierLogin: warehouseUserLogin,
                 locationName: warehouseLocationName,
@@ -2044,7 +2386,7 @@ export default function PosPage() {
 
                 receiptForSave = {
                     ...receipt,
-                    fiscalStatus: 'success',
+                    fiscalStatus: "success",
                     fiscalUuid: fiscal.uuid,
                     fiscalParams: fiscal.fiscalParams,
                     fiscalRaw: fiscal.raw,
@@ -2069,15 +2411,15 @@ export default function PosPage() {
             setCheckoutItems([]);
             setPaymentModal(null);
             setFiscalConfirmModal(false);
-            setCashReceived('');
+            setCashReceived("");
             setLastReceipt(savedReceipt);
 
             requestAnimationFrame(() => {
-                searchInputRef.current?.focus();
+                newSaleButtonRef.current?.focus();
             });
         } catch (err) {
             console.error(err);
-            setError(err instanceof Error ? err.message : 'Ошибка оплаты');
+            setError(err instanceof Error ? err.message : "Ошибка оплаты");
         } finally {
             setIsPaying(false);
         }
@@ -2101,11 +2443,11 @@ export default function PosPage() {
             await refreshProducts();
 
             setIsPriceLabelModalOpen(true);
-            setPriceLabelSearch('');
-            setPriceLabelCategoryFilter('all');
+            setPriceLabelSearch("");
+            setPriceLabelCategoryFilter("all");
         } catch (err) {
             console.error(err);
-            setError('Не удалось обновить товары для печати ценников');
+            setError("Не удалось обновить товары для печати ценников");
         } finally {
             setIsRefreshingLabels(false);
         }
@@ -2114,9 +2456,9 @@ export default function PosPage() {
     const togglePriceLabelProduct = (productId: ProductId) => {
         const id = String(productId);
 
-        setSelectedPriceLabelIds(prev => {
+        setSelectedPriceLabelIds((prev) => {
             if (prev.includes(id)) {
-                return prev.filter(item => item !== id);
+                return prev.filter((item) => item !== id);
             }
 
             return [...prev, id];
@@ -2124,7 +2466,9 @@ export default function PosPage() {
     };
 
     const selectAllFilteredPriceLabels = () => {
-        setSelectedPriceLabelIds(priceLabelProducts.map(product => String(product.id)));
+        setSelectedPriceLabelIds(
+            priceLabelProducts.map((product) => String(product.id)),
+        );
     };
 
     const clearSelectedPriceLabels = () => {
@@ -2136,12 +2480,12 @@ export default function PosPage() {
         const parsedQuantity = Math.floor(safeParseNumber(rawValue));
         const safeQuantity = Math.min(999, Math.max(1, parsedQuantity || 1));
 
-        setPriceLabelQuantities(prev => ({
+        setPriceLabelQuantities((prev) => ({
             ...prev,
             [id]: safeQuantity,
         }));
 
-        setSelectedPriceLabelIds(prev => {
+        setSelectedPriceLabelIds((prev) => {
             if (prev.includes(id)) {
                 return prev;
             }
@@ -2151,7 +2495,7 @@ export default function PosPage() {
     };
 
     const expandProductsForPriceLabels = (products: Product[]): Product[] => {
-        return products.flatMap(product => {
+        return products.flatMap((product) => {
             const quantity = getPriceLabelQuantity(product.id);
 
             return Array.from({ length: quantity }, () => product);
@@ -2159,17 +2503,17 @@ export default function PosPage() {
     };
 
     const renderBarcodeSvgFromDbValue = (barcodeFromDb: string): string => {
-        const barcode = getPrimaryBarcode(String(barcodeFromDb || '')).trim();
+        const barcode = getPrimaryBarcode(String(barcodeFromDb || "")).trim();
 
         if (!barcode) {
-            return '';
+            return "";
         }
 
         try {
-            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 
             JsBarcode(svg, barcode, {
-                format: 'CODE128',
+                format: "CODE128",
                 width: 0.85,
                 height: 22,
                 displayValue: false,
@@ -2179,7 +2523,7 @@ export default function PosPage() {
             return new XMLSerializer().serializeToString(svg);
         } catch (err) {
             console.error(err);
-            return '';
+            return "";
         }
     };
 
@@ -2199,19 +2543,25 @@ export default function PosPage() {
         const formatPriceForLabel = (value: number): string => {
             const rounded = Math.ceil(value);
 
-            return new Intl.NumberFormat('ru-RU', {
+            return new Intl.NumberFormat("ru-RU", {
                 maximumFractionDigits: 0,
             }).format(rounded);
         };
 
-        const sheets = chunkProducts(products, LABELS_PER_SHEET).map(sheetProducts => {
-            const labels = sheetProducts.map(product => {
-                const name = escapeHtml(product.name);
-                const price = formatPriceForLabel(getSellingPrice(product));
-                const unitLabel = escapeHtml(product.unit === 'weight' ? 'за кг' : 'за шт');
-                const barcodeSvg = renderBarcodeSvgFromDbValue(product.barcode || '');
+        const sheets = chunkProducts(products, LABELS_PER_SHEET)
+            .map((sheetProducts) => {
+                const labels = sheetProducts
+                    .map((product) => {
+                        const name = escapeHtml(product.name);
+                        const price = formatPriceForLabel(getSellingPrice(product));
+                        const unitLabel = escapeHtml(
+                            product.unit === "weight" ? "за кг" : "за шт",
+                        );
+                        const barcodeSvg = renderBarcodeSvgFromDbValue(
+                            product.barcode || "",
+                        );
 
-                return `
+                        return `
                     <section class="label">
                         <div class="label-name">${name}</div>
 
@@ -2225,14 +2575,16 @@ export default function PosPage() {
                         </div>
                     </section>
                 `;
-            }).join('');
+                    })
+                    .join("");
 
-            return `
+                return `
                 <main class="sheet">
                     ${labels}
                 </main>
             `;
-        }).join('');
+            })
+            .join("");
 
         return `
             <!doctype html>
@@ -2393,18 +2745,21 @@ export default function PosPage() {
         const formatPriceForLabel = (value: number): string => {
             const rounded = Math.ceil(value);
 
-            return new Intl.NumberFormat('ru-RU', {
+            return new Intl.NumberFormat("ru-RU", {
                 maximumFractionDigits: 0,
             }).format(rounded);
         };
 
-        const labels = products.map(product => {
-            const name = escapeHtml(product.name);
-            const price = formatPriceForLabel(getSellingPrice(product));
-            const unitLabel = escapeHtml(product.unit === 'weight' ? 'за кг' : 'за шт');
-            const barcodeSvg = renderBarcodeSvgFromDbValue(product.barcode || '');
+        const labels = products
+            .map((product) => {
+                const name = escapeHtml(product.name);
+                const price = formatPriceForLabel(getSellingPrice(product));
+                const unitLabel = escapeHtml(
+                    product.unit === "weight" ? "за кг" : "за шт",
+                );
+                const barcodeSvg = renderBarcodeSvgFromDbValue(product.barcode || "");
 
-            return `
+                return `
                 <section class="label-page">
                     <div class="label">
                         <div class="label-name">${name}</div>
@@ -2420,7 +2775,8 @@ export default function PosPage() {
                     </div>
                 </section>
             `;
-        }).join('');
+            })
+            .join("");
 
         return `
             <!doctype html>
@@ -2574,11 +2930,18 @@ export default function PosPage() {
         `;
     };
 
-    const printPriceLabels = async (mode: PrintMode, layout: PrintLayout = 'a4') => {
-        const printWindow = window.open('', '_blank', layout === 'thermal' ? 'width=420,height=650' : 'width=900,height=700');
+    const printPriceLabels = async (
+        mode: PrintMode,
+        layout: PrintLayout = "a4",
+    ) => {
+        const printWindow = window.open(
+            "",
+            "_blank",
+            layout === "thermal" ? "width=420,height=650" : "width=900,height=700",
+        );
 
         if (!printWindow) {
-            setError('Браузер заблокировал окно печати. Разрешите всплывающие окна.');
+            setError("Браузер заблокировал окно печати. Разрешите всплывающие окна.");
             return;
         }
 
@@ -2587,7 +2950,7 @@ export default function PosPage() {
             setError(null);
             setNotice(null);
 
-            const isThermalPrint = layout === 'thermal';
+            const isThermalPrint = layout === "thermal";
 
             printWindow.document.open();
             printWindow.document.write(`
@@ -2595,10 +2958,10 @@ export default function PosPage() {
                 <html lang="ru">
                     <head>
                         <meta charset="utf-8" />
-                        <title>${isThermalPrint ? 'Подготовка термоэтикеток' : 'Подготовка ценников'}</title>
+                        <title>${isThermalPrint ? "Подготовка термоэтикеток" : "Подготовка ценников"}</title>
                     </head>
                     <body style="font-family: Arial, sans-serif; padding: 24px;">
-                        <h2>${isThermalPrint ? 'Подготовка термоэтикеток...' : 'Подготовка ценников...'}</h2>
+                        <h2>${isThermalPrint ? "Подготовка термоэтикеток..." : "Подготовка ценников..."}</h2>
                         <p>Пожалуйста, подождите.</p>
                     </body>
                 </html>
@@ -2606,19 +2969,21 @@ export default function PosPage() {
             printWindow.document.close();
 
             const freshProducts = await refreshProducts();
-            const freshFilteredProducts = freshProducts.filter(product => {
+            const freshFilteredProducts = freshProducts.filter((product) => {
                 return (
-                    doesProductMatchPriceLabelCategory(product, priceLabelCategoryFilter) &&
-                    doesProductMatchPriceLabelSearch(product, priceLabelSearch)
+                    doesProductMatchPriceLabelCategory(
+                        product,
+                        priceLabelCategoryFilter,
+                    ) && doesProductMatchPriceLabelSearch(product, priceLabelSearch)
                 );
             });
 
             const baseProducts =
-                mode === 'selected'
-                    ? freshProducts.filter(product =>
-                        selectedPriceLabelIds.includes(String(product.id))
+                mode === "selected"
+                    ? freshProducts.filter((product) =>
+                        selectedPriceLabelIds.includes(String(product.id)),
                     )
-                    : mode === 'filtered'
+                    : mode === "filtered"
                         ? freshFilteredProducts
                         : freshProducts;
 
@@ -2626,7 +2991,7 @@ export default function PosPage() {
 
             if (products.length === 0) {
                 printWindow.close();
-                setError('Нет товаров для печати ценников');
+                setError("Нет товаров для печати ценников");
                 return;
             }
 
@@ -2634,15 +2999,17 @@ export default function PosPage() {
             printWindow.document.write(
                 isThermalPrint
                     ? buildThermalPriceLabelsHtml(products)
-                    : buildA4PriceLabelsHtml(products)
+                    : buildA4PriceLabelsHtml(products),
             );
             printWindow.document.close();
 
-            setNotice(`${isThermalPrint ? 'Термоэтикетки XPrinter' : 'Ценники A4'} отправлены на печать: ${products.length}. Товаров: ${baseProducts.length}`);
+            setNotice(
+                `${isThermalPrint ? "Термоэтикетки XPrinter" : "Ценники A4"} отправлены на печать: ${products.length}. Товаров: ${baseProducts.length}`,
+            );
         } catch (err) {
             console.error(err);
             printWindow.close();
-            setError('Не удалось сформировать ценники');
+            setError("Не удалось сформировать ценники");
         } finally {
             setIsRefreshingLabels(false);
         }
@@ -2658,6 +3025,41 @@ export default function PosPage() {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
+            {isCheckingMarking && backgroundMarkingCheck && (
+                <div
+                    className="pointer-events-none fixed inset-x-0 top-4 z-[430] flex justify-center px-4"
+                    role="status"
+                    aria-live="polite"
+                >
+                    <div className="pointer-events-auto w-full max-w-2xl rounded-3xl border border-purple-200 bg-white p-4 shadow-2xl ring-4 ring-purple-100">
+                        <div className="flex items-center gap-4">
+                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-purple-50">
+                                <div className="h-7 w-7 animate-spin rounded-full border-4 border-purple-200 border-t-purple-600" />
+                            </div>
+
+                            <div className="min-w-0 flex-1">
+                                <div className="text-xs font-black uppercase tracking-[0.14em] text-purple-700">
+                                    Проверка Честного ЗНАКа
+                                </div>
+
+                                <div className="mt-1 truncate text-base font-extrabold text-gray-900">
+                                    В фоне проверяется: {backgroundMarkingCheck.productName}
+                                </div>
+
+                                <div className="mt-1 text-sm font-semibold text-purple-700">
+                                    Поле поиска очищено. Можно сканировать следующий обычный
+                                    товар.
+                                </div>
+                            </div>
+
+                            <div className="hidden max-w-[180px] shrink-0 rounded-2xl bg-purple-50 px-3 py-2 text-right text-xs font-bold text-purple-700 sm:block">
+                                КМ: {backgroundMarkingCheck.codePreview}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {isDeliveryAlertOpen && deliveryAlerts.length > 0 && (
                 <div className="fixed inset-0 z-[400] flex items-start justify-center bg-black/25 px-4 py-4 pointer-events-none">
                     <div className="mt-4 w-full max-w-xl rounded-3xl border border-blue-200 bg-white p-5 shadow-2xl pointer-events-auto">
@@ -2686,12 +3088,16 @@ export default function PosPage() {
                         </div>
 
                         <div className="mt-4 space-y-3">
-                            {deliveryAlerts.map(order => (
-                                <div key={order.id} className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+                            {deliveryAlerts.map((order) => (
+                                <div
+                                    key={order.id}
+                                    className="rounded-2xl border border-blue-100 bg-blue-50 p-4"
+                                >
                                     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                                         <div className="min-w-0">
                                             <div className="font-bold text-blue-800">
-                                                {order.orderNumber} · {formatDeliveryAlertMoney(order.total)}
+                                                {order.orderNumber} ·{" "}
+                                                {formatDeliveryAlertMoney(order.total)}
                                             </div>
 
                                             <div className="mt-1 text-sm font-semibold text-gray-900">
@@ -2713,7 +3119,9 @@ export default function PosPage() {
                                             disabled={isAcceptingDeliveryId === order.id}
                                             className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                                         >
-                                            {isAcceptingDeliveryId === order.id ? 'Принимаю...' : 'Принята доставка'}
+                                            {isAcceptingDeliveryId === order.id
+                                                ? "Принимаю..."
+                                                : "Принята доставка"}
                                         </button>
                                     </div>
                                 </div>
@@ -2726,7 +3134,7 @@ export default function PosPage() {
                 <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <button
                         type="button"
-                        onClick={() => router.push('/system')}
+                        onClick={() => router.push("/system")}
                         className="inline-flex items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-white px-5 py-3 text-sm font-bold text-indigo-700 shadow-sm transition-colors hover:bg-indigo-50"
                     >
                         <span aria-hidden="true">←</span>
@@ -2739,7 +3147,8 @@ export default function PosPage() {
                         </h1>
 
                         <div className="mt-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-bold text-indigo-700 shadow-sm">
-                            Текущая зона: {warehouseLocationName} · {warehouseLocationSlug} · Кассир: {warehouseUserName}
+                            Текущая зона: {warehouseLocationName} · {warehouseLocationSlug} ·
+                            Кассир: {warehouseUserName}
                         </div>
                     </div>
 
@@ -2751,13 +3160,15 @@ export default function PosPage() {
                         <div className="flex flex-wrap items-center gap-3">
                             <span className="text-sm text-gray-500">Смена ККТ:</span>
 
-                            <span className={`rounded-full px-3 py-1 text-sm font-semibold ${
-                                isShiftOpen
-                                    ? 'bg-emerald-100 text-emerald-700'
-                                    : 'bg-red-100 text-red-700'
-                            }`}>
-                                {isShiftOpen ? 'Открыта' : 'Закрыта'}
-                            </span>
+                            <span
+                                className={`rounded-full px-3 py-1 text-sm font-semibold ${
+                                    isShiftOpen
+                                        ? "bg-emerald-100 text-emerald-700"
+                                        : "bg-red-100 text-red-700"
+                                }`}
+                            >
+                {isShiftOpen ? "Открыта" : "Закрыта"}
+              </span>
                         </div>
 
                         <div className="flex flex-wrap gap-2">
@@ -2808,7 +3219,9 @@ export default function PosPage() {
                     </div>
 
                     <div className="mt-3 text-xs text-gray-500">
-                        Продажа доступна только при открытой смене. Обычный чек по карте фискализируется после подтверждения кассира; маркированные товары всегда отправляются на ККТ.
+                        Продажа доступна только при открытой смене. Обычный чек по карте
+                        фискализируется после подтверждения кассира; маркированные товары
+                        всегда отправляются на ККТ.
                     </div>
 
                     <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2818,7 +3231,8 @@ export default function PosPage() {
                             </div>
 
                             <div className="mt-1 text-xs leading-5 text-indigo-700">
-                                Открывай только при настройке рабочего места кассира: агент 127.0.0.1:3108, драйвер АТОЛ 10.10.8 и файлы загрузки.
+                                Открывай только при настройке рабочего места кассира: агент
+                                127.0.0.1:3108, драйвер АТОЛ 10.10.8 и файлы загрузки.
                             </div>
                         </div>
 
@@ -2867,7 +3281,7 @@ export default function PosPage() {
                                     <button
                                         type="button"
                                         onClick={() => {
-                                            setSearchQuery('');
+                                            setSearchQuery("");
                                             setFoundProducts([]);
                                             setError(null);
                                         }}
@@ -2882,8 +3296,9 @@ export default function PosPage() {
                         <div className="flex items-center gap-2 text-sm text-gray-500">
                             <AiOutlineSearch />
                             <span>
-                                Enter добавляет товар. Для весового товара откроется окно ввода веса.
-                            </span>
+                Enter добавляет товар. Для весового товара откроется окно ввода
+                веса.
+              </span>
                         </div>
 
                         {isSearchLoading && (
@@ -2901,7 +3316,9 @@ export default function PosPage() {
                                     className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
                                 >
                                     <AiOutlinePrinter size={20} />
-                                    {isRefreshingLabels ? 'Обновляю цены...' : 'Печать ценников / термоэтикеток 58×40'}
+                                    {isRefreshingLabels
+                                        ? "Обновляю цены..."
+                                        : "Печать ценников / термоэтикеток 58×40"}
                                 </button>
 
                                 <button
@@ -2914,7 +3331,8 @@ export default function PosPage() {
                             </div>
 
                             <div className="text-xs text-gray-500">
-                                Цены и штрихкоды для печати берутся из актуальной базы товаров. Текущий чек сохраняется после обновления страницы.
+                                Цены и штрихкоды для печати берутся из актуальной базы товаров.
+                                Текущий чек сохраняется после обновления страницы.
                             </div>
                         </div>
                     </div>
@@ -2936,7 +3354,7 @@ export default function PosPage() {
                         {foundProducts.length > 0 && searchQuery && (
                             <motion.div
                                 initial={{ opacity: 0, height: 0 }}
-                                animate={{ opacity: 1, height: 'auto' }}
+                                animate={{ opacity: 1, height: "auto" }}
                                 exit={{ opacity: 0, height: 0 }}
                                 className="overflow-hidden border-t border-gray-200"
                             >
@@ -2954,10 +3372,10 @@ export default function PosPage() {
                                                 whileHover={{ scale: isBlockedByStock ? 1 : 1.01 }}
                                                 className={`flex justify-between items-center p-3 rounded-lg shadow-sm transition-shadow ${
                                                     isBlockedByStock
-                                                        ? 'bg-red-50 cursor-not-allowed opacity-70'
+                                                        ? "bg-red-50 cursor-not-allowed opacity-70"
                                                         : canSellNegative && isEmpty
-                                                            ? 'bg-amber-50 hover:shadow-md cursor-pointer'
-                                                            : 'bg-white hover:shadow-md cursor-pointer'
+                                                            ? "bg-amber-50 hover:shadow-md cursor-pointer"
+                                                            : "bg-white hover:shadow-md cursor-pointer"
                                                 }`}
                                                 onClick={() => {
                                                     if (!isBlockedByStock) {
@@ -2971,8 +3389,10 @@ export default function PosPage() {
                                                     </div>
 
                                                     <div className="text-sm text-gray-500 truncate">
-                                                        {product.category || 'Без категории'}
-                                                        {product.barcode ? ` · ШК: ${getBarcodeDisplay(product.barcode)}` : ''}
+                                                        {product.category || "Без категории"}
+                                                        {product.barcode
+                                                            ? ` · ШК: ${getBarcodeDisplay(product.barcode)}`
+                                                            : ""}
                                                     </div>
 
                                                     {marked && (
@@ -2981,15 +3401,19 @@ export default function PosPage() {
                                                         </div>
                                                     )}
 
-                                                    <div className={`text-sm ${
-                                                        isEmpty && !canSellNegative
-                                                            ? 'text-red-600'
-                                                            : canSellNegative && isEmpty
-                                                                ? 'text-amber-700'
-                                                                : 'text-green-600'
-                                                    }`}>
+                                                    <div
+                                                        className={`text-sm ${
+                                                            isEmpty && !canSellNegative
+                                                                ? "text-red-600"
+                                                                : canSellNegative && isEmpty
+                                                                    ? "text-amber-700"
+                                                                    : "text-green-600"
+                                                        }`}
+                                                    >
                                                         Остаток: {formatQuantity(stock, product.unit)}
-                                                        {canSellNegative && isEmpty ? ' · можно продать в минус' : ''}
+                                                        {canSellNegative && isEmpty
+                                                            ? " · можно продать в минус"
+                                                            : ""}
                                                     </div>
                                                 </div>
 
@@ -3042,13 +3466,27 @@ export default function PosPage() {
                                                 </div>
 
                                                 <div className="text-sm text-gray-500">
-                                                    {formatCurrency(getSellingPrice(item.product))} × {formatQuantity(item.quantity, item.product.unit)}
+                                                    {formatCurrency(getSellingPrice(item.product))} ×{" "}
+                                                    {formatQuantity(item.quantity, item.product.unit)}
                                                 </div>
 
                                                 {marked && (
-                                                    <div className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold ${getMarkingStatusClassName(item.markingStatus)}`}>
-                                                        [{item.markingStatus || 'M'}] {item.markingStatus === 'M+' ? 'Маркировка проверена' : 'Маркировка не подтверждена'}
-                                                        {item.markingCode ? ` · КМ: ${formatMarkingCodePreview(item.markingCode)}` : ' · DataMatrix не задан'}
+                                                    <div
+                                                        className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold ${getMarkingStatusClassName(item.markingStatus)}`}
+                                                    >
+                                                        [{item.markingStatus || "M"}]{" "}
+                                                        {item.markingStatus === "M+"
+                                                            ? "Маркировка проверена"
+                                                            : "Маркировка не подтверждена"}
+                                                        {item.markingCode
+                                                            ? ` · КМ: ${formatMarkingCodePreview(item.markingCode)}`
+                                                            : " · DataMatrix не задан"}
+                                                    </div>
+                                                )}
+
+                                                {marked && item.markingMessage && (
+                                                    <div className="mt-1 text-xs text-gray-500">
+                                                        {item.markingMessage}
                                                     </div>
                                                 )}
 
@@ -3059,7 +3497,8 @@ export default function PosPage() {
                                                 )}
 
                                                 <div className="text-sm text-gray-500">
-                                                    Остаток в БД: {formatQuantity(stock, item.product.unit)}
+                                                    Остаток в БД:{" "}
+                                                    {formatQuantity(stock, item.product.unit)}
                                                 </div>
                                             </div>
 
@@ -3067,15 +3506,17 @@ export default function PosPage() {
                                                 <div className="flex items-center space-x-1">
                                                     {marked ? (
                                                         <span className="rounded-lg bg-purple-50 px-3 py-1 text-sm font-bold text-purple-700">
-                                                            1 шт.
-                                                        </span>
-                                                    ) : item.product.unit === 'weight' ? (
+                              {formatQuantity(item.quantity, item.product.unit)}
+                            </span>
+                                                    ) : item.product.unit === "weight" ? (
                                                         <input
                                                             type="number"
                                                             min="0.001"
                                                             step="0.001"
                                                             value={item.quantity}
-                                                            onChange={(e) => setItemQuantity(item.id, e.target.value)}
+                                                            onChange={(e) =>
+                                                                setItemQuantity(item.id, e.target.value)
+                                                            }
                                                             className="w-24 rounded-lg border border-gray-300 px-2 py-1 text-center outline-none focus:ring-2 focus:ring-indigo-500"
                                                         />
                                                     ) : (
@@ -3090,8 +3531,8 @@ export default function PosPage() {
                                                             </button>
 
                                                             <span className="font-medium w-8 text-center">
-                                                                {item.quantity}
-                                                            </span>
+                                {item.quantity}
+                              </span>
 
                                                             <button
                                                                 type="button"
@@ -3106,7 +3547,9 @@ export default function PosPage() {
                                                 </div>
 
                                                 <div className="font-bold text-lg min-w-[120px] text-right">
-                                                    {formatCurrency(getSellingPrice(item.product) * item.quantity)}
+                                                    {formatCurrency(
+                                                        getSellingPrice(item.product) * item.quantity,
+                                                    )}
                                                 </div>
 
                                                 <button
@@ -3124,9 +3567,7 @@ export default function PosPage() {
 
                             <div className="mt-6 pt-6 border-t border-gray-200">
                                 <div className="flex justify-between items-center">
-                                    <div className="text-lg text-gray-600">
-                                        Итого к оплате:
-                                    </div>
+                                    <div className="text-lg text-gray-600">Итого к оплате:</div>
 
                                     <div className="text-3xl font-bold text-indigo-700">
                                         {formatCurrency(total)}
@@ -3135,7 +3576,8 @@ export default function PosPage() {
 
                                 {hasUnsafeMarkedCheckoutItems && (
                                     <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
-                                        В чеке есть маркированный товар без подтверждения [M+]. Оплата заблокирована.
+                                        В чеке есть маркированный товар без подтверждения [M+].
+                                        Оплата заблокирована.
                                     </div>
                                 )}
 
@@ -3161,7 +3603,7 @@ export default function PosPage() {
 
                                     <button
                                         type="button"
-                                        onClick={() => openPayment('cash')}
+                                        onClick={() => openPayment("cash")}
                                         disabled={hasUnsafeMarkedCheckoutItems}
                                         className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                     >
@@ -3170,7 +3612,7 @@ export default function PosPage() {
 
                                     <button
                                         type="button"
-                                        onClick={() => openPayment('transfer')}
+                                        onClick={() => openPayment("transfer")}
                                         disabled={hasUnsafeMarkedCheckoutItems}
                                         className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                     >
@@ -3179,7 +3621,7 @@ export default function PosPage() {
 
                                     <button
                                         type="button"
-                                        onClick={() => openPayment('card')}
+                                        onClick={() => openPayment("card")}
                                         disabled={hasUnsafeMarkedCheckoutItems}
                                         className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                     >
@@ -3192,9 +3634,7 @@ export default function PosPage() {
 
                     {checkoutItems.length === 0 && !searchQuery && (
                         <div className="p-8 text-center text-gray-400">
-                            <p className="mb-2">
-                                В чеке пусто
-                            </p>
+                            <p className="mb-2">В чеке пусто</p>
 
                             <p className="text-sm">
                                 Сканируйте штрихкод или найдите товар по названию
@@ -3204,9 +3644,7 @@ export default function PosPage() {
                 </div>
 
                 {isLoading && (
-                    <div className="text-center text-gray-500">
-                        Загрузка товаров...
-                    </div>
+                    <div className="text-center text-gray-500">Загрузка товаров...</div>
                 )}
             </div>
 
@@ -3217,8 +3655,9 @@ export default function PosPage() {
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
                         onClick={() => {
                             setMarkingModalProduct(null);
-                            setMarkingCodeInput('');
+                            setMarkingCodeInput("");
                             setMarkingCheckResult(null);
+                            setMarkingPackageMode("single");
                         }}
                     >
                         <motion.div
@@ -3237,9 +3676,60 @@ export default function PosPage() {
                             </div>
 
                             <div className="mb-5 rounded-xl border border-purple-100 bg-purple-50 p-4 text-sm text-purple-800">
-                                Этот товар отмечен как маркированный. Для продажи отсканируйте DataMatrix с упаковки.
-                                Один DataMatrix добавляется в чек отдельной позицией с количеством 1 шт.
+                                Этот товар отмечен как маркированный. Для продажи отсканируйте
+                                DataMatrix с упаковки. Для пачки используйте обычный режим, для
+                                блока сигарет выберите режим “Блок 10 шт.”.
                             </div>
+
+                            <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                <button
+                                    type="button"
+                                    disabled={isCheckingMarking}
+                                    onClick={() => {
+                                        setMarkingPackageMode("single");
+                                        setMarkingCheckResult(null);
+                                        setError(null);
+                                    }}
+                                    className={`rounded-xl border px-4 py-3 text-left transition ${
+                                        markingPackageMode === "single"
+                                            ? "border-purple-500 bg-purple-50 text-purple-800 ring-2 ring-purple-100"
+                                            : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                                    } disabled:opacity-60`}
+                                >
+                                    <div className="font-bold">Пачка</div>
+                                    <div className="mt-1 text-xs">
+                                        1 шт. · обычная проверка [M+]
+                                    </div>
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={isCheckingMarking}
+                                    onClick={() => {
+                                        setMarkingPackageMode("block");
+                                        setMarkingCheckResult(null);
+                                        setError(null);
+                                    }}
+                                    className={`rounded-xl border px-4 py-3 text-left transition ${
+                                        markingPackageMode === "block"
+                                            ? "border-amber-500 bg-amber-50 text-amber-800 ring-2 ring-amber-100"
+                                            : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                                    } disabled:opacity-60`}
+                                >
+                                    <div className="font-bold">Блок сигарет</div>
+                                    <div className="mt-1 text-xs">
+                                        10 шт. · без предварительной проверки ЧЗ
+                                    </div>
+                                </button>
+                            </div>
+
+                            {markingPackageMode === "block" && (
+                                <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
+                                    Режим блока нужен для продажи целого блока сигарет. В чек
+                                    добавится {CIGARETTE_BLOCK_QUANTITY} шт. товара с одним
+                                    DataMatrix блока. Чек всё равно будет отправлен на ККТ.
+                                </div>
+                            )}
 
                             <label className="mb-2 block text-sm font-medium text-gray-700">
                                 DataMatrix / КМ
@@ -3255,9 +3745,13 @@ export default function PosPage() {
                                     setError(null);
                                 }}
                                 onKeyDown={(e) => {
-                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                    if (e.key === "Enter" && !e.shiftKey) {
                                         e.preventDefault();
-                                        void addMarkedProductToCheckout(markingModalProduct, markingCodeInput);
+                                        void addMarkedProductToCheckout(
+                                            markingModalProduct,
+                                            markingCodeInput,
+                                            markingPackageMode,
+                                        );
                                     }
                                 }}
                                 placeholder="Отсканируйте код маркировки..."
@@ -3271,34 +3765,40 @@ export default function PosPage() {
                             )}
 
                             {markingCheckResult && (
-                                <div className={`mb-4 rounded-xl border px-4 py-3 text-sm font-semibold ${getMarkingStatusClassName(markingCheckResult.markingStatus)}`}>
+                                <div
+                                    className={`mb-4 rounded-xl border px-4 py-3 text-sm font-semibold ${getMarkingStatusClassName(markingCheckResult.markingStatus)}`}
+                                >
                                     <div className="text-lg">
-                                        [{markingCheckResult.markingStatus || 'M'}]
+                                        [{markingCheckResult.markingStatus || "M"}]
                                     </div>
 
                                     <div>
-                                        {markingCheckResult.message || 'Результат проверки маркировки получен'}
+                                        {markingCheckResult.message ||
+                                            "Результат проверки маркировки получен"}
                                     </div>
 
-                                    {markingCheckResult.markingStatus !== 'M+' && (
+                                    {markingCheckResult.markingStatus !== "M+" && (
                                         <div className="mt-2 text-xs font-medium">
-                                            Продажа этого товара заблокирована. Нужен только результат [M+].
+                                            Продажа этого товара заблокирована. Нужен только результат
+                                            [M+].
                                         </div>
                                     )}
                                 </div>
                             )}
 
                             <div className="mb-6 rounded-xl bg-gray-50 p-4">
-                                <div className="text-sm text-gray-500">
-                                    Цена:
-                                </div>
+                                <div className="text-sm text-gray-500">Цена:</div>
 
                                 <div className="text-3xl font-bold text-gray-800">
                                     {formatCurrency(getSellingPrice(markingModalProduct))}
                                 </div>
 
                                 <div className="mt-2 text-sm text-gray-500">
-                                    Остаток: {formatQuantity(getStock(markingModalProduct), markingModalProduct.unit)}
+                                    Остаток:{" "}
+                                    {formatQuantity(
+                                        getStock(markingModalProduct),
+                                        markingModalProduct.unit,
+                                    )}
                                 </div>
                             </div>
 
@@ -3307,8 +3807,9 @@ export default function PosPage() {
                                     type="button"
                                     onClick={() => {
                                         setMarkingModalProduct(null);
-                                        setMarkingCodeInput('');
+                                        setMarkingCodeInput("");
                                         setMarkingCheckResult(null);
+                                        setMarkingPackageMode("single");
                                     }}
                                     className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50"
                                 >
@@ -3318,10 +3819,20 @@ export default function PosPage() {
                                 <button
                                     type="button"
                                     disabled={isCheckingMarking}
-                                    onClick={() => void addMarkedProductToCheckout(markingModalProduct, markingCodeInput)}
+                                    onClick={() =>
+                                        void addMarkedProductToCheckout(
+                                            markingModalProduct,
+                                            markingCodeInput,
+                                            markingPackageMode,
+                                        )
+                                    }
                                     className="px-5 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
                                 >
-                                    {isCheckingMarking ? 'Проверяю...' : 'Проверить [M+] и добавить'}
+                                    {isCheckingMarking
+                                        ? "Проверяю..."
+                                        : markingPackageMode === "block"
+                                            ? `Добавить блок ${CIGARETTE_BLOCK_QUANTITY} шт.`
+                                            : "Проверить [M+] и добавить"}
                                 </button>
                             </div>
                         </motion.div>
@@ -3334,7 +3845,7 @@ export default function PosPage() {
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
                         onClick={() => {
                             setWeightModalProduct(null);
-                            setWeightQuantity('');
+                            setWeightQuantity("");
                         }}
                     >
                         <motion.div
@@ -3353,20 +3864,20 @@ export default function PosPage() {
                             </div>
 
                             <div className="mb-5 rounded-xl bg-indigo-50 p-4">
-                                <div className="text-sm text-indigo-700">
-                                    Цена за 1 кг:
-                                </div>
+                                <div className="text-sm text-indigo-700">Цена за 1 кг:</div>
 
                                 <div className="text-3xl font-bold text-indigo-700">
                                     {formatCurrency(getSellingPrice(weightModalProduct))}
                                 </div>
 
                                 <div className="mt-2 text-sm text-indigo-700">
-                                    Остаток: {formatQuantity(getStock(weightModalProduct), 'weight')}
+                                    Остаток:{" "}
+                                    {formatQuantity(getStock(weightModalProduct), "weight")}
                                 </div>
 
                                 <div className="mt-2 rounded-lg bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-800">
-                                    Для весового товара разрешён минусовой остаток из-за погрешности веса.
+                                    Для весового товара разрешён минусовой остаток из-за
+                                    погрешности веса.
                                 </div>
                             </div>
 
@@ -3386,32 +3897,33 @@ export default function PosPage() {
                                     setError(null);
                                 }}
                                 onKeyDown={(e) => {
-                                    if (e.key !== 'Enter') {
+                                    if (e.key !== "Enter") {
                                         return;
                                     }
 
                                     const quantity = safeParseNumber(weightQuantity);
 
                                     if (quantity <= 0) {
-                                        setError('Введите корректный вес');
+                                        setError("Введите корректный вес");
                                         return;
                                     }
 
                                     addQuantityToCheckout(weightModalProduct, quantity);
                                     setWeightModalProduct(null);
-                                    setWeightQuantity('');
+                                    setWeightQuantity("");
                                 }}
                                 placeholder="Например 0.350"
                                 className="mb-5 w-full rounded-xl border border-gray-300 px-4 py-3 text-2xl font-bold outline-none focus:border-transparent focus:ring-2 focus:ring-indigo-500"
                             />
 
                             <div className="mb-6 rounded-xl bg-gray-50 p-4">
-                                <div className="text-sm text-gray-500">
-                                    Сумма:
-                                </div>
+                                <div className="text-sm text-gray-500">Сумма:</div>
 
                                 <div className="text-3xl font-bold text-gray-800">
-                                    {formatCurrency(getSellingPrice(weightModalProduct) * safeParseNumber(weightQuantity))}
+                                    {formatCurrency(
+                                        getSellingPrice(weightModalProduct) *
+                                        safeParseNumber(weightQuantity),
+                                    )}
                                 </div>
                             </div>
 
@@ -3420,7 +3932,7 @@ export default function PosPage() {
                                     type="button"
                                     onClick={() => {
                                         setWeightModalProduct(null);
-                                        setWeightQuantity('');
+                                        setWeightQuantity("");
                                     }}
                                     className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50"
                                 >
@@ -3433,13 +3945,13 @@ export default function PosPage() {
                                         const quantity = safeParseNumber(weightQuantity);
 
                                         if (quantity <= 0) {
-                                            setError('Введите корректный вес');
+                                            setError("Введите корректный вес");
                                             return;
                                         }
 
                                         addQuantityToCheckout(weightModalProduct, quantity);
                                         setWeightModalProduct(null);
-                                        setWeightQuantity('');
+                                        setWeightQuantity("");
                                     }}
                                     className="px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
                                 >
@@ -3471,7 +3983,9 @@ export default function PosPage() {
                                         </h2>
 
                                         <p className="text-sm text-gray-500 mt-1">
-                                            Выберите товары, укажите количество ценников и печатайте на лист A4 или на XPrinter в одну колонку без принудительного A4.
+                                            Выберите товары, укажите количество ценников и печатайте
+                                            на лист A4 или на XPrinter в одну колонку без
+                                            принудительного A4.
                                         </p>
                                     </div>
 
@@ -3495,11 +4009,13 @@ export default function PosPage() {
 
                                     <select
                                         value={priceLabelCategoryFilter}
-                                        onChange={(e) => setPriceLabelCategoryFilter(e.target.value)}
+                                        onChange={(e) =>
+                                            setPriceLabelCategoryFilter(e.target.value)
+                                        }
                                         className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500"
                                     >
                                         <option value="all">Все категории</option>
-                                        {priceLabelCategories.map(category => (
+                                        {priceLabelCategories.map((category) => (
                                             <option key={category} value={category}>
                                                 {category}
                                             </option>
@@ -3516,10 +4032,10 @@ export default function PosPage() {
 
                                                 await refreshProducts();
 
-                                                setNotice('Цены для ценников обновлены');
+                                                setNotice("Цены для ценников обновлены");
                                             } catch (err) {
                                                 console.error(err);
-                                                setError('Не удалось обновить цены');
+                                                setError("Не удалось обновить цены");
                                             } finally {
                                                 setIsRefreshingLabels(false);
                                             }
@@ -3527,7 +4043,7 @@ export default function PosPage() {
                                         disabled={isRefreshingLabels}
                                         className="rounded-xl border border-gray-300 px-4 py-3 hover:bg-gray-50 disabled:opacity-50"
                                     >
-                                        {isRefreshingLabels ? 'Обновляю...' : 'Обновить цены'}
+                                        {isRefreshingLabels ? "Обновляю..." : "Обновить цены"}
                                     </button>
 
                                     <button
@@ -3562,8 +4078,10 @@ export default function PosPage() {
                                     </thead>
 
                                     <tbody>
-                                    {priceLabelProducts.map(product => {
-                                        const selected = selectedPriceLabelIds.includes(String(product.id));
+                                    {priceLabelProducts.map((product) => {
+                                        const selected = selectedPriceLabelIds.includes(
+                                            String(product.id),
+                                        );
 
                                         return (
                                             <tr
@@ -3574,7 +4092,9 @@ export default function PosPage() {
                                                     <input
                                                         type="checkbox"
                                                         checked={selected}
-                                                        onChange={() => togglePriceLabelProduct(product.id)}
+                                                        onChange={() =>
+                                                            togglePriceLabelProduct(product.id)
+                                                        }
                                                         className="h-4 w-4"
                                                     />
                                                 </td>
@@ -3585,20 +4105,23 @@ export default function PosPage() {
                                                     </div>
 
                                                     <div className="text-xs text-gray-500">
-                                                        {product.category || 'Без категории'}
+                                                        {product.category || "Без категории"}
                                                     </div>
                                                 </td>
 
                                                 <td className="p-3 font-mono text-xs text-gray-500">
-                                                    {product.barcode ? getBarcodeDisplay(product.barcode) : 'Штрихкод не задан'}
+                                                    {product.barcode
+                                                        ? getBarcodeDisplay(product.barcode)
+                                                        : "Штрихкод не задан"}
                                                 </td>
 
                                                 <td className="p-3">
-                                                    {product.unit === 'weight' ? 'кг' : 'шт.'}
+                                                    {product.unit === "weight" ? "кг" : "шт."}
                                                 </td>
 
                                                 <td className="p-3 text-right font-bold text-indigo-700">
-                                                    {Math.ceil(getSellingPrice(product))} ₽ {getUnitPriceLabel(product)}
+                                                    {Math.ceil(getSellingPrice(product))} ₽{" "}
+                                                    {getUnitPriceLabel(product)}
                                                 </td>
 
                                                 <td className="p-3 text-center">
@@ -3608,7 +4131,12 @@ export default function PosPage() {
                                                         max="999"
                                                         step="1"
                                                         value={getPriceLabelQuantity(product.id)}
-                                                        onChange={(e) => updatePriceLabelQuantity(product.id, e.target.value)}
+                                                        onChange={(e) =>
+                                                            updatePriceLabelQuantity(
+                                                                product.id,
+                                                                e.target.value,
+                                                            )
+                                                        }
                                                         className="w-24 rounded-lg border border-gray-300 px-3 py-2 text-center font-bold outline-none focus:ring-2 focus:ring-indigo-500"
                                                     />
                                                 </td>
@@ -3627,25 +4155,40 @@ export default function PosPage() {
 
                             <div className="flex-none border-t border-gray-100 bg-slate-50 p-5">
                                 <div className="mb-4 flex flex-wrap gap-2 text-sm text-gray-600">
-                                    <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
-                                        Выбрано товаров: <span className="font-bold text-gray-900">{selectedPriceLabelIds.length}</span>
-                                    </span>
+                  <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
+                    Выбрано товаров:{" "}
+                      <span className="font-bold text-gray-900">
+                      {selectedPriceLabelIds.length}
+                    </span>
+                  </span>
 
                                     <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
-                                        Ценников выбранных: <span className="font-bold text-gray-900">{selectedPriceLabelPrintCount}</span>
-                                    </span>
+                    Ценников выбранных:{" "}
+                                        <span className="font-bold text-gray-900">
+                      {selectedPriceLabelPrintCount}
+                    </span>
+                  </span>
 
                                     <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
-                                        Найдено товаров: <span className="font-bold text-gray-900">{priceLabelProducts.length}</span>
-                                    </span>
+                    Найдено товаров:{" "}
+                                        <span className="font-bold text-gray-900">
+                      {priceLabelProducts.length}
+                    </span>
+                  </span>
 
                                     <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
-                                        Ценников найденных: <span className="font-bold text-gray-900">{filteredPriceLabelPrintCount}</span>
-                                    </span>
+                    Ценников найденных:{" "}
+                                        <span className="font-bold text-gray-900">
+                      {filteredPriceLabelPrintCount}
+                    </span>
+                  </span>
 
                                     <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5">
-                                        Всего в базе: <span className="font-bold text-gray-900">{allProducts.length}</span>
-                                    </span>
+                    Всего в базе:{" "}
+                                        <span className="font-bold text-gray-900">
+                      {allProducts.length}
+                    </span>
+                  </span>
                                 </div>
 
                                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -3656,12 +4199,11 @@ export default function PosPage() {
                                             </div>
 
                                             <div>
-                                                <div className="font-bold text-gray-900">
-                                                    Лист A4
-                                                </div>
+                                                <div className="font-bold text-gray-900">Лист A4</div>
 
                                                 <div className="text-xs text-gray-500">
-                                                    Обычная печать на лист: 58×40 мм, сетка в несколько колонок.
+                                                    Обычная печать на лист: 58×40 мм, сетка в несколько
+                                                    колонок.
                                                 </div>
                                             </div>
                                         </div>
@@ -3669,8 +4211,11 @@ export default function PosPage() {
                                         <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
                                             <button
                                                 type="button"
-                                                onClick={() => printPriceLabels('selected', 'a4')}
-                                                disabled={isRefreshingLabels || selectedPriceLabelIds.length === 0}
+                                                onClick={() => printPriceLabels("selected", "a4")}
+                                                disabled={
+                                                    isRefreshingLabels ||
+                                                    selectedPriceLabelIds.length === 0
+                                                }
                                                 className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
                                             >
                                                 Выбранные
@@ -3678,8 +4223,10 @@ export default function PosPage() {
 
                                             <button
                                                 type="button"
-                                                onClick={() => printPriceLabels('filtered', 'a4')}
-                                                disabled={isRefreshingLabels || priceLabelProducts.length === 0}
+                                                onClick={() => printPriceLabels("filtered", "a4")}
+                                                disabled={
+                                                    isRefreshingLabels || priceLabelProducts.length === 0
+                                                }
                                                 className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                                             >
                                                 Найденные
@@ -3687,8 +4234,10 @@ export default function PosPage() {
 
                                             <button
                                                 type="button"
-                                                onClick={() => printPriceLabels('all', 'a4')}
-                                                disabled={isRefreshingLabels || allProducts.length === 0}
+                                                onClick={() => printPriceLabels("all", "a4")}
+                                                disabled={
+                                                    isRefreshingLabels || allProducts.length === 0
+                                                }
                                                 className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                                             >
                                                 Вся база
@@ -3708,7 +4257,8 @@ export default function PosPage() {
                                                 </div>
 
                                                 <div className="text-xs text-gray-500">
-                                                    Термоэтикетки: одна этикетка 58×40 мм на одну страницу, без A4.
+                                                    Термоэтикетки: одна этикетка 58×40 мм на одну
+                                                    страницу, без A4.
                                                 </div>
                                             </div>
                                         </div>
@@ -3716,8 +4266,11 @@ export default function PosPage() {
                                         <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
                                             <button
                                                 type="button"
-                                                onClick={() => printPriceLabels('selected', 'thermal')}
-                                                disabled={isRefreshingLabels || selectedPriceLabelIds.length === 0}
+                                                onClick={() => printPriceLabels("selected", "thermal")}
+                                                disabled={
+                                                    isRefreshingLabels ||
+                                                    selectedPriceLabelIds.length === 0
+                                                }
                                                 className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                                             >
                                                 Выбранные
@@ -3725,8 +4278,10 @@ export default function PosPage() {
 
                                             <button
                                                 type="button"
-                                                onClick={() => printPriceLabels('filtered', 'thermal')}
-                                                disabled={isRefreshingLabels || priceLabelProducts.length === 0}
+                                                onClick={() => printPriceLabels("filtered", "thermal")}
+                                                disabled={
+                                                    isRefreshingLabels || priceLabelProducts.length === 0
+                                                }
                                                 className="rounded-xl bg-teal-600 px-4 py-3 text-sm font-semibold text-white hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
                                             >
                                                 Найденные
@@ -3734,8 +4289,10 @@ export default function PosPage() {
 
                                             <button
                                                 type="button"
-                                                onClick={() => printPriceLabels('all', 'thermal')}
-                                                disabled={isRefreshingLabels || allProducts.length === 0}
+                                                onClick={() => printPriceLabels("all", "thermal")}
+                                                disabled={
+                                                    isRefreshingLabels || allProducts.length === 0
+                                                }
                                                 className="rounded-xl bg-slate-700 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                                             >
                                                 Вся база
@@ -3769,7 +4326,8 @@ export default function PosPage() {
                                         </h2>
 
                                         <p className="mt-1 text-sm text-gray-500">
-                                            Чеки хранятся только в локальном состоянии кассы и не попадают в БД до оплаты.
+                                            Чеки хранятся только в локальном состоянии кассы и не
+                                            попадают в БД до оплаты.
                                         </p>
                                     </div>
 
@@ -3790,11 +4348,20 @@ export default function PosPage() {
                                     </div>
                                 ) : (
                                     <div className="space-y-3">
-                                        {heldCheckouts.map(held => {
+                                        {heldCheckouts.map((held) => {
                                             const title = getHeldCheckoutTitle(held);
-                                            const heldTotal = held.total || held.items.reduce((sum, item) => {
-                                                return sum + safeParseNumber(item.product?.sellingPrice ?? item.product?.selling_price) * safeParseNumber(item.quantity);
-                                            }, 0);
+                                            const heldTotal =
+                                                held.total ||
+                                                held.items.reduce((sum, item) => {
+                                                    return (
+                                                        sum +
+                                                        safeParseNumber(
+                                                            item.product?.sellingPrice ??
+                                                            item.product?.selling_price,
+                                                        ) *
+                                                        safeParseNumber(item.quantity)
+                                                    );
+                                                }, 0);
 
                                             return (
                                                 <div
@@ -3808,14 +4375,27 @@ export default function PosPage() {
                                                             </div>
 
                                                             <div className="mt-1 text-xs text-gray-500">
-                                                                Создан: {new Date(held.createdAt).toLocaleString('ru-RU')} · Позиций: {held.items.length}
+                                                                Создан:{" "}
+                                                                {new Date(held.createdAt).toLocaleString(
+                                                                    "ru-RU",
+                                                                )}{" "}
+                                                                · Позиций: {held.items.length}
                                                             </div>
 
                                                             <div className="mt-2 space-y-1 text-sm text-gray-600">
                                                                 {held.items.slice(0, 3).map((item, index) => (
-                                                                    <div key={`${held.id}-${index}`} className="truncate">
-                                                                        {item.product?.name || 'Товар'} × {formatQuantity(safeParseNumber(item.quantity), item.product?.unit)}
-                                                                        {item.markingStatus ? ` · [${item.markingStatus}]` : ''}
+                                                                    <div
+                                                                        key={`${held.id}-${index}`}
+                                                                        className="truncate"
+                                                                    >
+                                                                        {item.product?.name || "Товар"} ×{" "}
+                                                                        {formatQuantity(
+                                                                            safeParseNumber(item.quantity),
+                                                                            item.product?.unit,
+                                                                        )}
+                                                                        {item.markingStatus
+                                                                            ? ` · [${item.markingStatus}]`
+                                                                            : ""}
                                                                     </div>
                                                                 ))}
 
@@ -3861,7 +4441,7 @@ export default function PosPage() {
                     </div>
                 )}
 
-                {paymentModal === 'card' && (
+                {paymentModal === "card" && (
                     <div
                         key="payment-card-modal"
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
@@ -3876,9 +4456,7 @@ export default function PosPage() {
                                 Оплата картой
                             </h2>
 
-                            <p className="text-gray-600 mb-2">
-                                Введите на терминале сумму:
-                            </p>
+                            <p className="text-gray-600 mb-2">Введите на терминале сумму:</p>
 
                             <div className="text-4xl font-bold text-indigo-700 mb-6">
                                 {formatCurrency(total)}
@@ -3888,7 +4466,8 @@ export default function PosPage() {
                                 После успешной оплаты на терминале нажмите «Оплата прошла».
                                 {hasMarkedCheckoutItems && (
                                     <div className="mt-2 font-semibold">
-                                        В чеке есть маркированный товар — он обязательно будет пробит на ККТ.
+                                        В чеке есть маркированный товар — он обязательно будет
+                                        пробит на ККТ.
                                     </div>
                                 )}
                             </div>
@@ -3909,14 +4488,14 @@ export default function PosPage() {
                                     onClick={() => setFiscalConfirmModal(true)}
                                     className="px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
                                 >
-                                    {isPaying ? 'Провожу оплату...' : 'Оплата прошла'}
+                                    {isPaying ? "Провожу оплату..." : "Оплата прошла"}
                                 </button>
                             </div>
                         </motion.div>
                     </div>
                 )}
 
-                {paymentModal === 'cash' && (
+                {paymentModal === "cash" && (
                     <div
                         key="payment-cash-modal"
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
@@ -3997,7 +4576,7 @@ export default function PosPage() {
                                     type="button"
                                     disabled={isPaying}
                                     onClick={() => {
-                                        setCashReceived('');
+                                        setCashReceived("");
                                         setError(null);
                                     }}
                                     className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
@@ -4006,17 +4585,19 @@ export default function PosPage() {
                                 </button>
                             </div>
 
-                            <div className={`mb-6 rounded-xl p-4 ${
-                                cashReceived && change >= 0
-                                    ? 'bg-blue-50 text-blue-700'
-                                    : 'bg-gray-50 text-gray-500'
-                            }`}>
-                                <div className="text-sm">
-                                    Сдача:
-                                </div>
+                            <div
+                                className={`mb-6 rounded-xl p-4 ${
+                                    cashReceived && change >= 0
+                                        ? "bg-blue-50 text-blue-700"
+                                        : "bg-gray-50 text-gray-500"
+                                }`}
+                            >
+                                <div className="text-sm">Сдача:</div>
 
                                 <div className="text-3xl font-bold">
-                                    {cashReceived ? formatCurrency(Math.max(0, change)) : formatCurrency(0)}
+                                    {cashReceived
+                                        ? formatCurrency(Math.max(0, change))
+                                        : formatCurrency(0)}
                                 </div>
 
                                 {cashReceived && change < 0 && (
@@ -4032,7 +4613,7 @@ export default function PosPage() {
                                     disabled={isPaying}
                                     onClick={() => {
                                         setPaymentModal(null);
-                                        setCashReceived('');
+                                        setCashReceived("");
                                         setError(null);
                                     }}
                                     className="rounded-lg border border-gray-300 px-5 py-2 hover:bg-gray-50 disabled:opacity-50"
@@ -4046,14 +4627,14 @@ export default function PosPage() {
                                     onClick={() => setFiscalConfirmModal(true)}
                                     className="rounded-lg bg-emerald-600 px-5 py-2 text-white hover:bg-emerald-700 disabled:opacity-50"
                                 >
-                                    {isPaying ? 'Провожу оплату...' : 'Оплата получена'}
+                                    {isPaying ? "Провожу оплату..." : "Оплата получена"}
                                 </button>
                             </div>
                         </motion.div>
                     </div>
                 )}
 
-                {paymentModal === 'transfer' && (
+                {paymentModal === "transfer" && (
                     <div
                         key="payment-transfer-modal"
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
@@ -4069,9 +4650,7 @@ export default function PosPage() {
                             </h2>
 
                             <div className="mb-4">
-                                <div className="text-gray-600 mb-1">
-                                    Сумма к переводу:
-                                </div>
+                                <div className="text-gray-600 mb-1">Сумма к переводу:</div>
 
                                 <div className="text-3xl font-bold text-blue-700">
                                     {formatCurrency(total)}
@@ -4079,7 +4658,8 @@ export default function PosPage() {
                             </div>
 
                             <div className="rounded-xl bg-blue-50 p-4 text-sm text-blue-700 mb-6">
-                                Перед подтверждением обязательно убедитесь, что перевод поступил или показан клиентом как выполненный.
+                                Перед подтверждением обязательно убедитесь, что перевод поступил
+                                или показан клиентом как выполненный.
                                 {hasMarkedCheckoutItems && (
                                     <div className="mt-2 font-semibold">
                                         В чеке есть маркированный товар — чек будет пробит на ККТ.
@@ -4100,100 +4680,116 @@ export default function PosPage() {
                                 <button
                                     type="button"
                                     disabled={isPaying}
-                                    onClick={() => completePayment('transfer', false)}
+                                    onClick={() => completePayment("transfer", false)}
                                     className="px-5 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
                                 >
-                                    {isPaying ? 'Провожу оплату...' : 'Перевод выполнен'}
+                                    {isPaying ? "Провожу оплату..." : "Перевод выполнен"}
                                 </button>
                             </div>
                         </motion.div>
                     </div>
                 )}
 
-                {fiscalConfirmModal && (paymentModal === 'card' || paymentModal === 'cash') && (
-                    <div
-                        key="fiscal-confirm-modal"
-                        className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-4"
-                    >
-                        <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
-                            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+                {fiscalConfirmModal &&
+                    (paymentModal === "card" || paymentModal === "cash") && (
+                        <div
+                            key="fiscal-confirm-modal"
+                            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-4"
                         >
-                            <h2 className="text-2xl font-bold text-gray-800 mb-4">
-                                Фискализировать чек?
-                            </h2>
+                            <motion.div
+                                initial={{ opacity: 0, scale: 0.96 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                exit={{ opacity: 0, scale: 0.96 }}
+                                className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+                            >
+                                <h2 className="text-2xl font-bold text-gray-800 mb-4">
+                                    Фискализировать чек?
+                                </h2>
 
-                            <div className="mb-4">
-                                <div className="text-gray-600 mb-1">
-                                    Сумма оплаты {paymentModal === 'cash' ? 'наличными' : 'картой'}:
-                                </div>
-
-                                <div className={paymentModal === 'cash' ? 'text-3xl font-bold text-emerald-700' : 'text-3xl font-bold text-indigo-700'}>
-                                    {formatCurrency(total)}
-                                </div>
-
-                                {paymentModal === 'cash' && (
-                                    <div className="mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                                        <div className="flex justify-between">
-                                            <span>Получено:</span>
-                                            <span className="font-bold">{formatCurrency(cashReceivedNumber)}</span>
-                                        </div>
-
-                                        <div className="mt-1 flex justify-between">
-                                            <span>Сдача:</span>
-                                            <span className="font-bold">{formatCurrency(Math.max(0, change))}</span>
-                                        </div>
+                                <div className="mb-4">
+                                    <div className="text-gray-600 mb-1">
+                                        Сумма оплаты{" "}
+                                        {paymentModal === "cash" ? "наличными" : "картой"}:
                                     </div>
-                                )}
-                            </div>
 
-                            <div className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800 mb-6">
-                                Фискализация будет отправлена на локальную ККТ АТОЛ.
-                                {hasMarkedCheckoutItems
-                                    ? ' В чеке есть маркированный товар, поэтому сохранить продажу без ККТ нельзя.'
-                                    : ' Если чек пробивать не нужно, продажа сохранится без отправки в ККТ.'}
-                            </div>
-
-                            <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
-                                <button
-                                    type="button"
-                                    disabled={isPaying || hasMarkedCheckoutItems}
-                                    onClick={() => {
-                                        if (!paymentModal) {
-                                            return;
+                                    <div
+                                        className={
+                                            paymentModal === "cash"
+                                                ? "text-3xl font-bold text-emerald-700"
+                                                : "text-3xl font-bold text-indigo-700"
                                         }
+                                    >
+                                        {formatCurrency(total)}
+                                    </div>
 
-                                        setFiscalConfirmModal(false);
-                                        completePayment(paymentModal, false);
-                                    }}
-                                    className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
-                                >
-                                    {hasMarkedCheckoutItems ? 'Без ККТ нельзя для маркировки' : 'Нет, сохранить без ККТ'}
-                                </button>
+                                    {paymentModal === "cash" && (
+                                        <div className="mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                                            <div className="flex justify-between">
+                                                <span>Получено:</span>
+                                                <span className="font-bold">
+                          {formatCurrency(cashReceivedNumber)}
+                        </span>
+                                            </div>
 
-                                <button
-                                    type="button"
-                                    disabled={isPaying || !isShiftOpen}
-                                    onClick={() => {
-                                        if (!paymentModal) {
-                                            return;
+                                            <div className="mt-1 flex justify-between">
+                                                <span>Сдача:</span>
+                                                <span className="font-bold">
+                          {formatCurrency(Math.max(0, change))}
+                        </span>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800 mb-6">
+                                    Фискализация будет отправлена на локальную ККТ АТОЛ.
+                                    {hasMarkedCheckoutItems
+                                        ? " В чеке есть маркированный товар, поэтому сохранить продажу без ККТ нельзя."
+                                        : " Если чек пробивать не нужно, продажа сохранится без отправки в ККТ."}
+                                </div>
+
+                                <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+                                    <button
+                                        type="button"
+                                        disabled={isPaying || hasMarkedCheckoutItems}
+                                        onClick={() => {
+                                            if (!paymentModal) {
+                                                return;
+                                            }
+
+                                            setFiscalConfirmModal(false);
+                                            completePayment(paymentModal, false);
+                                        }}
+                                        className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+                                    >
+                                        {hasMarkedCheckoutItems
+                                            ? "Без ККТ нельзя для маркировки"
+                                            : "Нет, сохранить без ККТ"}
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        disabled={isPaying || !isShiftOpen}
+                                        onClick={() => {
+                                            if (!paymentModal) {
+                                                return;
+                                            }
+
+                                            setFiscalConfirmModal(false);
+                                            completePayment(paymentModal, true);
+                                        }}
+                                        className={
+                                            paymentModal === "cash"
+                                                ? "px-5 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                                : "px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
                                         }
-
-                                        setFiscalConfirmModal(false);
-                                        completePayment(paymentModal, true);
-                                    }}
-                                    className={paymentModal === 'cash'
-                                        ? 'px-5 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50'
-                                        : 'px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50'}
-                                >
-                                    {isPaying ? 'Фискализирую...' : 'Да, пробить на ККТ'}
-                                </button>
-                            </div>
-                        </motion.div>
-                    </div>
-                )}
+                                    >
+                                        {isPaying ? "Фискализирую..." : "Да, пробить на ККТ"}
+                                    </button>
+                                </div>
+                            </motion.div>
+                        </div>
+                    )}
 
                 {lastReceipt && (
                     <div
@@ -4213,10 +4809,11 @@ export default function PosPage() {
                             </h2>
 
                             <div className="text-sm text-gray-500 mb-5">
-                                № {lastReceipt.id} · {new Date(lastReceipt.createdAt).toLocaleString('ru-RU')}
+                                № {lastReceipt.id} ·{" "}
+                                {new Date(lastReceipt.createdAt).toLocaleString("ru-RU")}
                             </div>
 
-                            {lastReceipt.fiscalStatus === 'success' && (
+                            {lastReceipt.fiscalStatus === "success" && (
                                 <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
                                     Чек успешно пробит на ККТ
                                     {lastReceipt.fiscalUuid && (
@@ -4227,7 +4824,7 @@ export default function PosPage() {
                                 </div>
                             )}
 
-                            {lastReceipt.fiscalStatus === 'skipped' && (
+                            {lastReceipt.fiscalStatus === "skipped" && (
                                 <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
                                     Продажа сохранена без фискализации на ККТ
                                 </div>
@@ -4235,26 +4832,36 @@ export default function PosPage() {
 
                             <div className="space-y-3 max-h-[320px] overflow-y-auto pr-1">
                                 {lastReceipt.items.map((item, index) => (
-                                    <div key={`${item.productId}-${index}`} className="border-b pb-2">
-                                        <div className="font-medium text-gray-800">
-                                            {item.name}
-                                        </div>
+                                    <div
+                                        key={`${item.productId}-${index}`}
+                                        className="border-b pb-2"
+                                    >
+                                        <div className="font-medium text-gray-800">{item.name}</div>
 
                                         {item.marked && (
                                             <div className="mt-1 text-xs font-semibold text-emerald-700">
-                                                [{item.markingStatus || 'M+'}] Маркировка проверена
-                                                {item.markingCode ? ` · КМ: ${formatMarkingCodePreview(item.markingCode)}` : ''}
+                                                [{item.markingStatus || "M+"}] Маркировка проверена
+                                                {item.markingCode
+                                                    ? ` · КМ: ${formatMarkingCodePreview(item.markingCode)}`
+                                                    : ""}
+                                            </div>
+                                        )}
+
+                                        {item.marked && item.markingMessage && (
+                                            <div className="mt-1 text-xs text-gray-500">
+                                                {item.markingMessage}
                                             </div>
                                         )}
 
                                         <div className="flex justify-between text-sm text-gray-500">
-                                            <span>
-                                                {formatCurrency(item.price)} × {formatQuantity(item.quantity, item.unit)}
-                                            </span>
+                      <span>
+                        {formatCurrency(item.price)} ×{" "}
+                          {formatQuantity(item.quantity, item.unit)}
+                      </span>
 
                                             <span className="font-semibold text-gray-700">
-                                                {formatCurrency(item.total)}
-                                            </span>
+                        {formatCurrency(item.total)}
+                      </span>
                                         </div>
                                     </div>
                                 ))}
@@ -4263,7 +4870,9 @@ export default function PosPage() {
                             <div className="mt-5 border-t pt-4 space-y-2">
                                 <div className="flex justify-between">
                                     <span>Оплата:</span>
-                                    <span className="font-semibold">{lastReceipt.paymentLabel}</span>
+                                    <span className="font-semibold">
+                    {lastReceipt.paymentLabel}
+                  </span>
                                 </div>
 
                                 <div className="flex justify-between text-xl font-bold">
@@ -4271,11 +4880,13 @@ export default function PosPage() {
                                     <span>{formatCurrency(lastReceipt.total)}</span>
                                 </div>
 
-                                {lastReceipt.paymentMethod === 'cash' && (
+                                {lastReceipt.paymentMethod === "cash" && (
                                     <>
                                         <div className="flex justify-between">
                                             <span>Получено:</span>
-                                            <span>{formatCurrency(lastReceipt.receivedAmount || 0)}</span>
+                                            <span>
+                        {formatCurrency(lastReceipt.receivedAmount || 0)}
+                      </span>
                                         </div>
 
                                         <div className="flex justify-between">
@@ -4287,7 +4898,7 @@ export default function PosPage() {
                             </div>
 
                             <div className="mt-6 flex flex-wrap justify-end gap-3">
-                                {lastReceipt.fiscalStatus === 'success' && (
+                                {lastReceipt.fiscalStatus === "success" && (
                                     <button
                                         type="button"
                                         onClick={repeatLastFiscalReceipt}
@@ -4299,9 +4910,11 @@ export default function PosPage() {
                                 )}
 
                                 <button
+                                    ref={newSaleButtonRef}
                                     type="button"
+                                    autoFocus
                                     onClick={clearReceipt}
-                                    className="px-6 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                                    className="px-6 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-200"
                                 >
                                     Новая продажа
                                 </button>
