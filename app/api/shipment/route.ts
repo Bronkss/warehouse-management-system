@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation, normalizeWarehouseLocationSlug, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext, normalizeWarehouseLocationSlug, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -210,7 +210,6 @@ export async function POST(request: NextRequest) {
     try {
         const body = await request.json() as ShipmentBody
         const items = body.items
-        const shipper = cleanString(body.shipper)
         const consigneeFromBody = cleanString(body.consignee)
 
         if (!Array.isArray(items) || items.length === 0) {
@@ -241,7 +240,7 @@ export async function POST(request: NextRequest) {
 
         await client.query('BEGIN')
 
-        const fromLocation = await resolveWarehouseLocation(client, request)
+        const { location: fromLocation, user } = await resolveWarehouseContext(client, request)
         const toLocation = await resolveTargetLocation(client, body)
 
         if (fromLocation.id === toLocation.id) {
@@ -264,12 +263,14 @@ export async function POST(request: NextRequest) {
                 total_amount,
                 status,
                 errors,
-                shipped_at
+                shipped_at,
+                created_by_name,
+                created_by_login
             )
-            VALUES ('TEMP', NULL, $1, $2, $3, $4, 0, 0, 0, 'shipped', '[]'::jsonb, NOW())
+            VALUES ('TEMP', NULL, $1, $2, $3, $4, 0, 0, 0, 'shipped', '[]'::jsonb, NOW(), $5, $6)
             RETURNING id
             `,
-            [fromLocation.id, toLocation.id, shipper || fromLocation.name, consignee]
+            [fromLocation.id, toLocation.id, fromLocation.name, consignee, user.name, user.login]
         )
 
         const shipmentId = Number(shipmentResult.rows[0].id)
@@ -374,7 +375,7 @@ export async function POST(request: NextRequest) {
                     comment,
                     created_by
                 )
-                VALUES ($1, $2, 'transfer_out', $3, $4, 'product_shipment', $5, $6, 'system')
+                VALUES ($1, $2, 'transfer_out', $3, $4, 'product_shipment', $5, $6, $7)
                 `,
                 [
                     productId,
@@ -383,6 +384,7 @@ export async function POST(request: NextRequest) {
                     nextStock,
                     shipmentId,
                     `Отгрузка ${shipmentNumber} из ${fromLocation.name} в ${toLocation.name}`,
+                    user.login,
                 ]
             )
 
@@ -417,6 +419,8 @@ export async function POST(request: NextRequest) {
             toLocationName: toLocation.name,
             toLocationSlug: toLocation.slug,
             status: 'shipped',
+            createdByName: user.name,
+            createdByLogin: user.login,
             updated: updatedProducts.length,
             products: updatedProducts,
         })

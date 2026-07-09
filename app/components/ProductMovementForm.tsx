@@ -493,6 +493,11 @@ export default function ProductMovementForm({
 
                 setLocations(items);
 
+                const current = items.find((item) => item.isCurrent);
+                if (current) {
+                    setShipper(current.name);
+                }
+
                 if (!toLocationSlug && availableTargets[0]) {
                     setToLocationSlug(availableTargets[0].slug);
                     setConsignee((prev) => prev || availableTargets[0].name);
@@ -667,11 +672,15 @@ export default function ProductMovementForm({
         setManualSupplier("");
         setManualInvoiceNumber("");
         setManualComment("");
-        setShipper("");
+        setShipper(currentLocation?.name || "");
         setConsignee("");
         setToLocationSlug("");
         setError(null);
     };
+
+    const currentLocation = useMemo(() => {
+        return locations.find((location) => location.isCurrent) || null;
+    }, [locations]);
 
     const shipmentTargetLocations = useMemo(() => {
         return locations.filter((location) => !location.isCurrent);
@@ -1600,7 +1609,7 @@ export default function ProductMovementForm({
                 "Content-Type": "application/json",
             },
             body: JSON.stringify({
-                shipper,
+                shipper: currentLocation?.name || shipper,
                 consignee: consignee || selectedTargetLocation?.name || "",
                 toLocationSlug,
                 items: snapshot.map((item) => ({
@@ -1840,10 +1849,11 @@ export default function ProductMovementForm({
                         </select>
 
                         <input
-                            value={shipper}
-                            onChange={(e) => setShipper(e.target.value)}
+                            value={currentLocation?.name || shipper}
+                            readOnly
                             placeholder="Грузоотправитель"
-                            className={inputClass}
+                            title="Грузоотправитель фиксируется текущей зоной входа"
+                            className={`${inputClass} bg-gray-100 text-gray-600`}
                         />
 
                         <input

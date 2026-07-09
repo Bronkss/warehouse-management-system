@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { QueryResult, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext, type WarehouseLocation, type WarehouseUser } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -105,6 +105,7 @@ type ProcessRowParams = {
     unit: ProductUnit
     acceptanceId: number
     location: WarehouseLocation
+    user: WarehouseUser
 }
 
 function normalizeText(value: unknown) {
@@ -249,7 +250,8 @@ async function addLocationStock(
     location: WarehouseLocation,
     quantityDelta: number,
     acceptanceId: number,
-    comment: string
+    comment: string,
+    createdBy: string
 ): Promise<number> {
     await ensureProductStockRows(client, productId, location.id, 0)
 
@@ -290,7 +292,7 @@ async function addLocationStock(
             'product_acceptance',
             acceptanceId,
             comment,
-            'system',
+            createdBy,
         ]
     )
 
@@ -423,6 +425,7 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
         unit,
         acceptanceId,
         location,
+        user,
     } = params
 
     if (action === 'skip') {
@@ -504,7 +507,8 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
             location,
             quantity,
             acceptanceId,
-            `Приёмка ${location.name}`
+            `Приёмка ${location.name}`,
+            user.login
         )
 
         await updateLegacyProductStockIfNeeded(client, productId, location, quantity)
@@ -580,7 +584,8 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
         location,
         quantity,
         acceptanceId,
-        `Создание товара через приёмку ${location.name}`
+        `Создание товара через приёмку ${location.name}`,
+        user.login
     )
 
     const productAfter = {
@@ -612,7 +617,7 @@ export async function POST(request: NextRequest) {
     const client = await pool.connect() as unknown as DbClient
 
     try {
-        const location = await resolveWarehouseLocation(client, request)
+        const { location, user } = await resolveWarehouseContext(client, request)
         const body = await request.json() as CommitRequestBody
         const rows: IncomingRow[] = Array.isArray(body.rows) ? body.rows : []
         const sourceFileName = normalizeText(body.sourceFileName)
@@ -634,10 +639,12 @@ export async function POST(request: NextRequest) {
                 invoice_number,
                 comment,
                 status,
-                location_id
-            ) VALUES ('TEMP', $1, $2, $3, $4, 'completed', $5)
+                location_id,
+                created_by_name,
+                created_by_login
+            ) VALUES ('TEMP', $1, $2, $3, $4, 'completed', $5, $6, $7)
             RETURNING id`,
-            [sourceFileName || null, supplier || null, invoiceNumber || null, comment || null, location.id]
+            [sourceFileName || null, supplier || null, invoiceNumber || null, comment || null, location.id, user.name, user.login]
         )
 
         const acceptanceId = Number(headerResult.rows[0].id)
@@ -681,6 +688,7 @@ export async function POST(request: NextRequest) {
                     unit,
                     acceptanceId,
                     location,
+                    user,
                 })
 
                 created += result.created
@@ -754,6 +762,8 @@ export async function POST(request: NextRequest) {
             locationId: location.id,
             locationName: location.name,
             locationSlug: location.slug,
+            createdByName: user.name,
+            createdByLogin: user.login,
             totalRows: rows.length,
             created,
             updated,

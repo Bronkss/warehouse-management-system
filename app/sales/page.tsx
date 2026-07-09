@@ -25,12 +25,14 @@ type Receipt = {
     total: number
     receivedAmount?: number
     change?: number
+    cashierName?: string
+    cashierLogin?: string
 }
 
 
 const LOCATION_SLUG_KEY = 'warehouse_location_slug'
 const LOCATION_NAME_KEY = 'warehouse_location_name'
-const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-locations'
+const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location'
 const DEFAULT_LOCATION_SLUG = 'tochka'
 const DEFAULT_LOCATION_NAME = 'ТОЧКА'
 
@@ -169,6 +171,7 @@ export default function Page() {
             const matchesSearch = query
                 ? receipt.id.toLowerCase().includes(query) ||
                 receipt.paymentLabel.toLowerCase().includes(query) ||
+                String(receipt.cashierName || '').toLowerCase().includes(query) ||
                 receipt.items.some(item =>
                     item.name.toLowerCase().includes(query) ||
                     String(item.barcode || '').toLowerCase().includes(query) ||
@@ -380,6 +383,10 @@ export default function Page() {
 
                                         <div className="sales-receipt-payment text-sm text-gray-500 mt-1">
                                             Оплата: {receipt.paymentLabel}
+                                        </div>
+
+                                        <div className="sales-receipt-cashier text-sm text-gray-500 mt-1">
+                                            Кассир: {receipt.cashierName || 'Не указан'}
                                         </div>
                                     </div>
 

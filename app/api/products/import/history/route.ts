@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: NextRequest) {
     try {
-        const location = await resolveWarehouseLocation(pool, request)
+        const { location } = await resolveWarehouseContext(pool, request)
 
         const result = await pool.query(
             `SELECT
@@ -25,6 +25,8 @@ export async function GET(request: NextRequest) {
                 pa.status,
                 pa.created_at,
                 pa.updated_at,
+                COALESCE(pa.created_by_name, '') AS created_by_name,
+                COALESCE(pa.created_by_login, '') AS created_by_login,
                 l.name AS location_name,
                 l.slug AS location_slug
              FROM product_acceptances pa
@@ -53,6 +55,8 @@ export async function GET(request: NextRequest) {
                 updatedAt: row.updated_at,
                 locationName: row.location_name,
                 locationSlug: row.location_slug,
+                createdByName: row.created_by_name,
+                createdByLogin: row.created_by_login,
             }))
         )
     } catch (error) {

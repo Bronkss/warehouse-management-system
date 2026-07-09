@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -61,12 +61,14 @@ function mapHistoryItem(row: ShipmentHistoryRow, currentLocationId: number) {
         toLocationName: row.to_location_name || '',
         toLocationSlug: row.to_location_slug || '',
         direction,
+        createdByName: (row as any).created_by_name || '',
+        createdByLogin: (row as any).created_by_login || '',
     }
 }
 
 export async function GET(request: NextRequest) {
     try {
-        const location = await resolveWarehouseLocation(pool, request)
+        const { location } = await resolveWarehouseContext(pool, request)
 
         const result = await pool.query<ShipmentHistoryRow>(
             `
@@ -89,7 +91,9 @@ export async function GET(request: NextRequest) {
                 from_l.name AS from_location_name,
                 from_l.slug AS from_location_slug,
                 to_l.name AS to_location_name,
-                to_l.slug AS to_location_slug
+                to_l.slug AS to_location_slug,
+                COALESCE(s.created_by_name, '') AS created_by_name,
+                COALESCE(s.created_by_login, '') AS created_by_login
             FROM product_shipments s
             LEFT JOIN locations from_l ON from_l.id = s.from_location_id
             LEFT JOIN locations to_l ON to_l.id = s.to_location_id

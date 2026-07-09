@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -208,7 +208,8 @@ async function insertStockMovement(
     quantityDelta: number,
     stockAfter: number,
     writeoffId: number,
-    comment: string
+    comment: string,
+    createdBy: string
 ) {
     await client.query(
         `
@@ -223,7 +224,7 @@ async function insertStockMovement(
             comment,
             created_by
         )
-        VALUES ($1, $2, 'writeoff', $3, $4, 'writeoff', $5, $6, 'system')
+        VALUES ($1, $2, 'writeoff', $3, $4, 'writeoff', $5, $6, $7)
         `,
         [
             productId,
@@ -232,6 +233,7 @@ async function insertStockMovement(
             stockAfter,
             writeoffId,
             comment,
+            createdBy,
         ]
     )
 }
@@ -240,7 +242,7 @@ export async function POST(request: NextRequest) {
     const client = await pool.connect()
 
     try {
-        const location = await resolveWarehouseLocation(client, request)
+        const { location, user } = await resolveWarehouseContext(client, request)
         const body = await request.json()
         const reason = String(body?.reason || '').trim() || 'other'
         const reasonLabel = getReasonLabel(reason, body?.reasonLabel)
@@ -268,15 +270,17 @@ export async function POST(request: NextRequest) {
                 responsible,
                 comment,
                 location_id,
+                created_by_name,
+                created_by_login,
                 total_rows,
                 total_quantity,
                 total_purchase_amount,
                 total_selling_amount,
                 status
-            ) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, 'completed')
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, 0, 0, 'completed')
             RETURNING id
             `,
-            [number, reason, reasonLabel, responsible, comment, location.id]
+            [number, reason, reasonLabel, responsible, comment, location.id, user.name, user.login]
         )
 
         const writeoffId = Number(writeoffResult.rows[0].id)
@@ -377,7 +381,8 @@ export async function POST(request: NextRequest) {
                 -qty,
                 newStock,
                 writeoffId,
-                `Списание ${number} в зоне ${location.name}: ${reasonLabel}`
+                `Списание ${number} в зоне ${location.name}: ${reasonLabel}`,
+                user.login
             )
 
             insertedRows.push(mapInsertedRow(insertedItemResult.rows[0]))
@@ -423,6 +428,8 @@ export async function POST(request: NextRequest) {
             locationId: location.id,
             locationName: location.name,
             locationSlug: location.slug,
+            createdByName: user.name,
+            createdByLogin: user.login,
             totalRows: Number(updatedWriteoff.total_rows || 0),
             totalQuantity: toNumber(updatedWriteoff.total_quantity),
             totalPurchaseAmount: money(updatedWriteoff.total_purchase_amount),

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -32,7 +32,7 @@ function toNumber(value: unknown): number {
 
 export async function GET(request: NextRequest) {
     try {
-        const location = await resolveWarehouseLocation(pool, request)
+        const { location } = await resolveWarehouseContext(pool, request)
 
         const result = await pool.query<WriteoffHistoryRow>(
             `
@@ -50,6 +50,8 @@ export async function GET(request: NextRequest) {
                 w.status,
                 w.created_at,
                 w.updated_at,
+                COALESCE(w.created_by_name, '') AS created_by_name,
+                COALESCE(w.created_by_login, '') AS created_by_login,
                 w.location_id,
                 l.name AS location_name,
                 l.slug AS location_slug
@@ -80,6 +82,8 @@ export async function GET(request: NextRequest) {
                 status: String(row.status || ''),
                 createdAt: row.created_at,
                 updatedAt: row.updated_at,
+                createdByName: (row as any).created_by_name || '',
+                createdByLogin: (row as any).created_by_login || '',
             }))
         )
     } catch (error) {

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -98,7 +98,7 @@ async function syncLegacyTochkaStock(
 
 export async function GET(request: NextRequest) {
     try {
-        const location = await resolveWarehouseLocation(pool, request)
+        const { location } = await resolveWarehouseContext(pool, request)
 
         const result = await pool.query(
             `
@@ -112,6 +112,8 @@ export async function GET(request: NextRequest) {
                 r.received_amount::float AS "receivedAmount",
                 r.change_amount::float AS change,
                 r.items,
+                COALESCE(r.cashier_name, '') AS "cashierName",
+                COALESCE(r.cashier_login, '') AS "cashierLogin",
                 l.name AS "locationName",
                 l.slug AS "locationSlug"
             FROM receipts r
@@ -182,7 +184,7 @@ export async function POST(request: NextRequest) {
 
         await client.query('BEGIN')
 
-        const location = await resolveWarehouseLocation(client, request)
+        const { location, user } = await resolveWarehouseContext(client, request)
         const stockMovements: StockMovementDraft[] = []
 
         for (const item of items) {
@@ -263,9 +265,11 @@ export async function POST(request: NextRequest) {
                 total,
                 received_amount,
                 change_amount,
-                items
+                items,
+                cashier_name,
+                cashier_login
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING
                 id,
                 receipt_number AS "receiptNumber",
@@ -275,7 +279,9 @@ export async function POST(request: NextRequest) {
                 total::float AS total,
                 received_amount::float AS "receivedAmount",
                 change_amount::float AS change,
-                items
+                items,
+                COALESCE(cashier_name, '') AS "cashierName",
+                COALESCE(cashier_login, '') AS "cashierLogin"
             `,
             [
                 receiptNumber,
@@ -286,6 +292,8 @@ export async function POST(request: NextRequest) {
                 paymentMethod === 'cash' && receivedAmount !== null ? receivedAmount : total,
                 paymentMethod === 'cash' && change !== null ? change : 0,
                 JSON.stringify(items),
+                user.name,
+                user.login,
             ]
         )
 
@@ -306,7 +314,7 @@ export async function POST(request: NextRequest) {
                     comment,
                     created_by
                 )
-                VALUES ($1, $2, 'sale', $3, $4, 'receipt', $5, $6, 'pos')
+                VALUES ($1, $2, 'sale', $3, $4, 'receipt', $5, $6, $7)
                 `,
                 [
                     movement.productId,
@@ -315,6 +323,7 @@ export async function POST(request: NextRequest) {
                     movement.stockAfter,
                     Number.isFinite(receiptId) ? receiptId : null,
                     movement.comment,
+                    user.login,
                 ]
             )
         }
@@ -326,6 +335,8 @@ export async function POST(request: NextRequest) {
                 ...savedReceipt,
                 locationName: location.name,
                 locationSlug: location.slug,
+                cashierName: user.name,
+                cashierLogin: user.login,
             },
             { status: 201 }
         )

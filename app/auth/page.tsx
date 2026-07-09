@@ -10,7 +10,12 @@ const REMEMBER_ME_KEY = 'warehouse_remember_me'
 const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug'
 const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name'
 const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type'
+const AUTH_USER_NAME_KEY = 'warehouse_user_name'
+const AUTH_USER_ROLE_KEY = 'warehouse_user_role'
 const LOCATION_COOKIE_NAME = 'warehouse_location_slug'
+const USER_LOGIN_COOKIE_NAME = 'warehouse_user_login'
+const USER_NAME_COOKIE_NAME = 'warehouse_user_name'
+const USER_ROLE_COOKIE_NAME = 'warehouse_user_role'
 
 const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
 
@@ -18,36 +23,82 @@ type WarehouseLocation = {
     slug: string
     name: string
     type: 'warehouse' | 'store'
+}
+
+type WarehouseUser = {
     login: string
     password: string
+    name: string
+    role: 'admin' | 'warehouse' | 'cashier'
+    locationSlugs: string[]
 }
 
 const WAREHOUSE_LOCATIONS: WarehouseLocation[] = [
+    { slug: 'main-warehouse', name: 'Главный склад', type: 'warehouse' },
+    { slug: 'tochka', name: 'ТОЧКА', type: 'store' },
+    { slug: 'rodnik', name: 'Родник', type: 'store' },
+]
+
+const WAREHOUSE_USERS: WarehouseUser[] = [
     {
-        slug: 'main-warehouse',
-        name: 'Главный склад',
-        type: 'warehouse',
         login: 'sklad',
         password: 'sklad112233',
+        name: 'Главный склад',
+        role: 'warehouse',
+        locationSlugs: ['main-warehouse'],
     },
     {
-        slug: 'tochka',
-        name: 'ТОЧКА',
-        type: 'store',
-        login: 'tochka',
-        password: 'tochka112233',
+        login: 'tochka_lada',
+        password: 'lada112233',
+        name: 'Лада Якимова',
+        role: 'cashier',
+        locationSlugs: ['tochka'],
     },
     {
-        slug: 'rodnik',
-        name: 'Родник',
-        type: 'store',
-        login: 'rodnik',
-        password: 'rodnik112233',
+        login: 'tochka_elena',
+        password: 'elena112233',
+        name: 'Елена Цыганкова',
+        role: 'cashier',
+        locationSlugs: ['tochka'],
+    },
+    {
+        login: 'tochka_anastasia',
+        password: 'anastasia112233',
+        name: 'Анастасия Котова',
+        role: 'cashier',
+        locationSlugs: ['tochka'],
+    },
+    {
+        login: 'rodnik_anastasia',
+        password: 'anastasia112233',
+        name: 'Анастасия Котова',
+        role: 'cashier',
+        locationSlugs: ['rodnik'],
+    },
+    {
+        login: 'rodnik_tatyana',
+        password: 'tatyana112233',
+        name: 'Татьяна',
+        role: 'cashier',
+        locationSlugs: ['rodnik'],
+    },
+    {
+        login: 'admin',
+        password: '112233',
+        name: 'Администратор',
+        role: 'admin',
+        locationSlugs: ['main-warehouse', 'tochka', 'rodnik'],
     },
 ]
 
 function findLocation(slug: string): WarehouseLocation {
     return WAREHOUSE_LOCATIONS.find(location => location.slug === slug) || WAREHOUSE_LOCATIONS[1]
+}
+
+function findUser(login: string): WarehouseUser | null {
+    const normalizedLogin = login.trim().toLowerCase()
+
+    return WAREHOUSE_USERS.find(user => user.login === normalizedLogin) || null
 }
 
 function setCookie(name: string, value: string, remember: boolean) {
@@ -96,46 +147,54 @@ export default function Auth() {
     const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault()
 
-        const normalizedLogin = login.trim()
+        const normalizedLogin = login.trim().toLowerCase()
         const selectedLocation = findLocation(selectedLocationSlug)
+        const selectedUser = findUser(normalizedLogin)
 
-        const isLocationCredentialValid =
-            normalizedLogin === selectedLocation.login &&
-            password === selectedLocation.password
-
-        /**
-         * Временная страховка, чтобы старый доступ не потерялся во время миграции.
-         * Позже лучше убрать и оставить только серверную авторизацию с хешами паролей.
-         */
-        const isLegacyAdminValid = normalizedLogin === 'admin' && password === '112233'
-
-        if (isLocationCredentialValid || isLegacyAdminValid) {
-            const authUser = isLegacyAdminValid ? 'admin' : selectedLocation.login
-
+        if (
+            selectedUser &&
+            password === selectedUser.password &&
+            selectedUser.locationSlugs.includes(selectedLocation.slug)
+        ) {
             setError('')
             clearCookie(LOCATION_COOKIE_NAME)
+            clearCookie(USER_LOGIN_COOKIE_NAME)
+            clearCookie(USER_NAME_COOKIE_NAME)
+            clearCookie(USER_ROLE_COOKIE_NAME)
+
             setCookie(LOCATION_COOKIE_NAME, selectedLocation.slug, rememberMe)
+            setCookie(USER_LOGIN_COOKIE_NAME, selectedUser.login, rememberMe)
+            setCookie(USER_NAME_COOKIE_NAME, selectedUser.name, rememberMe)
+            setCookie(USER_ROLE_COOKIE_NAME, selectedUser.role, rememberMe)
 
             if (rememberMe) {
-                localStorage.setItem(AUTH_USER_KEY, authUser)
+                localStorage.setItem(AUTH_USER_KEY, selectedUser.login)
                 localStorage.setItem(AUTH_LOGIN_KEY, normalizedLogin)
+                localStorage.setItem(AUTH_USER_NAME_KEY, selectedUser.name)
+                localStorage.setItem(AUTH_USER_ROLE_KEY, selectedUser.role)
                 localStorage.setItem(REMEMBER_ME_KEY, 'true')
                 localStorage.setItem(AUTH_LOCATION_SLUG_KEY, selectedLocation.slug)
                 localStorage.setItem(AUTH_LOCATION_NAME_KEY, selectedLocation.name)
                 localStorage.setItem(AUTH_LOCATION_TYPE_KEY, selectedLocation.type)
 
                 sessionStorage.removeItem(AUTH_USER_KEY)
+                sessionStorage.removeItem(AUTH_USER_NAME_KEY)
+                sessionStorage.removeItem(AUTH_USER_ROLE_KEY)
                 sessionStorage.removeItem(AUTH_LOCATION_SLUG_KEY)
                 sessionStorage.removeItem(AUTH_LOCATION_NAME_KEY)
                 sessionStorage.removeItem(AUTH_LOCATION_TYPE_KEY)
             } else {
-                sessionStorage.setItem(AUTH_USER_KEY, authUser)
+                sessionStorage.setItem(AUTH_USER_KEY, selectedUser.login)
+                sessionStorage.setItem(AUTH_USER_NAME_KEY, selectedUser.name)
+                sessionStorage.setItem(AUTH_USER_ROLE_KEY, selectedUser.role)
                 sessionStorage.setItem(AUTH_LOCATION_SLUG_KEY, selectedLocation.slug)
                 sessionStorage.setItem(AUTH_LOCATION_NAME_KEY, selectedLocation.name)
                 sessionStorage.setItem(AUTH_LOCATION_TYPE_KEY, selectedLocation.type)
 
                 localStorage.removeItem(AUTH_USER_KEY)
                 localStorage.removeItem(AUTH_LOGIN_KEY)
+                localStorage.removeItem(AUTH_USER_NAME_KEY)
+                localStorage.removeItem(AUTH_USER_ROLE_KEY)
                 localStorage.removeItem(REMEMBER_ME_KEY)
                 localStorage.removeItem(AUTH_LOCATION_SLUG_KEY)
                 localStorage.removeItem(AUTH_LOCATION_NAME_KEY)
@@ -143,6 +202,11 @@ export default function Auth() {
             }
 
             router.push('/system')
+            return
+        }
+
+        if (selectedUser && !selectedUser.locationSlugs.includes(selectedLocation.slug)) {
+            setError(`Пользователь «${selectedUser.name}» не имеет доступа к зоне «${selectedLocation.name}»`)
             return
         }
 
@@ -216,7 +280,7 @@ export default function Auth() {
                     />
 
                     <div className="mt-4 rounded-2xl bg-[#fff7f4] px-4 py-3 text-sm leading-6 text-[#8a3f2e]">
-                        Тестовые доступы: sklad/sklad112233, tochka/tochka112233, rodnik/rodnik112233. Старый admin/112233 временно оставлен для подстраховки.
+                        Доступы: tochka_lada/lada112233, tochka_elena/elena112233, tochka_anastasia/anastasia112233, rodnik_anastasia/anastasia112233, rodnik_tatyana/tatyana112233, sklad/sklad112233. Admin: admin/112233.
                     </div>
 
                     <label className="auth-remember flex items-center gap-4 mt-5 mb-4 cursor-pointer">

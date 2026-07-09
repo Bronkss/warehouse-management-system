@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { QueryResult, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext, type WarehouseLocation, type WarehouseUser } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -241,7 +241,8 @@ async function addLocationStock(
     location: WarehouseLocation,
     quantityDelta: number,
     acceptanceId: number,
-    comment: string
+    comment: string,
+    createdBy: string
 ): Promise<number> {
     await ensureProductStockRows(client, productId, location.id, 0)
 
@@ -282,7 +283,7 @@ async function addLocationStock(
             'product_acceptance',
             acceptanceId,
             comment,
-            'system',
+            createdBy,
         ]
     )
 
@@ -313,7 +314,8 @@ async function reverseOldEffect(
     client: DbClient,
     location: WarehouseLocation,
     acceptanceId: number,
-    item: AcceptanceItemDbRow
+    item: AcceptanceItemDbRow,
+    user: WarehouseUser
 ) {
     const oldProductId = toNullableId(item.product_id)
     const oldQuantity = toNumber(item.applied_quantity, 0)
@@ -328,7 +330,8 @@ async function reverseOldEffect(
         location,
         -oldQuantity,
         acceptanceId,
-        `Откат старой строки приёмки ${location.name}`
+        `Откат старой строки приёмки ${location.name}`,
+        user.login
     )
 
     await updateLegacyProductStockIfNeeded(client, oldProductId, location, -oldQuantity)
@@ -339,7 +342,8 @@ async function applyRowEffect(
     location: WarehouseLocation,
     acceptanceId: number,
     row: IncomingRow,
-    existingItem?: AcceptanceItemDbRow
+    existingItem: AcceptanceItemDbRow | undefined,
+    user: WarehouseUser
 ) {
     const rowNumber = Number(row.rowNumber || existingItem?.row_number || 0)
     const action = normalizeAction(row.action)
@@ -417,7 +421,8 @@ async function applyRowEffect(
             location,
             quantity,
             acceptanceId,
-            `Редактирование приёмки ${location.name}`
+            `Редактирование приёмки ${location.name}`,
+            user.login
         )
 
         await updateLegacyProductStockIfNeeded(client, productId, location, quantity)
@@ -477,7 +482,8 @@ async function applyRowEffect(
             location,
             quantity,
             acceptanceId,
-            `Редактирование созданного товара в приёмке ${location.name}`
+            `Редактирование созданного товара в приёмке ${location.name}`,
+            user.login
         )
 
         await updateLegacyProductStockIfNeeded(client, existingProductId, location, quantity)
@@ -528,7 +534,8 @@ async function applyRowEffect(
         location,
         quantity,
         acceptanceId,
-        `Создание товара через редактирование приёмки ${location.name}`
+        `Создание товара через редактирование приёмки ${location.name}`,
+        user.login
     )
 
     return {
@@ -667,7 +674,7 @@ export async function GET(
     context: { params: Promise<{ id: string }> | { id: string } }
 ) {
     try {
-        const location = await resolveWarehouseLocation(pool, request)
+        const { location } = await resolveWarehouseContext(pool, request)
         const acceptanceId = await getReceiptId(context)
 
         if (!acceptanceId) {
@@ -692,6 +699,8 @@ export async function GET(
                 pa.created_at,
                 pa.updated_at,
                 pa.location_id,
+                COALESCE(pa.created_by_name, '') AS created_by_name,
+                COALESCE(pa.created_by_login, '') AS created_by_login,
                 l.name AS location_name,
                 l.slug AS location_slug
              FROM product_acceptances pa
@@ -738,6 +747,8 @@ export async function GET(
             status: header.status,
             createdAt: header.created_at,
             updatedAt: header.updated_at,
+            createdByName: header.created_by_name || '',
+            createdByLogin: header.created_by_login || '',
             locationId: Number(header.location_id),
             locationName: header.location_name,
             locationSlug: header.location_slug,
@@ -794,7 +805,7 @@ export async function PUT(
     const client = await pool.connect() as unknown as DbClient
 
     try {
-        const location = await resolveWarehouseLocation(client, request)
+        const { location, user } = await resolveWarehouseContext(client, request)
         const acceptanceId = await getReceiptId(context)
 
         if (!acceptanceId) {
@@ -843,10 +854,10 @@ export async function PUT(
 
             try {
                 if (existingItem) {
-                    await reverseOldEffect(client, location, acceptanceId, existingItem)
+                    await reverseOldEffect(client, location, acceptanceId, existingItem, user)
                 }
 
-                const effect = await applyRowEffect(client, location, acceptanceId, row, existingItem)
+                const effect = await applyRowEffect(client, location, acceptanceId, row, existingItem, user)
                 await upsertAcceptanceItem(client, acceptanceId, row, effect, null)
             } catch (error) {
                 const message = `Строка ${rowNumber}: ${error instanceof Error ? error.message : 'ошибка обработки'}`
@@ -858,7 +869,7 @@ export async function PUT(
             const itemId = Number(item.id)
 
             if (!submittedExistingIds.has(itemId)) {
-                await reverseOldEffect(client, location, acceptanceId, item)
+                await reverseOldEffect(client, location, acceptanceId, item, user)
                 await client.query(
                     'DELETE FROM product_acceptance_items WHERE id = $1 AND acceptance_id = $2',
                     [itemId, acceptanceId]
@@ -891,8 +902,10 @@ export async function PUT(
                 error_count = $8,
                 errors = $9::jsonb,
                 status = $10,
+                updated_by_name = $11,
+                updated_by_login = $12,
                 updated_at = NOW()
-             WHERE id = $11 AND location_id = $12`,
+             WHERE id = $13 AND location_id = $14`,
             [
                 normalizeText(body.supplier) || null,
                 normalizeText(body.invoiceNumber) || null,
@@ -904,6 +917,8 @@ export async function PUT(
                 errorCount,
                 JSON.stringify(errors),
                 finalStatus,
+                user.name,
+                user.login,
                 acceptanceId,
                 location.id,
             ]
@@ -913,6 +928,8 @@ export async function PUT(
 
         return NextResponse.json({
             acceptanceId,
+            updatedByName: user.name,
+            updatedByLogin: user.login,
             locationId: location.id,
             locationName: location.name,
             totalRows,

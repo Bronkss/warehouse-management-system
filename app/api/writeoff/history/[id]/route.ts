@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -256,7 +256,8 @@ async function insertStockMovement(
     quantityDelta: number,
     stockAfter: number,
     writeoffId: number,
-    comment: string
+    comment: string,
+    createdBy: string
 ) {
     await client.query(
         `
@@ -271,7 +272,7 @@ async function insertStockMovement(
             comment,
             created_by
         )
-        VALUES ($1, $2, $3, $4, $5, 'writeoff', $6, $7, 'system')
+        VALUES ($1, $2, $3, $4, $5, 'writeoff', $6, $7, $8)
         `,
         [
             productId,
@@ -281,6 +282,7 @@ async function insertStockMovement(
             stockAfter,
             writeoffId,
             comment,
+            createdBy,
         ]
     )
 }
@@ -302,6 +304,10 @@ async function loadWriteoffDetail(id: number, locationId: number) {
             w.status,
             w.created_at,
             w.updated_at,
+            COALESCE(w.created_by_name, '') AS created_by_name,
+            COALESCE(w.created_by_login, '') AS created_by_login,
+            COALESCE(w.updated_by_name, '') AS updated_by_name,
+            COALESCE(w.updated_by_login, '') AS updated_by_login,
             w.location_id,
             l.name AS location_name,
             l.slug AS location_slug
@@ -345,13 +351,17 @@ async function loadWriteoffDetail(id: number, locationId: number) {
 
     return {
         ...mapWriteoff(writeoff),
+        createdByName: (writeoff as any).created_by_name || '',
+        createdByLogin: (writeoff as any).created_by_login || '',
+        updatedByName: (writeoff as any).updated_by_name || '',
+        updatedByLogin: (writeoff as any).updated_by_login || '',
         rows: rowsResult.rows.map(mapWriteoffItem),
     }
 }
 
 export async function GET(request: NextRequest, context: RouteContext) {
     try {
-        const location = await resolveWarehouseLocation(pool, request)
+        const { location } = await resolveWarehouseContext(pool, request)
         const id = await getWriteoffId(context)
 
         if (!id) {
@@ -379,7 +389,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     const client = await pool.connect()
 
     try {
-        const location = await resolveWarehouseLocation(client, request)
+        const { location, user } = await resolveWarehouseContext(client, request)
         const id = await getWriteoffId(context)
 
         if (!id) {
@@ -463,7 +473,8 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 toNumber(oldRow.quantity),
                 restoredStock,
                 id,
-                `Возврат старой версии списания ${writeoff.number} перед редактированием`
+                `Возврат старой версии списания ${writeoff.number} перед редактированием`,
+                user.login
             )
         }
 
@@ -566,7 +577,8 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 -qty,
                 newStock,
                 id,
-                `Списание ${writeoff.number} в зоне ${location.name}: ${reasonLabel}`
+                `Списание ${writeoff.number} в зоне ${location.name}: ${reasonLabel}`,
+                user.login
             )
 
             insertedRows.push(mapWriteoffItem(insertResult.rows[0]))
@@ -584,13 +596,15 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 reason_label = $3,
                 responsible = $4,
                 comment = $5,
-                total_rows = $6,
-                total_quantity = $7,
-                total_purchase_amount = $8,
-                total_selling_amount = $9,
+                updated_by_name = $6,
+                updated_by_login = $7,
+                total_rows = $8,
+                total_quantity = $9,
+                total_purchase_amount = $10,
+                total_selling_amount = $11,
                 status = 'completed',
                 updated_at = NOW()
-            WHERE id = $1 AND location_id = $10
+            WHERE id = $1 AND location_id = $12
             RETURNING *
             `,
             [
@@ -599,6 +613,8 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                 reasonLabel,
                 responsible,
                 comment,
+                user.name,
+                user.login,
                 insertedRows.length,
                 roundStock(totalQuantity),
                 money(totalPurchaseAmount),
@@ -617,6 +633,8 @@ export async function PUT(request: NextRequest, context: RouteContext) {
             }),
             rows: insertedRows,
             message: 'Списание сохранено',
+            updatedByName: user.name,
+            updatedByLogin: user.login,
         })
     } catch (error) {
         await client.query('ROLLBACK')

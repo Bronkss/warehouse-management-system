@@ -79,6 +79,8 @@ type ReceiptItem = {
     quantity: number;
     price: number;
     total: number;
+    measureCode?: number;
+    measureName?: string;
     marked?: boolean;
     markingCode?: string;
     markingStatus?: MarkingStatus;
@@ -126,6 +128,10 @@ type Receipt = {
     fiscalUuid?: string;
     fiscalParams?: FiscalParams;
     fiscalRaw?: unknown;
+    cashierName?: string;
+    cashierLogin?: string;
+    locationName?: string;
+    locationSlug?: string;
 };
 
 type ApiError = {
@@ -146,7 +152,11 @@ const REMEMBER_ME_KEY = 'warehouse_remember_me';
 const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug';
 const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name';
 const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type';
-const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-locations';
+const AUTH_USER_NAME_KEY = 'warehouse_user_name';
+const AUTH_USER_ROLE_KEY = 'warehouse_user_role';
+const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location';
+const WAREHOUSE_USER_LOGIN_HEADER = 'x-warehouse-user-login';
+const WAREHOUSE_USER_ROLE_HEADER = 'x-warehouse-user-role';
 const DEFAULT_LOCATION_SLUG = 'tochka';
 const DEFAULT_LOCATION_NAME = 'ТОЧКА';
 
@@ -181,9 +191,50 @@ const getCurrentLocationName = (): string => {
     ).trim() || DEFAULT_LOCATION_NAME;
 };
 
+const getCurrentUserLogin = (): string => {
+    if (typeof window === 'undefined') {
+        return '';
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_USER_KEY) ||
+        localStorage.getItem(AUTH_USER_KEY) ||
+        localStorage.getItem(AUTH_LOGIN_KEY) ||
+        ''
+    ).trim();
+};
+
+const getCurrentUserName = (): string => {
+    if (typeof window === 'undefined') {
+        return 'Кассир';
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_USER_NAME_KEY) ||
+        localStorage.getItem(AUTH_USER_NAME_KEY) ||
+        getCurrentUserLogin() ||
+        'Кассир'
+    ).trim();
+};
+
+const getCurrentUserRole = (): string => {
+    if (typeof window === 'undefined') {
+        return 'cashier';
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_USER_ROLE_KEY) ||
+        localStorage.getItem(AUTH_USER_ROLE_KEY) ||
+        'cashier'
+    ).trim();
+};
+
+
 const getLocationHeaders = (): HeadersInit => {
     return {
         [WAREHOUSE_LOCATION_HEADER]: getCurrentLocationSlug(),
+        [WAREHOUSE_USER_LOGIN_HEADER]: getCurrentUserLogin(),
+        [WAREHOUSE_USER_ROLE_HEADER]: getCurrentUserRole(),
     };
 };
 
@@ -311,6 +362,15 @@ const normalizeProductsApiResponse = (data: unknown): ProductsApiResponse => {
         hasMore: false,
         limit: 0,
     };
+};
+
+
+const getMeasureCode = (unit: unknown): number => {
+    return String(unit || '').trim().toLowerCase() === 'weight' ? 11 : 0;
+};
+
+const getMeasureName = (unit: unknown): string => {
+    return getMeasureCode(unit) === 11 ? 'кг' : 'шт.';
 };
 
 const formatCurrency = (amount: number | undefined | null): string => {
@@ -631,6 +691,8 @@ export default function PosPage() {
     const [isAuthChecked, setIsAuthChecked] = useState(false);
     const [warehouseLocationName, setWarehouseLocationName] = useState(DEFAULT_LOCATION_NAME);
     const [warehouseLocationSlug, setWarehouseLocationSlug] = useState(DEFAULT_LOCATION_SLUG);
+    const [warehouseUserName, setWarehouseUserName] = useState('Кассир');
+    const [warehouseUserLogin, setWarehouseUserLogin] = useState('');
     const [shiftStatus, setShiftStatus] = useState<ShiftStatus>('unknown');
     const [isShiftActionLoading, setIsShiftActionLoading] = useState(false);
     const [fiscalConfirmModal, setFiscalConfirmModal] = useState(false);
@@ -741,6 +803,8 @@ export default function PosPage() {
 
         setWarehouseLocationName(getCurrentLocationName());
         setWarehouseLocationSlug(getCurrentLocationSlug());
+        setWarehouseUserName(getCurrentUserName());
+        setWarehouseUserLogin(getCurrentUserLogin());
 
         const savedShiftStatus = localStorage.getItem(SHIFT_STATUS_KEY);
 
@@ -934,10 +998,14 @@ export default function PosPage() {
         localStorage.removeItem(AUTH_LOCATION_SLUG_KEY);
         localStorage.removeItem(AUTH_LOCATION_NAME_KEY);
         localStorage.removeItem(AUTH_LOCATION_TYPE_KEY);
+        localStorage.removeItem(AUTH_USER_NAME_KEY);
+        localStorage.removeItem(AUTH_USER_ROLE_KEY);
         sessionStorage.removeItem(AUTH_USER_KEY);
         sessionStorage.removeItem(AUTH_LOCATION_SLUG_KEY);
         sessionStorage.removeItem(AUTH_LOCATION_NAME_KEY);
         sessionStorage.removeItem(AUTH_LOCATION_TYPE_KEY);
+        sessionStorage.removeItem(AUTH_USER_NAME_KEY);
+        sessionStorage.removeItem(AUTH_USER_ROLE_KEY);
         document.cookie = `${AUTH_LOCATION_SLUG_KEY}=; path=/; max-age=0; SameSite=Lax`;
         router.replace('/auth');
     };
@@ -1058,6 +1126,11 @@ export default function PosPage() {
     };
 
     const openMarkingScanModal = (product: Product) => {
+        if (isCheckingMarking) {
+            setError('Дождитесь завершения проверки предыдущей маркировки');
+            return;
+        }
+
         const safeProduct = normalizeProduct(product);
 
         setMarkingModalProduct(safeProduct);
@@ -1081,6 +1154,7 @@ export default function PosPage() {
 
     const addMarkedProductToCheckout = async (product: Product, rawMarkingCode: string) => {
         if (isCheckingMarking) {
+            setError('Дождитесь завершения проверки предыдущей маркировки');
             return;
         }
 
@@ -1141,8 +1215,14 @@ export default function PosPage() {
         try {
             setIsCheckingMarking(true);
             setError(null);
-            setNotice(null);
+            setNotice('Код маркировки отправлен на проверку. Можно продолжать пробивать обычные товары.');
             setMarkingCheckResult(null);
+            setMarkingModalProduct(null);
+            setMarkingCodeInput('');
+
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
 
             const checkResult = await precheckMarkingCode(markingCode);
             const status = checkResult.markingStatus || 'M';
@@ -1560,6 +1640,97 @@ export default function PosPage() {
         setPaymentModal(method);
     };
 
+    const buildCommodityReceiptHtml = (receipt: Receipt): string => {
+        const organizationName = 'ORGANIZATION_NAME';
+        const organizationInn = 'ORGANIZATION_INN';
+        const organizationAddress = 'ORGANIZATION_ADDRESS';
+        const organizationPhone = 'ORGANIZATION_PHONE';
+        const createdAt = new Date(receipt.createdAt).toLocaleString('ru-RU');
+        const rows = receipt.items.map(item => {
+            const qty = `${formatQuantity(item.quantity, item.unit || 'piece')}`;
+            const price = formatCurrency(item.price);
+            const sum = formatCurrency(item.total);
+
+            return `
+                <div class="item">
+                    <div class="name">${escapeHtml(String(item.name || 'Товар'))}</div>
+                    <div class="line"><span>${qty} × ${price}</span><strong>${sum}</strong></div>
+                </div>
+            `;
+        }).join('');
+
+        return `
+            <!doctype html>
+            <html lang="ru">
+            <head>
+                <meta charset="utf-8" />
+                <title>Товарный чек ${receipt.id}</title>
+                <style>
+                    * { box-sizing: border-box; }
+                    body { margin: 0; font-family: Arial, sans-serif; color: #111; }
+                    .receipt { width: 58mm; padding: 4mm 3mm; font-size: 11px; }
+                    h1 { margin: 0 0 6px; text-align: center; font-size: 15px; letter-spacing: .04em; }
+                    .center { text-align: center; }
+                    .muted { color: #555; }
+                    .sep { border-top: 1px dashed #111; margin: 6px 0; }
+                    .meta div { margin: 2px 0; }
+                    .item { margin: 6px 0; }
+                    .name { font-weight: 700; }
+                    .line { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }
+                    .total { display: flex; justify-content: space-between; font-size: 15px; font-weight: 800; }
+                    @media print {
+                        @page { size: 58mm auto; margin: 0; }
+                        body { margin: 0; }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="receipt">
+                    <h1>ТОВАРНЫЙ ЧЕК</h1>
+                    <div class="center muted">${escapeHtml(organizationName)}</div>
+                    <div class="center muted">ИНН: ${escapeHtml(organizationInn)}</div>
+                    <div class="center muted">${escapeHtml(organizationAddress)}</div>
+                    <div class="center muted">${escapeHtml(organizationPhone)}</div>
+                    <div class="sep"></div>
+                    <div class="meta">
+                        <div>Точка: ${receipt.locationName || warehouseLocationName}</div>
+                        <div>Кассир: ${receipt.cashierName || warehouseUserName}</div>
+                        <div>Дата: ${createdAt}</div>
+                        <div>Чек №: ${receipt.id}</div>
+                        <div>Оплата: ${receipt.paymentLabel}</div>
+                    </div>
+                    <div class="sep"></div>
+                    ${rows}
+                    <div class="sep"></div>
+                    <div class="total"><span>ИТОГО</span><span>${formatCurrency(receipt.total)}</span></div>
+                    ${receipt.paymentMethod === 'cash' ? `<div class="line"><span>Получено</span><span>${formatCurrency(receipt.receivedAmount || 0)}</span></div><div class="line"><span>Сдача</span><span>${formatCurrency(receipt.change || 0)}</span></div>` : ''}
+                    <div class="sep"></div>
+                    <div class="center">Спасибо за покупку!</div>
+                </div>
+                <script>
+                    window.onload = function () {
+                        window.focus();
+                        window.print();
+                    };
+                </script>
+            </body>
+            </html>
+        `;
+    };
+
+    const printCommodityReceipt = (receipt: Receipt) => {
+        const printWindow = window.open('', '_blank', 'width=420,height=720');
+
+        if (!printWindow) {
+            setError('Браузер заблокировал окно печати товарного чека');
+            return;
+        }
+
+        printWindow.document.open();
+        printWindow.document.write(buildCommodityReceiptHtml(receipt));
+        printWindow.document.close();
+    };
+
     const completePayment = async (method: PaymentMethod, shouldFiscalize = false) => {
         if (isPaying) {
             return;
@@ -1634,6 +1805,8 @@ export default function PosPage() {
                     category: item.product.category,
                     unit: item.product.unit,
                     quantity: item.quantity,
+                    measureCode: getMeasureCode(item.product.unit),
+                    measureName: getMeasureName(item.product.unit),
                     price,
                     total: price * item.quantity,
                     marked,
@@ -1660,6 +1833,10 @@ export default function PosPage() {
                 change: method === 'cash' ? cashReceivedNumber - receiptTotal : 0,
                 fiscalizationRequested: shouldRunFiscalization,
                 fiscalStatus: shouldRunFiscalization ? undefined : 'skipped',
+                cashierName: warehouseUserName,
+                cashierLogin: warehouseUserLogin,
+                locationName: warehouseLocationName,
+                locationSlug: warehouseLocationSlug,
             };
 
             let receiptForSave: Receipt = receipt;
@@ -1677,6 +1854,17 @@ export default function PosPage() {
             }
 
             const savedReceipt = await createSaleInDb(receiptForSave);
+
+            if (!shouldRunFiscalization) {
+                printCommodityReceipt({
+                    ...receiptForSave,
+                    ...savedReceipt,
+                    cashierName: receiptForSave.cashierName,
+                    cashierLogin: receiptForSave.cashierLogin,
+                    locationName: receiptForSave.locationName,
+                    locationSlug: receiptForSave.locationSlug,
+                });
+            }
 
             updateLocalStockAfterSale(receiptItems);
 
@@ -2289,7 +2477,7 @@ export default function PosPage() {
                         </h1>
 
                         <div className="mt-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-bold text-indigo-700 shadow-sm">
-                            Текущая зона: {warehouseLocationName} · {warehouseLocationSlug}
+                            Текущая зона: {warehouseLocationName} · {warehouseLocationSlug} · Кассир: {warehouseUserName}
                         </div>
                     </div>
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -145,7 +145,7 @@ export async function POST(request: NextRequest) {
 
         await client.query('BEGIN')
 
-        const location = await resolveWarehouseLocation(client, request)
+        const { location, user } = await resolveWarehouseContext(client, request)
         const shipment = await findShipmentForReceive(client, body)
 
         if (!shipment) {
@@ -234,7 +234,7 @@ export async function POST(request: NextRequest) {
                     comment,
                     created_by
                 )
-                VALUES ($1, $2, 'transfer_in', $3, $4, 'product_shipment', $5, $6, 'system')
+                VALUES ($1, $2, 'transfer_in', $3, $4, 'product_shipment', $5, $6, $7)
                 `,
                 [
                     productId,
@@ -243,6 +243,7 @@ export async function POST(request: NextRequest) {
                     nextStock,
                     shipment.id,
                     `Приём перемещения ${shipment.number} из ${shipment.from_location_name || 'другой зоны'}`,
+                    user.login,
                 ]
             )
 
@@ -256,10 +257,12 @@ export async function POST(request: NextRequest) {
             SET
                 status = 'received',
                 received_at = NOW(),
+                received_by_name = $2,
+                received_by_login = $3,
                 updated_at = NOW()
             WHERE id = $1
             `,
-            [shipment.id]
+            [shipment.id, user.name, user.login]
         )
 
         await client.query('COMMIT')
@@ -274,6 +277,8 @@ export async function POST(request: NextRequest) {
             toLocationName: shipment.to_location_name || location.name,
             acceptedRows,
             acceptedQuantity,
+            receivedByName: user.name,
+            receivedByLogin: user.login,
             message: `Перемещение ${shipment.number} принято в зону «${location.name}»`,
         })
     } catch (error) {

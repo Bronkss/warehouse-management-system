@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseLocation, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { resolveWarehouseContext, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -143,6 +143,10 @@ function mapShipment(row: ShipmentRow, rows: ShipmentItemRow[], currentLocationI
         toLocationName: row.to_location_name || '',
         toLocationSlug: row.to_location_slug || '',
         direction,
+        createdByName: (row as any).created_by_name || '',
+        createdByLogin: (row as any).created_by_login || '',
+        updatedByName: (row as any).updated_by_name || '',
+        updatedByLogin: (row as any).updated_by_login || '',
         rows: rows.map(item => ({
             shipmentItemId: Number(item.id),
             productId: item.product_id ? Number(item.product_id) : null,
@@ -189,7 +193,11 @@ async function loadShipmentHeader(
             from_l.name AS from_location_name,
             from_l.slug AS from_location_slug,
             to_l.name AS to_location_name,
-            to_l.slug AS to_location_slug
+            to_l.slug AS to_location_slug,
+            COALESCE(s.created_by_name, '') AS created_by_name,
+            COALESCE(s.created_by_login, '') AS created_by_login,
+            COALESCE(s.updated_by_name, '') AS updated_by_name,
+            COALESCE(s.updated_by_login, '') AS updated_by_login
         FROM product_shipments s
         LEFT JOIN locations from_l ON from_l.id = s.from_location_id
         LEFT JOIN locations to_l ON to_l.id = s.to_location_id
@@ -319,7 +327,7 @@ async function syncLegacyTochkaStock(
 
 export async function GET(request: NextRequest, context: RouteContext) {
     try {
-        const location = await resolveWarehouseLocation(pool, request)
+        const { location } = await resolveWarehouseContext(pool, request)
         const params = await getParams(context)
         const id = Number(params.id)
 
@@ -356,7 +364,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     const client = await pool.connect()
 
     try {
-        const location = await resolveWarehouseLocation(client, request)
+        const { location, user } = await resolveWarehouseContext(client, request)
         const params = await getParams(context)
         const id = Number(params.id)
 
@@ -366,7 +374,6 @@ export async function PUT(request: NextRequest, context: RouteContext) {
 
         const body = await request.json() as ShipmentEditBody
         const rows = Array.isArray(body.rows) ? body.rows : []
-        const shipper = cleanString(body.shipper)
         const consignee = cleanString(body.consignee)
 
         if (rows.length === 0) {
@@ -511,7 +518,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                     comment,
                     created_by
                 )
-                VALUES ($1, $2, 'transfer_out_edit', $3, $4, 'product_shipment', $5, $6, 'system')
+                VALUES ($1, $2, 'transfer_out_edit', $3, $4, 'product_shipment', $5, $6, $7)
                 `,
                 [
                     productId,
@@ -520,6 +527,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
                     newStock,
                     id,
                     `Редактирование отгрузки ${shipment.number}`,
+                    user.login,
                 ]
             )
 
@@ -534,15 +542,17 @@ export async function PUT(request: NextRequest, context: RouteContext) {
             SET
                 shipper = $1,
                 consignee = $2,
-                total_rows = $3,
-                total_quantity = $4,
-                total_amount = $5,
+                updated_by_name = $3,
+                updated_by_login = $4,
+                total_rows = $5,
+                total_quantity = $6,
+                total_amount = $7,
                 status = 'shipped',
                 errors = '[]'::jsonb,
                 updated_at = NOW()
-            WHERE id = $6
+            WHERE id = $8
             `,
-            [shipper || null, consignee || null, rows.length, totalQuantity, totalAmount, id]
+            [location.name, consignee || null, user.name, user.login, rows.length, totalQuantity, totalAmount, id]
         )
 
         await client.query('COMMIT')
@@ -556,6 +566,8 @@ export async function PUT(request: NextRequest, context: RouteContext) {
             transferBarcode: shipment.transfer_barcode || '',
             totalRows: rows.length,
             updated: updatedProducts.length,
+            updatedByName: user.name,
+            updatedByLogin: user.login,
             detail,
         })
     } catch (error) {
