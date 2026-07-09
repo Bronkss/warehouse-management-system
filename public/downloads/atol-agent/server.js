@@ -447,6 +447,52 @@ const restoreMissingGsBeforeAi21VariablePart = value => {
         }
     }
 
+    // Для табачных блоков после AI 93 обычно идут ровно 4 символа криптохвоста.
+    // Если дальше сканер сразу отдаёт AI 240 без GS-разделителя, ЧЗ возвращает unrecognized.
+    // Пример до фикса: 93P2YW24002206793
+    // Нужно:          93P2YW<GS>24002206793
+    const restoreGsAfterAi93BeforeAi240 = () => {
+        let searchFromIndex = serialStartIndex;
+
+        while (searchFromIndex >= 0 && searchFromIndex < code.length) {
+            const ai93Index = code.indexOf('93', searchFromIndex);
+
+            if (ai93Index === -1) {
+                return false;
+            }
+
+            const cryptoValueStart = ai93Index + 2;
+            const cryptoValueEnd = cryptoValueStart + 4;
+            const cryptoValue = code.slice(cryptoValueStart, cryptoValueEnd);
+            const charAfterCryptoValue = code.slice(cryptoValueEnd, cryptoValueEnd + 1);
+
+            if (
+                cryptoValue.length === 4 &&
+                charAfterCryptoValue !== GS_CHAR &&
+                code.startsWith('240', cryptoValueEnd)
+            ) {
+                code = insertAt(code, cryptoValueEnd, GS_CHAR);
+                wasChanged = true;
+
+                console.log('Marking code GS/FNC1 restored after AI 93 crypto tail:');
+                console.log(JSON.stringify({
+                    beforeLength: originalCode.length,
+                    afterLength: code.length,
+                    insertedBeforeAi: '240',
+                    ai93Value: cryptoValue,
+                }, null, 2));
+
+                return true;
+            }
+
+            searchFromIndex = ai93Index + 2;
+        }
+
+        return false;
+    };
+
+    restoreGsAfterAi93BeforeAi240();
+
     if (wasChanged) {
         console.log('Marking code normalized preview:');
         console.log(JSON.stringify({
