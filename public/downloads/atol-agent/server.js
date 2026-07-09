@@ -342,74 +342,122 @@ const getAtolResultPayload = item => {
     return item;
 };
 
+const insertAt = (value, index, insertValue) => {
+    return `${value.slice(0, index)}${insertValue}${value.slice(index)}`;
+};
+
 const restoreMissingGsBeforeAi21VariablePart = value => {
-    const code = String(value || '');
+    const originalCode = String(value || '');
 
-    if (!code) {
-        return code;
-    }
-
-    // Если сканер корректно передал FNC1 / GS, ничего не трогаем.
-    if (code.includes(GS_CHAR)) {
-        return code;
+    if (!originalCode) {
+        return originalCode;
     }
 
     // Ожидаемый старт GS1 DataMatrix: (01) GTIN14 (21) serial.
-    if (!code.startsWith('01')) {
-        return code;
+    if (!originalCode.startsWith('01')) {
+        return originalCode;
     }
 
     const ai21Index = 16;
 
-    if (code.slice(ai21Index, ai21Index + 2) !== '21') {
-        return code;
+    if (originalCode.slice(ai21Index, ai21Index + 2) !== '21') {
+        return originalCode;
     }
+
+    let code = originalCode;
+    let wasChanged = false;
 
     const serialStartIndex = ai21Index + 2;
     const serialMinLength = 4;
     const serialMaxLength = 20;
-    const minCandidateIndex = serialStartIndex + serialMinLength;
-    const maxCandidateIndex = Math.min(code.length - 2, serialStartIndex + serialMaxLength);
+    const candidateAisAfter21 = ['8005', '91', '92', '93'];
 
-    const candidateAis = ['8005', '91', '92', '93'];
-    const candidates = [];
+    // Если сканер не передал FNC1/GS после переменного AI 21, восстанавливаем его
+    // перед следующим AI. Это нужно для длинных DataMatrix с блоков сигарет.
+    const hasGsAfterAi21 = code.indexOf(GS_CHAR, serialStartIndex) !== -1;
 
-    for (let index = minCandidateIndex; index <= maxCandidateIndex; index += 1) {
-        for (const ai of candidateAis) {
-            if (!code.startsWith(ai, index)) {
-                continue;
+    if (!hasGsAfterAi21) {
+        const minCandidateIndex = serialStartIndex + serialMinLength;
+        const maxCandidateIndex = Math.min(code.length - 2, serialStartIndex + serialMaxLength);
+        const candidates = [];
+
+        for (let index = minCandidateIndex; index <= maxCandidateIndex; index += 1) {
+            for (const ai of candidateAisAfter21) {
+                if (!code.startsWith(ai, index)) {
+                    continue;
+                }
+
+                const tailLength = code.length - index;
+
+                if (tailLength < ai.length + 1) {
+                    continue;
+                }
+
+                candidates.push({ index, ai, tailLength });
             }
+        }
 
-            const tailLength = code.length - index;
+        if (candidates.length > 0) {
+            candidates.sort((a, b) => a.index - b.index || b.ai.length - a.ai.length);
 
-            // Блок сигарет может иметь длинный криптохвост. Старое ограничение 12 символов ломало длинные КМ.
-            if (tailLength < ai.length + 1) {
-                continue;
-            }
+            const candidate = candidates[0];
+            code = insertAt(code, candidate.index, GS_CHAR);
+            wasChanged = true;
 
-            candidates.push({ index, ai, tailLength });
+            console.log('Marking code GS/FNC1 restored after AI 21 variable part:');
+            console.log(JSON.stringify({
+                beforeLength: originalCode.length,
+                afterLength: code.length,
+                insertedBeforeAi: candidate.ai,
+                serialLength: candidate.index - serialStartIndex,
+                tailLength: candidate.tailLength,
+            }, null, 2));
         }
     }
 
-    if (candidates.length === 0) {
-        return code;
+    // AI 8005 имеет фиксированную длину значения 6 цифр.
+    // После него у блока сигарет часто идёт AI 93, и сканер тоже может потерять GS.
+    // Пример до фикса: 800517500093tpGG...
+    // Нужно:          8005175000<GS>93tpGG...
+    const ai8005Index = code.indexOf('8005', serialStartIndex);
+
+    if (ai8005Index !== -1) {
+        const ai8005ValueStart = ai8005Index + 4;
+        const ai8005ValueEnd = ai8005ValueStart + 6;
+        const ai8005Value = code.slice(ai8005ValueStart, ai8005ValueEnd);
+        const charAfter8005Value = code.slice(ai8005ValueEnd, ai8005ValueEnd + 1);
+        const nextAiCandidates = ['91', '92', '93'];
+        const nextAi = nextAiCandidates.find(ai => code.startsWith(ai, ai8005ValueEnd));
+
+        if (
+            /^\d{6}$/.test(ai8005Value) &&
+            nextAi &&
+            charAfter8005Value !== GS_CHAR
+        ) {
+            code = insertAt(code, ai8005ValueEnd, GS_CHAR);
+            wasChanged = true;
+
+            console.log('Marking code GS/FNC1 restored after fixed AI 8005 value:');
+            console.log(JSON.stringify({
+                beforeLength: originalCode.length,
+                afterLength: code.length,
+                insertedBeforeAi: nextAi,
+                ai8005Value,
+            }, null, 2));
+        }
     }
 
-    candidates.sort((a, b) => a.index - b.index || b.ai.length - a.ai.length);
+    if (wasChanged) {
+        console.log('Marking code normalized preview:');
+        console.log(JSON.stringify({
+            beforeLength: originalCode.length,
+            afterLength: code.length,
+            before: originalCode,
+            after: code.replaceAll(GS_CHAR, '<GS>'),
+        }, null, 2));
+    }
 
-    const candidate = candidates[0];
-    const restored = `${code.slice(0, candidate.index)}${GS_CHAR}${code.slice(candidate.index)}`;
-
-    console.log('Marking code GS/FNC1 restored after AI 21 variable part:');
-    console.log(JSON.stringify({
-        beforeLength: code.length,
-        afterLength: restored.length,
-        insertedBeforeAi: candidate.ai,
-        serialLength: candidate.index - serialStartIndex,
-        tailLength: candidate.tailLength,
-    }, null, 2));
-
-    return restored;
+    return code;
 };
 
 const normalizeMarkingCodeInput = value => {
