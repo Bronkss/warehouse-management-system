@@ -518,14 +518,23 @@ const buildNativeDriverMarkingParams = (markingCode, options = {}) => {
         rawPreview: normalizedMarkingCode.replaceAll(GS_CHAR, '<GS>'),
     }, null, 2));
 
-    return {
+    const params = {
         imcType,
         imc: encodedImc,
         itemEstimatedStatus,
         imcModeProcessing: 0,
-        itemQuantity: 1,
-        itemUnits: 'piece',
     };
+
+    // Для полного выбытия штучного товара по ФФД 1.2 АТОЛу не нужны itemQuantity/itemUnits.
+    // Эти поля нужны для частичного выбытия. Для блока сигарет мы уже передаём его в ККТ
+    // как одну маркированную единицу с ценой блока, поэтому лишние itemQuantity/itemUnits
+    // могут ломать проверку статуса КМ у ОИСМ.
+    if (options.includeQuantityParams === true) {
+        params.itemQuantity = Number(options.itemQuantity || 1);
+        params.itemUnits = options.itemUnits || 'piece';
+    }
+
+    return params;
 };
 
 const getDriverJsonPaymentType = paymentMethod => {
@@ -627,7 +636,9 @@ const buildDriverJsonSellItem = item => {
     const sellItem = {
         name: String(isBlock ? `${item.name || 'Товар'} блок` : item.name || 'Товар').slice(0, 128),
         paymentMethod: 'fullPayment',
-        paymentObject: marked ? 'commodityWithMarking' : 'commodity',
+        paymentObject: marked
+            ? (isBlock || String(item.category || '').toLowerCase().includes('табач') ? 'excise' : 'commodityWithMarking')
+            : 'commodity',
         price,
         quantity,
         amount,
@@ -686,6 +697,9 @@ const buildDriverJsonSellCommand = receipt => {
         taxes: [],
         type: 'sell',
         useVAT18: false,
+        // КМ уже проверен и принят перед sell через begin/get/assert/accept.
+        // Без этого флага некоторые версии драйвера пытаются проверять КМ повторно внутри чека.
+        validateMarkingCodes: false,
     };
 };
 
@@ -1314,6 +1328,14 @@ app.post('/marking/precheck', requireToken, async (req, res) => {
         const parsed = parseBatchResult(batch);
         const statusInfo = determineMarkingStatus(parsed.markingStatuses);
 
+        console.log('ATOL marking precheck result:');
+        console.log(JSON.stringify({
+            markingStatus: statusInfo.markingStatus,
+            canSell: statusInfo.canSell,
+            message: statusInfo.message,
+            latestStatus: statusInfo.status,
+        }, null, 2));
+
         reset = await resetMarkingValidationState();
 
         res.json({
@@ -1601,4 +1623,5 @@ app.listen(PORT, '127.0.0.1', () => {
     console.log(`Marking status attempts: ${MARKING_STATUS_ATTEMPTS}`);
     console.log(`Marking status interval: ${MARKING_STATUS_INTERVAL_MS} ms`);
     console.log('Strict marking sell: enabled. Only [M+] can be fiscalized.');
+    console.log('Marking final fix: base64 auto, no itemQuantity for full piece sold, no double validation.');
 });
