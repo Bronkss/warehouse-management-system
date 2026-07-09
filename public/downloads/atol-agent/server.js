@@ -27,6 +27,17 @@ const GS_CHAR = '\u001d';
 const MARKING_STATUS_ATTEMPTS = Number(process.env.MARKING_STATUS_ATTEMPTS || 10);
 const MARKING_STATUS_INTERVAL_MS = Number(process.env.MARKING_STATUS_INTERVAL_MS || 1200);
 
+// Для обычной пачки оставляем строгую проверку [M+].
+// Для блока сигарет фронт передаёт markingPackageMode: 'block'.
+// У некоторых касс/версий драйвера предварительная проверка групповой упаковки возвращает M/M-,
+// хотя сам чек может пройти через JSON-команду sell с imcParams.
+// Поэтому для блоков отдельный режим: по умолчанию не запускаем ручной precheck, а отдаём КМ в sell.
+const ATOL_MARKING_DEFAULT_IMC_TYPE = Number(process.env.ATOL_MARKING_DEFAULT_IMC_TYPE || 256);
+const ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS = Number(process.env.ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS || 1);
+const ATOL_MARKING_BLOCK_IMC_TYPE = Number(process.env.ATOL_MARKING_BLOCK_IMC_TYPE || ATOL_MARKING_DEFAULT_IMC_TYPE);
+const ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS = Number(process.env.ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS || ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS);
+const ATOL_MARKING_BLOCK_VALIDATION_MODE = String(process.env.ATOL_MARKING_BLOCK_VALIDATION_MODE || 'strict').trim().toLowerCase();
+
 app.use(express.json({ limit: '4mb' }));
 
 app.use((req, res, next) => {
@@ -390,13 +401,40 @@ const normalizeMarkingCodeInput = value => {
     return restoreMissingGsBeforeAi93(normalized);
 };
 
-const buildNativeDriverMarkingParams = markingCode => {
+const isTobaccoBlockItem = item => {
+    const mode = String(item?.markingPackageMode || item?.packageMode || '').trim().toLowerCase();
+    const packageQuantity = Number(item?.markingPackageQuantity || item?.packageQuantity || item?.quantity || 1);
+
+    return (
+        mode === 'block' ||
+        mode === 'cigarette_block' ||
+        mode === 'tobacco_block' ||
+        item?.isCigaretteBlock === true ||
+        item?.tobaccoBlock === true ||
+        (mode === 'group' && packageQuantity > 1)
+    );
+};
+
+const getMarkingOptionsForItem = item => {
+    const isBlock = isTobaccoBlockItem(item);
+
+    return {
+        isBlock,
+        imcType: isBlock ? ATOL_MARKING_BLOCK_IMC_TYPE : ATOL_MARKING_DEFAULT_IMC_TYPE,
+        itemEstimatedStatus: isBlock
+            ? ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS
+            : ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS,
+        validationMode: isBlock ? ATOL_MARKING_BLOCK_VALIDATION_MODE : 'strict',
+    };
+};
+
+const buildNativeDriverMarkingParams = (markingCode, options = {}) => {
     const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
 
     return {
-        imcType: 256,
+        imcType: Number(options.imcType || ATOL_MARKING_DEFAULT_IMC_TYPE),
         imc: normalizedMarkingCode,
-        itemEstimatedStatus: 1,
+        itemEstimatedStatus: Number(options.itemEstimatedStatus || ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS),
         imcModeProcessing: 0,
     };
 };
@@ -486,7 +524,14 @@ const buildDriverJsonSellItem = item => {
     }
 
     if (marked && markingCode) {
-        sellItem.imcParams = buildNativeDriverMarkingParams(markingCode);
+        sellItem.imcParams = buildNativeDriverMarkingParams(
+            markingCode,
+            getMarkingOptionsForItem(item)
+        );
+
+        if (isTobaccoBlockItem(item)) {
+            sellItem.userData = String(item.markingMessage || 'Блок сигарет').slice(0, 64);
+        }
     }
 
     return sellItem;
@@ -519,8 +564,8 @@ const buildDriverJsonSellCommand = receipt => {
     };
 };
 
-const buildNativeMarkingStatusPollCommands = markingCode => {
-    const params = buildNativeDriverMarkingParams(markingCode);
+const buildNativeMarkingStatusPollCommands = (markingCode, options = {}) => {
+    const params = buildNativeDriverMarkingParams(markingCode, options);
 
     const commands = [
         {
@@ -544,13 +589,22 @@ const buildNativeMarkingStatusPollCommands = markingCode => {
     return commands;
 };
 
-const buildNativeMarkingCheckCommands = markingCode => {
-    const commands = buildNativeMarkingStatusPollCommands(markingCode);
+const buildNativeMarkingCheckCommands = (markingCode, options = {}) => {
+    const validationMode = String(options.validationMode || 'strict').trim().toLowerCase();
+
+    if (validationMode === 'sell_only') {
+        return [];
+    }
+
+    const commands = buildNativeMarkingStatusPollCommands(markingCode, options);
+
+    if (validationMode !== 'accept_without_assert') {
+        commands.push({
+            type: '__assertMarkingPositive',
+        });
+    }
 
     commands.push(
-        {
-            type: '__assertMarkingPositive',
-        },
         {
             type: 'acceptMarkingCode',
         },
@@ -577,7 +631,8 @@ const buildNativeMarkedReceiptBatchCommands = receipt => {
             throw new Error(`Для маркированного товара "${item.name || 'Товар'}" не передан DataMatrix`);
         }
 
-        commands.push(...buildNativeMarkingCheckCommands(markingCode));
+        const markingOptions = getMarkingOptionsForItem(item);
+        commands.push(...buildNativeMarkingCheckCommands(markingCode, markingOptions));
     }
 
     commands.push(buildDriverJsonSellCommand(receipt));
@@ -858,6 +913,9 @@ app.get('/health', requireToken, async (req, res) => {
         markingStatusAttempts: MARKING_STATUS_ATTEMPTS,
         markingStatusIntervalMs: MARKING_STATUS_INTERVAL_MS,
         strictMarkingSell: true,
+        blockMarkingValidationMode: ATOL_MARKING_BLOCK_VALIDATION_MODE,
+        blockImcType: ATOL_MARKING_BLOCK_IMC_TYPE,
+        blockItemEstimatedStatus: ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS,
     });
 });
 
