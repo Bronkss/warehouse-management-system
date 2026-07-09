@@ -30,15 +30,23 @@ const BASE_MENU_ITEMS = [
     { title: 'Отгрузки', icon: '/icons/otgruzki.png', linkName: 'otgruzki' },
     { title: 'Доставки', icon: '/icons/delivery.png', linkName: 'deliveries' },
     { title: 'Списания', icon: '/icons/spisaniya.png', linkName: 'writeoff' },
+    { title: 'Инвентаризация', icon: '/icons/inventarizachiya.png', linkName: 'inventory' },
+    { title: 'Статистика', icon: '/icons/statistic.png', linkName: 'statistics' },
+    { title: 'Закупка', icon: '/icons/zakypki.png', linkName: 'purchase' },
 ]
 
 const MAIN_WAREHOUSE_HIDDEN_LINKS = new Set(['sales', 'deliveries'])
+const MAIN_WAREHOUSE_ONLY_LINKS = new Set(['statistics', 'purchase'])
 const TOCHKA_ONLY_LINKS = new Set(['deliveries'])
 
 function getMenuItemsForLocation(locationSlug: string, locationType: string) {
     return BASE_MENU_ITEMS.filter(item => {
         if (locationType === 'warehouse' || locationSlug === 'main-warehouse') {
             return !MAIN_WAREHOUSE_HIDDEN_LINKS.has(item.linkName)
+        }
+
+        if (MAIN_WAREHOUSE_ONLY_LINKS.has(item.linkName)) {
+            return false
         }
 
         if (TOCHKA_ONLY_LINKS.has(item.linkName)) {
@@ -406,6 +414,7 @@ export default function SystemShell({ children }: Props) {
     const [currentLocationType, setCurrentLocationType] = React.useState('store')
     const [currentUserName, setCurrentUserName] = React.useState('Пользователь')
     const [currentUserLogin, setCurrentUserLogin] = React.useState('')
+    const [isAuthStateHydrated, setIsAuthStateHydrated] = React.useState(false)
     const [deliveryAlerts, setDeliveryAlerts] = React.useState<DeliveryAlertOrder[]>([])
     const [isDeliveryAlertOpen, setIsDeliveryAlertOpen] = React.useState(false)
     const [isAcceptingDeliveryId, setIsAcceptingDeliveryId] = React.useState<string | null>(null)
@@ -429,10 +438,11 @@ export default function SystemShell({ children }: Props) {
         setCurrentLocationType(readCurrentLocationType())
         setCurrentUserName(readCurrentUserName())
         setCurrentUserLogin(readCurrentUserLogin())
+        setIsAuthStateHydrated(true)
     }, [pathname])
 
     React.useEffect(() => {
-        if (!pathname) {
+        if (!pathname || !isAuthStateHydrated) {
             return
         }
 
@@ -443,8 +453,13 @@ export default function SystemShell({ children }: Props) {
 
         if (isMainWarehouse && (pathname === '/online-kassa' || pathname === '/sales')) {
             router.replace('/system')
+            return
         }
-    }, [isMainWarehouse, isTochkaLocation, pathname, router])
+
+        if (!isMainWarehouse && (pathname === '/statistics' || pathname === '/purchase')) {
+            router.replace('/system')
+        }
+    }, [isAuthStateHydrated, isMainWarehouse, isTochkaLocation, pathname, router])
 
     const loadDeliveryAlerts = React.useCallback(async () => {
         if (!isTochkaLocation) {
@@ -755,40 +770,80 @@ export default function SystemShell({ children }: Props) {
 
     return (
         <div className="system-root min-h-screen w-full bg-[#ececec] m-0 p-0">
-            <div className="system-wrapper min-h-screen overflow-x-hidden bg-[#ececec] pt-[76px] md:pt-[84px]">
+            <div className="system-wrapper min-h-screen overflow-x-hidden bg-[#ececec] pt-[150px]">
                 <header className="system-header fixed left-0 right-0 top-0 z-[50] bg-[#e5765d] px-4 py-4 shadow-[0_8px_22px_rgba(0,0,0,0.12)] md:px-6">
-                    <div className="system-header-content mx-auto grid max-w-[1800px] grid-cols-[auto_1fr_auto] items-center gap-4">
-                        <div className="system-header-left flex min-w-0 shrink-0 items-center gap-3">
-                            <Link
-                                href="/system"
-                                className="system-home-button flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#e5765d] shadow-sm transition hover:-translate-y-0.5 hover:bg-[#fff7f4]"
-                                aria-label="На главную"
-                                title="На главную"
-                            >
-                                <HomeIcon />
-                            </Link>
+                    <div className="mx-auto flex max-w-[1900px] flex-col gap-3">
+                        <div className="system-header-top flex items-center justify-between gap-4">
+                            <div className="system-header-left flex min-w-0 shrink-0 items-center gap-3">
+                                <Link
+                                    href="/system"
+                                    className="system-home-button flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#e5765d] shadow-sm transition hover:-translate-y-0.5 hover:bg-[#fff7f4]"
+                                    aria-label="На главную"
+                                    title="На главную"
+                                >
+                                    <HomeIcon />
+                                </Link>
 
-                            <div className="system-brand hidden min-w-0 sm:block">
-                                <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/70">
-                                    Складской учёт
+                                <div className="system-brand hidden min-w-0 sm:block">
+                                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/70">
+                                        Складской учёт
+                                    </div>
+                                    <div className="truncate text-lg font-bold leading-5 text-white">
+                                        {currentLocationName}
+                                    </div>
                                 </div>
-                                <div className="truncate text-lg font-bold leading-5 text-white">
-                                    {currentLocationName}
-                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setIsMenuOpen((prev) => !prev)}
+                                    className="system-mobile-menu-button h-11 items-center gap-2 rounded-2xl bg-white px-4 text-sm font-bold text-[#e5765d] shadow-sm transition hover:bg-[#fff7f4]"
+                                >
+                                    <MenuIcon />
+                                    <span>Меню</span>
+                                </button>
                             </div>
 
-                            <button
-                                type="button"
-                                onClick={() => setIsMenuOpen((prev) => !prev)}
-                                className="system-mobile-menu-button h-11 items-center gap-2 rounded-2xl bg-white px-4 text-sm font-bold text-[#e5765d] shadow-sm transition hover:bg-[#fff7f4]"
-                            >
-                                <MenuIcon />
-                                <span>Меню</span>
-                            </button>
+                            <div className="system-header-actions ml-auto flex shrink-0 items-center justify-end gap-2">
+                                <div
+                                    className="system-location-pill hidden h-11 min-w-[320px] max-w-[420px] items-center rounded-2xl bg-white/18 px-4 text-left text-white ring-1 ring-white/20 lg:flex"
+                                    title={`${currentLocationName} · ${currentUserName}${currentUserLogin ? ` (${currentUserLogin})` : ''}`}
+                                >
+                                    <div className="min-w-0">
+                                        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/70">
+                                            Зона / пользователь
+                                        </div>
+                                        <div className="max-w-[390px] truncate text-sm font-extrabold leading-4">
+                                            {currentLocationName} · {currentUserName}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {!isMainWarehouse && (
+                                    <Link
+                                        href="/online-kassa"
+                                        className={`system-kassa-button flex h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
+                                            pathname === '/online-kassa'
+                                                ? 'bg-[#2f2f2f] text-white shadow-[0_8px_18px_rgba(0,0,0,0.16)]'
+                                                : 'bg-[#2f2f2f]/88 text-white hover:-translate-y-0.5 hover:bg-[#2f2f2f]'
+                                        }`}
+                                    >
+                                        <CashRegisterIcon />
+                                        <span>Касса</span>
+                                    </Link>
+                                )}
+
+                                <button
+                                    type="button"
+                                    onClick={handleLogout}
+                                    className="system-logout-button flex h-11 items-center justify-center rounded-2xl border border-white/24 bg-white/14 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-white/22"
+                                >
+                                    Выйти
+                                </button>
+                            </div>
                         </div>
 
-                        <nav className="system-desktop-menu min-w-0 justify-self-center">
-                            <div className="flex max-w-full items-center justify-center gap-2 overflow-x-auto px-1 py-1">
+                        <nav className="system-desktop-menu min-w-0">
+                            <div className="grid w-full grid-cols-[repeat(auto-fit,minmax(145px,1fr))] gap-2">
                                 {menuItems.map((item) => {
                                     const href = `/${item.linkName}`
                                     const isActive = pathname === href
@@ -797,62 +852,37 @@ export default function SystemShell({ children }: Props) {
                                         <Link
                                             href={href}
                                             key={item.title}
-                                            className={`group flex h-11 shrink-0 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
+                                            className={`group system-menu-link relative flex h-12 min-w-0 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-extrabold shadow-sm transition ${
                                                 isActive
-                                                    ? 'bg-[#2f2f2f] text-white'
-                                                    : 'bg-white/92 text-[#3a3a3a] hover:-translate-y-0.5 hover:bg-white'
+                                                    ? 'border-white bg-white text-[#2f2f2f] shadow-[0_8px_20px_rgba(0,0,0,0.16)] ring-2 ring-[#2f2f2f]/12'
+                                                    : 'border-white/70 bg-white/92 text-[#3a3a3a] hover:-translate-y-0.5 hover:border-white hover:bg-white hover:shadow-[0_8px_18px_rgba(0,0,0,0.12)]'
                                             }`}
                                         >
-                                            <span className="relative flex h-[20px] w-[20px] items-center justify-center rounded-lg bg-white/70 p-0.5">
+                                            <span className={`relative flex h-[25px] w-[25px] shrink-0 items-center justify-center rounded-xl p-1 ${
+                                                isActive
+                                                    ? 'bg-[#fff4ef] ring-1 ring-[#e5765d]/25'
+                                                    : 'bg-[#fff7f4] ring-1 ring-black/5'
+                                            }`}>
                                                 <Image
                                                     src={item.icon}
                                                     alt={item.title}
                                                     fill
-                                                    className="object-contain"
+                                                    className="object-contain p-1"
                                                 />
                                             </span>
 
-                                            <span>{item.title}</span>
+                                            <span className="min-w-0 truncate">
+                                                {item.title}
+                                            </span>
+
+                                            {isActive && (
+                                                <span className="pointer-events-none absolute inset-x-5 bottom-1.5 h-1 rounded-full bg-[#e5765d]/70" />
+                                            )}
                                         </Link>
                                     )
                                 })}
                             </div>
                         </nav>
-
-                        <div className="system-header-actions ml-auto flex shrink-0 items-center justify-end gap-2">
-                            <div className="system-location-pill hidden h-11 min-w-[285px] max-w-[340px] items-center rounded-2xl bg-white/18 px-4 text-left text-white ring-1 ring-white/20 lg:flex">
-                                <div>
-                                    <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/70">
-                                        Зона / пользователь
-                                    </div>
-                                    <div className="max-w-[310px] truncate text-sm font-extrabold leading-4">
-                                        {currentLocationName} · {currentUserName}{currentUserLogin ? ` (${currentUserLogin})` : ''}
-                                    </div>
-                                </div>
-                            </div>
-
-                            {!isMainWarehouse && (
-                                <Link
-                                    href="/online-kassa"
-                                    className={`system-kassa-button flex h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
-                                        pathname === '/online-kassa'
-                                            ? 'bg-[#2f2f2f] text-white'
-                                            : 'bg-[#2f2f2f]/88 text-white hover:-translate-y-0.5 hover:bg-[#2f2f2f]'
-                                    }`}
-                                >
-                                    <CashRegisterIcon />
-                                    <span>Касса</span>
-                                </Link>
-                            )}
-
-                            <button
-                                type="button"
-                                onClick={handleLogout}
-                                className="system-logout-button flex h-11 items-center justify-center rounded-2xl border border-white/24 bg-white/14 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-white/22"
-                            >
-                                Выйти
-                            </button>
-                        </div>
                     </div>
 
                     {isMenuOpen && (
@@ -862,7 +892,7 @@ export default function SystemShell({ children }: Props) {
                                     href="/system"
                                     className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
                                         pathname === '/system'
-                                            ? 'bg-white text-[#e5765d]'
+                                            ? 'bg-white text-[#e5765d] ring-2 ring-white/45'
                                             : 'bg-white/16 text-white hover:bg-white/22'
                                     }`}
                                 >
@@ -878,7 +908,7 @@ export default function SystemShell({ children }: Props) {
                                         href="/online-kassa"
                                         className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
                                             pathname === '/online-kassa'
-                                                ? 'bg-white text-[#e5765d]'
+                                                ? 'bg-white text-[#e5765d] ring-2 ring-white/45'
                                                 : 'bg-white/16 text-white hover:bg-white/22'
                                         }`}
                                     >
@@ -912,16 +942,20 @@ export default function SystemShell({ children }: Props) {
                                             key={item.title}
                                             className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
                                                 isActive
-                                                    ? 'bg-white text-[#e5765d]'
+                                                    ? 'bg-white text-[#2f2f2f] ring-2 ring-white/45'
                                                     : 'bg-white/16 text-white hover:bg-white/22'
                                             }`}
                                         >
-                                            <span className="relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-lg bg-white/85 p-0.5">
+                                            <span className={`relative flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded-xl p-1 ${
+                                                isActive
+                                                    ? 'bg-[#fff4ef] ring-1 ring-[#e5765d]/25'
+                                                    : 'bg-white/85'
+                                            }`}>
                                                 <Image
                                                     src={item.icon}
                                                     alt={item.title}
                                                     fill
-                                                    className="object-contain"
+                                                    className="object-contain p-1"
                                                 />
                                             </span>
 
@@ -1320,12 +1354,10 @@ export default function SystemShell({ children }: Props) {
                     display: none;
                 }
 
-                .system-desktop-menu > div,
                 .news-cards-scroll {
                     scrollbar-width: none;
                 }
 
-                .system-desktop-menu > div::-webkit-scrollbar,
                 .news-cards-scroll::-webkit-scrollbar {
                     display: none;
                 }
@@ -1356,7 +1388,7 @@ export default function SystemShell({ children }: Props) {
                         padding-top: 72px;
                     }
 
-                    .system-header-content {
+                    .system-header-top {
                         display: flex;
                         justify-content: space-between;
                     }
@@ -1440,23 +1472,37 @@ export default function SystemShell({ children }: Props) {
                     }
                 }
 
-                @media (min-width: 768px) and (max-width: 1280px) {
+                @media (min-width: 768px) and (max-width: 1180px) {
                     .system-wrapper {
-                        padding-top: 136px;
+                        padding-top: 206px;
                     }
 
-                    .system-header-content {
-                        grid-template-columns: auto auto;
+                    .system-header-top {
+                        align-items: flex-start;
+                        gap: 12px;
                     }
 
-                    .system-desktop-menu {
-                        grid-column: 1 / -1;
-                        order: 3;
-                        justify-self: stretch;
+                    .system-header-actions {
+                        flex-wrap: wrap;
+                    }
+
+                    .system-location-pill {
+                        min-width: 260px;
+                        max-width: 330px;
                     }
 
                     .system-desktop-menu > div {
-                        justify-content: flex-start;
+                        grid-template-columns: repeat(3, minmax(0, 1fr));
+                    }
+                }
+
+                @media (min-width: 1181px) and (max-width: 1550px) {
+                    .system-wrapper {
+                        padding-top: 152px;
+                    }
+
+                    .system-desktop-menu > div {
+                        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
                     }
                 }
             `}</style>
