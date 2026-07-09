@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
+import { requireWarehouseSection } from '@/app/lib/serverWarehouseAccess'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -236,8 +236,11 @@ function assertMainWarehouse(locationSlug: string) {
 
 export async function GET(request: NextRequest) {
     try {
-        const { location } = await resolveWarehouseContext(pool, request)
-        assertMainWarehouse(location.slug)
+        const access = await requireWarehouseSection(pool, request, 'statistics')
+
+        if (!access.ok) {
+            return access.response
+        }
 
         const url = new URL(request.url)
         const selectedLocation = String(url.searchParams.get('location') || 'all').trim()

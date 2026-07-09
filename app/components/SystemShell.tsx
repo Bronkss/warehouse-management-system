@@ -5,6 +5,13 @@ import Image from 'next/image'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import type { ReactNode } from 'react'
+import {
+    canUseWarehouseSection,
+    getFirstAllowedRouteForLocation,
+    getForbiddenSectionMessage,
+    getWarehouseSectionFromPathname,
+    type WarehouseSection,
+} from '@/app/lib/warehouseAccess'
 
 const TRAINING_STORAGE_KEY = 'warehouse.system.training.seen.v1.2026_07_01'
 const CURRENT_UPDATE_STORAGE_KEY = 'warehouse.system.current_update.seen.v5.2026_07_01_kassa_news_cards_fixed'
@@ -35,25 +42,13 @@ const BASE_MENU_ITEMS = [
     { title: 'Закупка', icon: '/icons/zakypki.png', linkName: 'purchase' },
 ]
 
-const MAIN_WAREHOUSE_HIDDEN_LINKS = new Set(['sales', 'deliveries'])
-const MAIN_WAREHOUSE_ONLY_LINKS = new Set(['statistics', 'purchase'])
-const TOCHKA_ONLY_LINKS = new Set(['deliveries'])
-
 function getMenuItemsForLocation(locationSlug: string, locationType: string) {
     return BASE_MENU_ITEMS.filter(item => {
-        if (locationType === 'warehouse' || locationSlug === 'main-warehouse') {
-            return !MAIN_WAREHOUSE_HIDDEN_LINKS.has(item.linkName)
-        }
-
-        if (MAIN_WAREHOUSE_ONLY_LINKS.has(item.linkName)) {
-            return false
-        }
-
-        if (TOCHKA_ONLY_LINKS.has(item.linkName)) {
-            return locationSlug === 'tochka'
-        }
-
-        return true
+        return canUseWarehouseSection(
+            locationSlug,
+            locationType,
+            item.linkName as WarehouseSection
+        )
     })
 }
 
@@ -446,20 +441,24 @@ export default function SystemShell({ children }: Props) {
             return
         }
 
-        if (!isTochkaLocation && pathname === '/deliveries') {
-            router.replace('/system')
+        const section = getWarehouseSectionFromPathname(pathname)
+
+        if (!section) {
             return
         }
 
-        if (isMainWarehouse && (pathname === '/online-kassa' || pathname === '/sales')) {
-            router.replace('/system')
-            return
+        if (!canUseWarehouseSection(currentLocationSlug, currentLocationType, section)) {
+            console.warn(getForbiddenSectionMessage(currentLocationName, section))
+            router.replace(getFirstAllowedRouteForLocation(currentLocationSlug, currentLocationType))
         }
-
-        if (!isMainWarehouse && (pathname === '/statistics' || pathname === '/purchase')) {
-            router.replace('/system')
-        }
-    }, [isAuthStateHydrated, isMainWarehouse, isTochkaLocation, pathname, router])
+    }, [
+        currentLocationName,
+        currentLocationSlug,
+        currentLocationType,
+        isAuthStateHydrated,
+        pathname,
+        router,
+    ])
 
     const loadDeliveryAlerts = React.useCallback(async () => {
         if (!isTochkaLocation) {

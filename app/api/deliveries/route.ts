@@ -1,27 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
+import { requireWarehouseSection } from '@/app/lib/serverWarehouseAccess'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-function forbiddenDeliveriesResponse() {
-    return NextResponse.json(
-        { message: 'Раздел «Доставки» доступен только в зоне ТОЧКА' },
-        { status: 403 },
-    )
-}
-
-function assertTochkaLocation(locationSlug: string) {
-    if (locationSlug !== 'tochka') {
-        throw new Error('DELIVERIES_FORBIDDEN')
-    }
-}
 
 export async function GET(request: NextRequest) {
     try {
-        const { location } = await resolveWarehouseContext(pool, request)
-        assertTochkaLocation(location.slug)
+        const access = await requireWarehouseSection(pool, request, 'deliveries')
+
+        if (!access.ok) {
+            return access.response
+        }
+
+        const { location } = access.context
 
         const { searchParams } = new URL(request.url)
 
@@ -136,9 +129,6 @@ export async function GET(request: NextRequest) {
 
         return NextResponse.json(result.rows)
     } catch (error) {
-        if (error instanceof Error && error.message === 'DELIVERIES_FORBIDDEN') {
-            return forbiddenDeliveriesResponse()
-        }
 
         console.error(error)
 

@@ -1,23 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
+import { requireWarehouseSection } from '@/app/lib/serverWarehouseAccess'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-function forbiddenDeliveriesResponse() {
-    return NextResponse.json(
-        { message: 'Раздел «Доставки» доступен только в зоне ТОЧКА' },
-        { status: 403 },
-    )
-}
 
 export async function GET(request: NextRequest) {
     try {
-        const { location } = await resolveWarehouseContext(pool, request)
+        const access = await requireWarehouseSection(pool, request, 'deliveries')
 
-        if (location.slug !== 'tochka') {
-            return forbiddenDeliveriesResponse()
+        if (!access.ok) {
+            return access.response
         }
 
         const result = await pool.query(

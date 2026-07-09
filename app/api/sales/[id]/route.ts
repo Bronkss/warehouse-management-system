@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
+import { requireWarehouseSection } from '@/app/lib/serverWarehouseAccess'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -18,7 +18,13 @@ async function getReceiptId(context: RouteContext): Promise<string> {
 export async function GET(request: NextRequest, context: RouteContext) {
     try {
         const id = await getReceiptId(context)
-        const { location } = await resolveWarehouseContext(pool, request)
+        const access = await requireWarehouseSection(pool, request, 'sales')
+
+        if (!access.ok) {
+            return access.response
+        }
+
+        const { location } = access.context
 
         const result = await pool.query(
             `
@@ -65,7 +71,13 @@ export async function GET(request: NextRequest, context: RouteContext) {
 export async function DELETE(request: NextRequest, context: RouteContext) {
     try {
         const id = await getReceiptId(context)
-        const { location } = await resolveWarehouseContext(pool, request)
+        const access = await requireWarehouseSection(pool, request, 'sales')
+
+        if (!access.ok) {
+            return access.response
+        }
+
+        const { location } = access.context
 
         const result = await pool.query(
             `

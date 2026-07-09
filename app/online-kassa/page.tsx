@@ -8,6 +8,7 @@ import {
 } from './pos-checkout-store';
 import JsBarcode from 'jsbarcode';
 import { useRouter } from 'next/navigation';
+import { canUseWarehouseSection, getFirstAllowedRouteForLocation } from '@/app/lib/warehouseAccess';
 import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -199,6 +200,18 @@ const getCurrentLocationName = (): string => {
         localStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
         DEFAULT_LOCATION_NAME
     ).trim() || DEFAULT_LOCATION_NAME;
+};
+
+const getCurrentLocationType = (): string => {
+    if (typeof window === 'undefined') {
+        return 'store';
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+        localStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+        'store'
+    ).trim() || 'store';
 };
 
 const getCurrentUserLogin = (): string => {
@@ -870,8 +883,17 @@ export default function PosPage() {
             return;
         }
 
-        setWarehouseLocationName(getCurrentLocationName());
-        setWarehouseLocationSlug(getCurrentLocationSlug());
+        const currentLocationSlug = getCurrentLocationSlug();
+        const currentLocationName = getCurrentLocationName();
+        const currentLocationType = getCurrentLocationType();
+
+        if (!canUseWarehouseSection(currentLocationSlug, currentLocationType, 'online-kassa')) {
+            router.replace(getFirstAllowedRouteForLocation(currentLocationSlug, currentLocationType));
+            return;
+        }
+
+        setWarehouseLocationName(currentLocationName);
+        setWarehouseLocationSlug(currentLocationSlug);
         setWarehouseUserName(getCurrentUserName());
         setWarehouseUserLogin(getCurrentUserLogin());
 

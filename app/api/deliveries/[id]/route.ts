@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
+import { requireWarehouseSection } from '@/app/lib/serverWarehouseAccess'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -30,18 +30,6 @@ async function getRouteParams(context: RouteContext) {
     return await context.params
 }
 
-function forbiddenDeliveriesResponse() {
-    return NextResponse.json(
-        { message: 'Раздел «Доставки» доступен только в зоне ТОЧКА' },
-        { status: 403 },
-    )
-}
-
-function assertTochkaLocation(locationSlug: string) {
-    if (locationSlug !== 'tochka') {
-        throw new Error('DELIVERIES_FORBIDDEN')
-    }
-}
 
 async function getDeliveryById(id: string) {
     const result = await pool.query(
@@ -122,8 +110,13 @@ async function getDeliveryById(id: string) {
 
 export async function GET(request: NextRequest, context: RouteContext) {
     try {
-        const { location } = await resolveWarehouseContext(pool, request)
-        assertTochkaLocation(location.slug)
+        const access = await requireWarehouseSection(pool, request, 'deliveries')
+
+        if (!access.ok) {
+            return access.response
+        }
+
+        const { location } = access.context
 
         const { id } = await getRouteParams(context)
         const delivery = await getDeliveryById(id)
@@ -137,9 +130,6 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
         return NextResponse.json(delivery)
     } catch (error) {
-        if (error instanceof Error && error.message === 'DELIVERIES_FORBIDDEN') {
-            return forbiddenDeliveriesResponse()
-        }
 
         console.error(error)
 
@@ -154,8 +144,13 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     const client = await pool.connect()
 
     try {
-        const { location, user } = await resolveWarehouseContext(pool, request)
-        assertTochkaLocation(location.slug)
+        const access = await requireWarehouseSection(pool, request, 'deliveries')
+
+        if (!access.ok) {
+            return access.response
+        }
+
+        const { user } = access.context
 
         const { id } = await getRouteParams(context)
         const body = await request.json()
@@ -227,9 +222,6 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     } catch (error) {
         await client.query('ROLLBACK')
 
-        if (error instanceof Error && error.message === 'DELIVERIES_FORBIDDEN') {
-            return forbiddenDeliveriesResponse()
-        }
 
         console.error(error)
 

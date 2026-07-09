@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient } from 'pg'
 import { pool } from '@/app/lib/db'
-import { resolveWarehouseContext, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import type { WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
+import { requireWarehouseSection } from '@/app/lib/serverWarehouseAccess'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -98,7 +99,13 @@ async function syncLegacyTochkaStock(
 
 export async function GET(request: NextRequest) {
     try {
-        const { location } = await resolveWarehouseContext(pool, request)
+        const access = await requireWarehouseSection(pool, request, 'sales')
+
+        if (!access.ok) {
+            return access.response
+        }
+
+        const { location } = access.context
 
         const result = await pool.query(
             `
@@ -184,7 +191,13 @@ export async function POST(request: NextRequest) {
 
         await client.query('BEGIN')
 
-        const { location, user } = await resolveWarehouseContext(client, request)
+        const access = await requireWarehouseSection(client, request, 'sales')
+
+        if (!access.ok) {
+            return access.response
+        }
+
+        const { location, user } = access.context
         const stockMovements: StockMovementDraft[] = []
 
         for (const item of items) {
