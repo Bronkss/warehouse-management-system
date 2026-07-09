@@ -1,11 +1,21 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
+import { requireWarehouseSection } from '@/app/lib/serverWarehouseAccess'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function GET(request: Request) {
+
+export async function GET(request: NextRequest) {
     try {
+        const access = await requireWarehouseSection(pool, request, 'deliveries')
+
+        if (!access.ok) {
+            return access.response
+        }
+
+        const { location } = access.context
+
         const { searchParams } = new URL(request.url)
 
         const search = searchParams.get('search')?.trim() || ''
@@ -108,8 +118,9 @@ export async function GET(request: Request) {
             ${whereSql}
             ORDER BY
                 CASE
-                    WHEN o.status IN ('new', 'accepted', 'assembling', 'delivering') THEN 0
-                    ELSE 1
+                    WHEN o.status = 'new' THEN 0
+                    WHEN o.status IN ('accepted', 'assembling', 'delivering') THEN 1
+                    ELSE 2
                 END ASC,
                 o.created_at DESC
             `,
@@ -118,6 +129,7 @@ export async function GET(request: Request) {
 
         return NextResponse.json(result.rows)
     } catch (error) {
+
         console.error(error)
 
         return NextResponse.json(

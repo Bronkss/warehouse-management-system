@@ -409,6 +409,34 @@ const getDriverJsonPaymentType = paymentMethod => {
     return '1';
 };
 
+const getReceiptOperatorName = receipt => {
+    const fromReceipt = String(receipt?.cashierName || receipt?.operatorName || '').trim();
+    return fromReceipt || ATOL_OPERATOR_NAME;
+};
+
+const getFfdMeasureCode = item => {
+    const unit = String(item?.unit || item?.measureName || '').trim().toLowerCase();
+    const explicitSource = item?.measureCode ?? item?.measurementUnitCode ?? item?.ffdMeasureCode;
+
+    if (explicitSource !== undefined && explicitSource !== null && explicitSource !== '') {
+        const explicitCode = Number(explicitSource);
+
+        if (explicitCode === 11 || explicitCode === 0) {
+            return explicitCode;
+        }
+    }
+
+    return unit === 'weight' || unit === 'kg' || unit === 'кг' ? 11 : 0;
+};
+
+const getAtolMeasurementUnit = item => {
+    return getFfdMeasureCode(item) === 11 ? 'kilogram' : 'piece';
+};
+
+const getFfdMeasureName = item => {
+    return getFfdMeasureCode(item) === 11 ? 'кг' : 'шт.';
+};
+
 const hasMarkingCode = item => {
     return Boolean(
         item?.markingCode ||
@@ -440,6 +468,11 @@ const buildDriverJsonSellItem = item => {
         price,
         quantity,
         amount,
+        measurementUnit: getAtolMeasurementUnit(item),
+        measurementUnitCode: getFfdMeasureCode(item),
+        measureOfQuantity: getFfdMeasureCode(item),
+        measureName: getFfdMeasureName(item),
+        tag2108: getFfdMeasureCode(item),
         infoDiscountAmount: 0,
         tax: {
             sum: 0,
@@ -448,9 +481,8 @@ const buildDriverJsonSellItem = item => {
         type: 'position',
     };
 
-    if (item.unit === 'piece' || !item.unit) {
+    if (getFfdMeasureCode(item) === 0) {
         sellItem.piece = true;
-        sellItem.measurementUnit = 'piece';
     }
 
     if (marked && markingCode) {
@@ -472,7 +504,7 @@ const buildDriverJsonSellCommand = receipt => {
         taxationType: ATOL_TAXATION_TYPE,
         items,
         operator: {
-            name: ATOL_OPERATOR_NAME,
+            name: getReceiptOperatorName(receipt),
             ...(ATOL_OPERATOR_VATIN ? { vatin: ATOL_OPERATOR_VATIN } : {}),
         },
         payments: [

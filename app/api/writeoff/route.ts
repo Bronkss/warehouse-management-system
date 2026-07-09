@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
+import type { PoolClient, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
+import { resolveWarehouseContext, type WarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -19,7 +21,7 @@ type WriteoffItemInput = {
     sellingPrice?: number | string | null
 }
 
-type ProductRow = {
+type ProductStockRow = QueryResultRow & {
     id: number
     name: string
     category: string | null
@@ -28,6 +30,10 @@ type ProductRow = {
     selling_price: string | number | null
     unit: ProductUnit | string | null
     stock: string | number | null
+}
+
+type WriteoffIdRow = QueryResultRow & {
+    id: number
 }
 
 const WRITEOFF_REASONS: WriteoffReason[] = [
@@ -55,18 +61,30 @@ function money(value: unknown): number {
     return Math.round((toNumber(value) + Number.EPSILON) * 100) / 100
 }
 
-function quantity(value: unknown, unit: ProductUnit): number {
-    const parsed = toNumber(value)
-
-    if (unit === 'weight') {
-        return Math.round((parsed + Number.EPSILON) * 1000) / 1000
-    }
-
-    return Math.floor(parsed)
+function roundStock(value: number): number {
+    return Math.round((value + Number.EPSILON) * 1000) / 1000
 }
 
 function normalizeUnit(value: unknown): ProductUnit {
     return value === 'weight' ? 'weight' : 'piece'
+}
+
+function normalizeQuantity(value: unknown, unit: ProductUnit, rowNumber: number): number {
+    const parsed = toNumber(value)
+
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error(`Строка ${rowNumber}: некорректное количество`)
+    }
+
+    if (unit === 'piece') {
+        if (!Number.isInteger(parsed)) {
+            throw new Error(`Строка ${rowNumber}: для штучного товара количество должно быть целым`)
+        }
+
+        return parsed
+    }
+
+    return roundStock(parsed)
 }
 
 function getReasonLabel(value: unknown, fallback?: unknown): string {
@@ -121,10 +139,110 @@ function mapInsertedRow(row: Record<string, unknown>) {
     }
 }
 
+async function ensureProductStockRow(client: PoolClient, productId: number, locationId: number) {
+    await client.query(
+        `
+        INSERT INTO product_stocks (product_id, location_id, stock)
+        VALUES ($1, $2, 0)
+        ON CONFLICT (product_id, location_id) DO NOTHING
+        `,
+        [productId, locationId]
+    )
+}
+
+async function loadProductStock(
+    client: PoolClient,
+    productId: number,
+    locationId: number
+): Promise<ProductStockRow | null> {
+    await ensureProductStockRow(client, productId, locationId)
+
+    const result = await client.query<ProductStockRow>(
+        `
+        SELECT
+            p.id,
+            p.name,
+            p.category,
+            p.barcode,
+            p.purchase_price,
+            p.selling_price,
+            p.unit,
+            ps.stock
+        FROM products p
+        JOIN product_stocks ps ON ps.product_id = p.id
+        WHERE p.id = $1 AND ps.location_id = $2
+        FOR UPDATE OF p, ps
+        `,
+        [productId, locationId]
+    )
+
+    return result.rows[0] || null
+}
+
+async function syncLegacyTochkaStock(
+    client: PoolClient,
+    location: WarehouseLocation,
+    productId: number,
+    stock: number
+) {
+    if (location.slug !== 'tochka') {
+        return
+    }
+
+    await client.query(
+        `
+        UPDATE products
+        SET
+            stock = $1,
+            updated_at = NOW()
+        WHERE id = $2
+        `,
+        [stock, productId]
+    )
+}
+
+async function insertStockMovement(
+    client: PoolClient,
+    productId: number,
+    location: WarehouseLocation,
+    quantityDelta: number,
+    stockAfter: number,
+    writeoffId: number,
+    comment: string,
+    createdBy: string
+) {
+    await client.query(
+        `
+        INSERT INTO stock_movements (
+            product_id,
+            location_id,
+            movement_type,
+            quantity_delta,
+            stock_after,
+            document_type,
+            document_id,
+            comment,
+            created_by
+        )
+        VALUES ($1, $2, 'writeoff', $3, $4, 'writeoff', $5, $6, $7)
+        `,
+        [
+            productId,
+            location.id,
+            quantityDelta,
+            stockAfter,
+            writeoffId,
+            comment,
+            createdBy,
+        ]
+    )
+}
+
 export async function POST(request: NextRequest) {
     const client = await pool.connect()
 
     try {
+        const { location, user } = await resolveWarehouseContext(client, request)
         const body = await request.json()
         const reason = String(body?.reason || '').trim() || 'other'
         const reasonLabel = getReasonLabel(reason, body?.reasonLabel)
@@ -143,25 +261,29 @@ export async function POST(request: NextRequest) {
 
         const number = createWriteoffNumber()
 
-        const writeoffResult = await client.query(
-            `INSERT INTO writeoffs (
+        const writeoffResult = await client.query<WriteoffIdRow>(
+            `
+            INSERT INTO writeoffs (
                 number,
                 reason,
                 reason_label,
                 responsible,
                 comment,
+                location_id,
+                created_by_name,
+                created_by_login,
                 total_rows,
                 total_quantity,
                 total_purchase_amount,
                 total_selling_amount,
                 status
-            ) VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 0, 'completed')
-            RETURNING *`,
-            [number, reason, reasonLabel, responsible, comment]
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, 0, 0, 'completed')
+            RETURNING id
+            `,
+            [number, reason, reasonLabel, responsible, comment, location.id, user.name, user.login]
         )
 
-        const writeoff = writeoffResult.rows[0]
-        const writeoffId = Number(writeoff.id)
+        const writeoffId = Number(writeoffResult.rows[0].id)
         const insertedRows: ReturnType<typeof mapInsertedRow>[] = []
 
         let totalQuantity = 0
@@ -170,46 +292,22 @@ export async function POST(request: NextRequest) {
 
         for (let index = 0; index < items.length; index += 1) {
             const item = items[index]
+            const rowNumber = index + 1
             const productId = Number(item.productId)
 
             if (!Number.isInteger(productId) || productId <= 0) {
-                throw new Error(`Строка ${index + 1}: товар не выбран`)
+                throw new Error(`Строка ${rowNumber}: товар не выбран`)
             }
 
-            const productResult = await client.query<ProductRow>(
-                `SELECT
-                    id,
-                    name,
-                    category,
-                    barcode,
-                    purchase_price,
-                    selling_price,
-                    unit,
-                    stock
-                FROM products
-                WHERE id = $1
-                FOR UPDATE`,
-                [productId]
-            )
-
-            const product = productResult.rows[0]
+            const product = await loadProductStock(client, productId, location.id)
 
             if (!product) {
-                throw new Error(`Строка ${index + 1}: товар не найден в базе`)
+                throw new Error(`Строка ${rowNumber}: товар не найден в базе`)
             }
 
             const unit = normalizeUnit(product.unit)
-            const qty = quantity(item.quantity, unit)
-
-            if (!Number.isFinite(qty) || qty <= 0) {
-                throw new Error(`Строка ${index + 1}: некорректное количество`)
-            }
-
-            if (unit === 'piece' && !Number.isInteger(qty)) {
-                throw new Error(`Строка ${index + 1}: для штучного товара количество должно быть целым`)
-            }
-
-            const previousStock = quantity(product.stock, unit)
+            const qty = normalizeQuantity(item.quantity, unit, rowNumber)
+            const previousStock = roundStock(toNumber(product.stock))
 
             if (qty > previousStock) {
                 throw new Error(
@@ -217,18 +315,27 @@ export async function POST(request: NextRequest) {
                 )
             }
 
-            const newStock = quantity(previousStock - qty, unit)
+            const newStock = roundStock(previousStock - qty)
             const purchasePrice = money(item.purchasePrice ?? product.purchase_price)
             const sellingPrice = money(item.sellingPrice ?? product.selling_price)
             const category = String(item.category ?? product.category ?? '').trim()
 
             await client.query(
-                'UPDATE products SET stock = $1 WHERE id = $2',
-                [newStock, productId]
+                `
+                UPDATE product_stocks
+                SET
+                    stock = $1,
+                    updated_at = NOW()
+                WHERE product_id = $2 AND location_id = $3
+                `,
+                [newStock, productId, location.id]
             )
 
+            await syncLegacyTochkaStock(client, location, productId, newStock)
+
             const insertedItemResult = await client.query(
-                `INSERT INTO writeoff_items (
+                `
+                INSERT INTO writeoff_items (
                     writeoff_id,
                     product_id,
                     row_id,
@@ -248,12 +355,13 @@ export async function POST(request: NextRequest) {
                     $1, $2, $3, $4, $5, $6, $7, $8, $9,
                     $10, $11, $12, $13, 'written_off', NULL
                 )
-                RETURNING *`,
+                RETURNING *
+                `,
                 [
                     writeoffId,
                     productId,
-                    `writeoff-${writeoffId}-${index + 1}`,
-                    index + 1,
+                    `writeoff-${writeoffId}-${rowNumber}`,
+                    rowNumber,
                     product.name,
                     category,
                     product.barcode || '',
@@ -266,6 +374,17 @@ export async function POST(request: NextRequest) {
                 ]
             )
 
+            await insertStockMovement(
+                client,
+                productId,
+                location,
+                -qty,
+                newStock,
+                writeoffId,
+                `Списание ${number} в зоне ${location.name}: ${reasonLabel}`,
+                user.login
+            )
+
             insertedRows.push(mapInsertedRow(insertedItemResult.rows[0]))
 
             totalQuantity += qty
@@ -274,19 +393,21 @@ export async function POST(request: NextRequest) {
         }
 
         const updatedWriteoffResult = await client.query(
-            `UPDATE writeoffs
-             SET
+            `
+            UPDATE writeoffs
+            SET
                 total_rows = $2,
                 total_quantity = $3,
                 total_purchase_amount = $4,
                 total_selling_amount = $5,
                 updated_at = NOW()
-             WHERE id = $1
-             RETURNING *`,
+            WHERE id = $1
+            RETURNING *
+            `,
             [
                 writeoffId,
                 insertedRows.length,
-                totalQuantity,
+                roundStock(totalQuantity),
                 money(totalPurchaseAmount),
                 money(totalSellingAmount),
             ]
@@ -304,6 +425,11 @@ export async function POST(request: NextRequest) {
             reasonLabel: updatedWriteoff.reason_label,
             responsible: updatedWriteoff.responsible,
             comment: updatedWriteoff.comment,
+            locationId: location.id,
+            locationName: location.name,
+            locationSlug: location.slug,
+            createdByName: user.name,
+            createdByLogin: user.login,
             totalRows: Number(updatedWriteoff.total_rows || 0),
             totalQuantity: toNumber(updatedWriteoff.total_quantity),
             totalPurchaseAmount: money(updatedWriteoff.total_purchase_amount),

@@ -409,6 +409,34 @@ const getDriverJsonPaymentType = paymentMethod => {
     return '1';
 };
 
+const getReceiptOperatorName = receipt => {
+    const fromReceipt = String(receipt?.cashierName || receipt?.operatorName || '').trim();
+    return fromReceipt || ATOL_OPERATOR_NAME;
+};
+
+const getFfdMeasureCode = item => {
+    const unit = String(item?.unit || item?.measureName || '').trim().toLowerCase();
+    const explicitSource = item?.measureCode ?? item?.measurementUnitCode ?? item?.ffdMeasureCode;
+
+    if (explicitSource !== undefined && explicitSource !== null && explicitSource !== '') {
+        const explicitCode = Number(explicitSource);
+
+        if (explicitCode === 11 || explicitCode === 0) {
+            return explicitCode;
+        }
+    }
+
+    return unit === 'weight' || unit === 'kg' || unit === 'кг' ? 11 : 0;
+};
+
+const getAtolMeasurementUnit = item => {
+    return getFfdMeasureCode(item) === 11 ? 'kilogram' : 'piece';
+};
+
+const getFfdMeasureName = item => {
+    return getFfdMeasureCode(item) === 11 ? 'кг' : 'шт.';
+};
+
 const hasMarkingCode = item => {
     return Boolean(
         item?.markingCode ||
@@ -440,6 +468,11 @@ const buildDriverJsonSellItem = item => {
         price,
         quantity,
         amount,
+        measurementUnit: getAtolMeasurementUnit(item),
+        measurementUnitCode: getFfdMeasureCode(item),
+        measureOfQuantity: getFfdMeasureCode(item),
+        measureName: getFfdMeasureName(item),
+        tag2108: getFfdMeasureCode(item),
         infoDiscountAmount: 0,
         tax: {
             sum: 0,
@@ -448,9 +481,8 @@ const buildDriverJsonSellItem = item => {
         type: 'position',
     };
 
-    if (item.unit === 'piece' || !item.unit) {
+    if (getFfdMeasureCode(item) === 0) {
         sellItem.piece = true;
-        sellItem.measurementUnit = 'piece';
     }
 
     if (marked && markingCode) {
@@ -472,7 +504,7 @@ const buildDriverJsonSellCommand = receipt => {
         taxationType: ATOL_TAXATION_TYPE,
         items,
         operator: {
-            name: ATOL_OPERATOR_NAME,
+            name: getReceiptOperatorName(receipt),
             ...(ATOL_OPERATOR_VATIN ? { vatin: ATOL_OPERATOR_VATIN } : {}),
         },
         payments: [
@@ -768,9 +800,9 @@ const resetMarkingValidationState = async () => {
 };
 
 const runNativeMarkedReceiptWithRetry = async ({
-    receipt,
-    logLabel = 'Driver native marked fiscal batch command:',
-}) => {
+                                                   receipt,
+                                                   logLabel = 'Driver native marked fiscal batch command:',
+                                               }) => {
     let commands = buildNativeMarkedReceiptBatchCommands(receipt);
 
     console.log(logLabel);
@@ -783,10 +815,10 @@ const runNativeMarkedReceiptWithRetry = async ({
 
     if (parsed.failed) {
         const failedMessage =
-            getAtolResultErrorMessage(parsed.failed) ||
-            parsed.failed.errorDescription ||
-            parsed.failed.message ||
-            '';
+                  getAtolResultErrorMessage(parsed.failed) ||
+                  parsed.failed.errorDescription ||
+                  parsed.failed.message ||
+                  '';
 
         if (isInvalidMarkingProcessStateError(failedMessage) && !isMarkingRejectedError(failedMessage)) {
             console.warn('Invalid marking process state. Reset marking state and retry once.');
@@ -996,20 +1028,20 @@ app.post('/fiscal/sell', requireToken, async (req, res) => {
         }
 
         const {
-            batch,
-            parsed,
-            retried,
-            reset,
-        } = await runNativeMarkedReceiptWithRetry({
+                  batch,
+                  parsed,
+                  retried,
+                  reset,
+              } = await runNativeMarkedReceiptWithRetry({
             receipt,
             logLabel: 'Driver native marked fiscal batch command:',
         });
 
         if (parsed.failed) {
             const message =
-                getAtolResultErrorMessage(parsed.failed) ||
-                parsed.failed.errorDescription ||
-                'Ошибка фискализации маркированного чека';
+                      getAtolResultErrorMessage(parsed.failed) ||
+                      parsed.failed.errorDescription ||
+                      'Ошибка фискализации маркированного чека';
 
             const statusInfo = determineMarkingStatus(parsed.markingStatuses);
             const httpStatus = isMarkingRejectedError(message) || statusInfo.markingStatus !== 'M+'
@@ -1273,12 +1305,12 @@ app.post('/marking/native-check', requireToken, async (req, res) => {
 app.post('/marking/native-sell-test', requireToken, async (req, res) => {
     try {
         const {
-            markingCode,
-            name = 'Тест маркировки',
-            price = 1,
-            quantity = 1,
-            paymentMethod = 'cash',
-        } = req.body || {};
+                  markingCode,
+                  name = 'Тест маркировки',
+                  price = 1,
+                  quantity = 1,
+                  paymentMethod = 'cash',
+              } = req.body || {};
 
         const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
 
@@ -1305,11 +1337,11 @@ app.post('/marking/native-sell-test', requireToken, async (req, res) => {
         };
 
         const {
-            batch,
-            parsed,
-            retried,
-            reset,
-        } = await runNativeMarkedReceiptWithRetry({
+                  batch,
+                  parsed,
+                  retried,
+                  reset,
+              } = await runNativeMarkedReceiptWithRetry({
             receipt,
             logLabel: 'Driver native marking sell-test batch command:',
         });

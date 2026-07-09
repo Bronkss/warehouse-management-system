@@ -46,3 +46,7 @@ backup.sql
 # Large KKT driver installers are stored in GitHub Releases
 public/downloads/KKT10-10.10.8.0-windows64-setup.exe
 public/downloads/KKT10-10.10.8.0-windows32-setup.exe
+
+# dump DB
+*.sql
+*.dump

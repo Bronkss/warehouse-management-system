@@ -1,30 +1,40 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
+import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function GET() {
+export async function GET(request: NextRequest) {
     try {
+        const { location } = await resolveWarehouseContext(pool, request)
+
         const result = await pool.query(
             `SELECT
-                id,
-                number,
-                source_file_name,
-                supplier,
-                invoice_number,
-                comment,
-                total_rows,
-                created_count,
-                updated_count,
-                skipped_count,
-                error_count,
-                status,
-                created_at,
-                updated_at
-             FROM product_acceptances
-             ORDER BY created_at DESC
-             LIMIT 100`
+                pa.id,
+                pa.number,
+                pa.source_file_name,
+                pa.supplier,
+                pa.invoice_number,
+                pa.comment,
+                pa.total_rows,
+                pa.created_count,
+                pa.updated_count,
+                pa.skipped_count,
+                pa.error_count,
+                pa.status,
+                pa.created_at,
+                pa.updated_at,
+                COALESCE(pa.created_by_name, '') AS created_by_name,
+                COALESCE(pa.created_by_login, '') AS created_by_login,
+                l.name AS location_name,
+                l.slug AS location_slug
+             FROM product_acceptances pa
+             JOIN locations l ON l.id = pa.location_id
+             WHERE pa.location_id = $1
+             ORDER BY pa.created_at DESC
+             LIMIT 100`,
+            [location.id]
         )
 
         return NextResponse.json(
@@ -43,6 +53,10 @@ export async function GET() {
                 status: row.status,
                 createdAt: row.created_at,
                 updatedAt: row.updated_at,
+                locationName: row.location_name,
+                locationSlug: row.location_slug,
+                createdByName: row.created_by_name,
+                createdByLogin: row.created_by_login,
             }))
         )
     } catch (error) {

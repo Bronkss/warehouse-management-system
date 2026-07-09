@@ -93,6 +93,19 @@ type ApiError = {
 }
 
 const WRITEOFF_DRAFT_KEY = 'warehouse.writeoff.page.draft.v1'
+const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug'
+
+function getCurrentLocationSlug() {
+    if (typeof window === 'undefined') {
+        return 'tochka'
+    }
+
+    return localStorage.getItem(AUTH_LOCATION_SLUG_KEY) || 'tochka'
+}
+
+function getWriteoffDraftKey() {
+    return `${WRITEOFF_DRAFT_KEY}:${getCurrentLocationSlug()}`
+}
 
 const WRITEOFF_REASONS: WriteoffReason[] = [
     { value: 'expired', label: 'Истечение срока годности' },
@@ -636,35 +649,48 @@ export default function Page() {
     }
 
     useEffect(() => {
-        try {
-            const rawDraft = localStorage.getItem(WRITEOFF_DRAFT_KEY)
+        let isMounted = true
 
-            if (rawDraft) {
-                const draft = JSON.parse(rawDraft) as Partial<WriteoffDraftState>
+        const restoreDraft = async () => {
+            try {
+                const rawDraft = localStorage.getItem(getWriteoffDraftKey())
 
-                setReason(draft.reason || 'expired')
-                setResponsible(draft.responsible || '')
-                setComment(draft.comment || '')
-                setSearchQuery(draft.searchQuery || '')
-                setItems(Array.isArray(draft.items) ? draft.items.map(item => ({
-                    ...item,
-                    product: normalizeProduct(item.product),
-                })) : [])
-                setHistorySearch(draft.historySearch || '')
+                if (!isMounted) return
+
+                if (rawDraft) {
+                    const draft = JSON.parse(rawDraft) as Partial<WriteoffDraftState>
+
+                    setReason(draft.reason || 'expired')
+                    setResponsible(draft.responsible || '')
+                    setComment(draft.comment || '')
+                    setSearchQuery(draft.searchQuery || '')
+                    setItems(Array.isArray(draft.items) ? draft.items.map(item => ({
+                        ...item,
+                        product: normalizeProduct(item.product),
+                    })) : [])
+                    setHistorySearch(draft.historySearch || '')
+                }
+            } catch (error) {
+                console.error(error)
+            } finally {
+                if (isMounted) {
+                    setIsDraftHydrated(true)
+                }
             }
-        } catch (error) {
-            console.error(error)
-        } finally {
-            setIsDraftHydrated(true)
         }
 
+        void restoreDraft()
         void loadHistory()
+
+        return () => {
+            isMounted = false
+        }
     }, [])
 
     useEffect(() => {
         if (!isDraftHydrated) return
 
-        localStorage.setItem(WRITEOFF_DRAFT_KEY, JSON.stringify({
+        localStorage.setItem(getWriteoffDraftKey(), JSON.stringify({
             reason,
             responsible,
             comment,
@@ -897,7 +923,7 @@ export default function Page() {
     }
 
     const clearDraft = () => {
-        localStorage.removeItem(WRITEOFF_DRAFT_KEY)
+        localStorage.removeItem(getWriteoffDraftKey())
         setReason('expired')
         setResponsible('')
         setComment('')
@@ -981,7 +1007,7 @@ export default function Page() {
 
             const savedWriteoff = data as WriteoffDetail
 
-            localStorage.removeItem(WRITEOFF_DRAFT_KEY)
+            localStorage.removeItem(getWriteoffDraftKey())
             setItems([])
             setSearchQuery('')
             setSuggestions([])

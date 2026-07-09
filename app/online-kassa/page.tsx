@@ -8,7 +8,8 @@ import {
 } from './pos-checkout-store';
 import JsBarcode from 'jsbarcode';
 import { useRouter } from 'next/navigation';
-import { useState, useEffect, useMemo, useRef, type KeyboardEvent } from 'react';
+import { canUseWarehouseSection, getFirstAllowedRouteForLocation } from '@/app/lib/warehouseAccess';
+import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     AiOutlineDelete,
@@ -56,6 +57,16 @@ type ProductsApiResponse = {
     durationMs?: number;
 };
 
+type DeliveryAlertOrder = {
+    id: string;
+    orderNumber: string;
+    customerName: string;
+    customerPhone: string;
+    address: string;
+    total: number;
+    createdAt: string;
+};
+
 type MarkingStatus = 'M+' | 'M-' | 'M';
 
 type CheckoutItem = {
@@ -79,6 +90,8 @@ type ReceiptItem = {
     quantity: number;
     price: number;
     total: number;
+    measureCode?: number;
+    measureName?: string;
     marked?: boolean;
     markingCode?: string;
     markingStatus?: MarkingStatus;
@@ -126,6 +139,10 @@ type Receipt = {
     fiscalUuid?: string;
     fiscalParams?: FiscalParams;
     fiscalRaw?: unknown;
+    cashierName?: string;
+    cashierLogin?: string;
+    locationName?: string;
+    locationSlug?: string;
 };
 
 type ApiError = {
@@ -143,6 +160,16 @@ const SEARCH_LIMIT = 30;
 const AUTH_USER_KEY = 'warehouse_auth_user';
 const AUTH_LOGIN_KEY = 'warehouse_auth_login';
 const REMEMBER_ME_KEY = 'warehouse_remember_me';
+const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug';
+const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name';
+const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type';
+const AUTH_USER_NAME_KEY = 'warehouse_user_name';
+const AUTH_USER_ROLE_KEY = 'warehouse_user_role';
+const WAREHOUSE_LOCATION_HEADER = 'x-warehouse-location';
+const WAREHOUSE_USER_LOGIN_HEADER = 'x-warehouse-user-login';
+const WAREHOUSE_USER_ROLE_HEADER = 'x-warehouse-user-role';
+const DEFAULT_LOCATION_SLUG = 'tochka';
+const DEFAULT_LOCATION_NAME = 'ТОЧКА';
 
 const DEFAULT_FISCAL_AGENT_URL = 'http://127.0.0.1:3108';
 const FISCAL_AGENT_URL_KEY = 'pos_fiscal_agent_url';
@@ -150,6 +177,89 @@ const FISCAL_AGENT_TOKEN_KEY = 'pos_fiscal_agent_token';
 const SHIFT_STATUS_KEY = 'pos_kkt_shift_status';
 
 type ShiftStatus = 'unknown' | 'open' | 'closed';
+
+const getCurrentLocationSlug = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_SLUG;
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        localStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        DEFAULT_LOCATION_SLUG
+    ).trim() || DEFAULT_LOCATION_SLUG;
+};
+
+const getCurrentLocationName = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_NAME;
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+        localStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+        DEFAULT_LOCATION_NAME
+    ).trim() || DEFAULT_LOCATION_NAME;
+};
+
+const getCurrentLocationType = (): string => {
+    if (typeof window === 'undefined') {
+        return 'store';
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+        localStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+        'store'
+    ).trim() || 'store';
+};
+
+const getCurrentUserLogin = (): string => {
+    if (typeof window === 'undefined') {
+        return '';
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_USER_KEY) ||
+        localStorage.getItem(AUTH_USER_KEY) ||
+        localStorage.getItem(AUTH_LOGIN_KEY) ||
+        ''
+    ).trim();
+};
+
+const getCurrentUserName = (): string => {
+    if (typeof window === 'undefined') {
+        return 'Кассир';
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_USER_NAME_KEY) ||
+        localStorage.getItem(AUTH_USER_NAME_KEY) ||
+        getCurrentUserLogin() ||
+        'Кассир'
+    ).trim();
+};
+
+const getCurrentUserRole = (): string => {
+    if (typeof window === 'undefined') {
+        return 'cashier';
+    }
+
+    return String(
+        sessionStorage.getItem(AUTH_USER_ROLE_KEY) ||
+        localStorage.getItem(AUTH_USER_ROLE_KEY) ||
+        'cashier'
+    ).trim();
+};
+
+
+const getLocationHeaders = (): HeadersInit => {
+    return {
+        [WAREHOUSE_LOCATION_HEADER]: getCurrentLocationSlug(),
+        [WAREHOUSE_USER_LOGIN_HEADER]: getCurrentUserLogin(),
+        [WAREHOUSE_USER_ROLE_HEADER]: getCurrentUserRole(),
+    };
+};
 
 const safeParseNumber = (value: unknown): number => {
     if (typeof value === 'number') {
@@ -275,6 +385,15 @@ const normalizeProductsApiResponse = (data: unknown): ProductsApiResponse => {
         hasMore: false,
         limit: 0,
     };
+};
+
+
+const getMeasureCode = (unit: unknown): number => {
+    return String(unit || '').trim().toLowerCase() === 'weight' ? 11 : 0;
+};
+
+const getMeasureName = (unit: unknown): string => {
+    return getMeasureCode(unit) === 11 ? 'кг' : 'шт.';
 };
 
 const formatCurrency = (amount: number | undefined | null): string => {
@@ -538,6 +657,7 @@ const fetchProductsPage = async ({
     const response = await fetch(`/api/products?${params.toString()}`, {
         method: 'GET',
         cache: 'no-store',
+        headers: getLocationHeaders(),
         signal,
     });
 
@@ -588,10 +708,73 @@ const fetchAllProducts = async (): Promise<Product[]> => {
     return allProducts;
 };
 
+
+function formatDeliveryAlertMoney(value: number) {
+    return new Intl.NumberFormat('ru-RU', {
+        style: 'currency',
+        currency: 'RUB',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+    }).format(Math.round(value || 0));
+}
+
+function playDeliveryAlertTone() {
+    try {
+        const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+        if (!AudioContextCtor) {
+            return;
+        }
+
+        const audioContext = new AudioContextCtor();
+        const masterGain = audioContext.createGain();
+        const now = audioContext.currentTime;
+
+        masterGain.gain.setValueAtTime(0.0001, now);
+        masterGain.gain.linearRampToValueAtTime(0.48, now + 0.015);
+        masterGain.gain.linearRampToValueAtTime(0.0001, now + 1.05);
+        masterGain.connect(audioContext.destination);
+
+        const playBeep = (startAt: number, frequency: number) => {
+            const oscillator = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+
+            oscillator.type = 'square';
+            oscillator.frequency.setValueAtTime(frequency, startAt);
+
+            gain.gain.setValueAtTime(0.0001, startAt);
+            gain.gain.linearRampToValueAtTime(0.95, startAt + 0.015);
+            gain.gain.linearRampToValueAtTime(0.0001, startAt + 0.22);
+
+            oscillator.connect(gain);
+            gain.connect(masterGain);
+            oscillator.start(startAt);
+            oscillator.stop(startAt + 0.24);
+        };
+
+        playBeep(now, 880);
+        playBeep(now + 0.32, 1175);
+        playBeep(now + 0.64, 880);
+
+        window.setTimeout(() => {
+            void audioContext.close().catch(() => undefined);
+        }, 1400);
+    } catch (error) {
+        console.warn('Delivery alert sound was blocked by browser:', error);
+    }
+}
+
 export default function PosPage() {
     const router = useRouter();
 
     const [isAuthChecked, setIsAuthChecked] = useState(false);
+    const [warehouseLocationName, setWarehouseLocationName] = useState(DEFAULT_LOCATION_NAME);
+    const [warehouseLocationSlug, setWarehouseLocationSlug] = useState(DEFAULT_LOCATION_SLUG);
+    const [warehouseUserName, setWarehouseUserName] = useState('Кассир');
+    const [warehouseUserLogin, setWarehouseUserLogin] = useState('');
+    const [deliveryAlerts, setDeliveryAlerts] = useState<DeliveryAlertOrder[]>([]);
+    const [isDeliveryAlertOpen, setIsDeliveryAlertOpen] = useState(false);
+    const [isAcceptingDeliveryId, setIsAcceptingDeliveryId] = useState<string | null>(null);
     const [shiftStatus, setShiftStatus] = useState<ShiftStatus>('unknown');
     const [isShiftActionLoading, setIsShiftActionLoading] = useState(false);
     const [fiscalConfirmModal, setFiscalConfirmModal] = useState(false);
@@ -693,11 +876,26 @@ export default function PosPage() {
     useEffect(() => {
         const savedLocalUser = localStorage.getItem(AUTH_USER_KEY);
         const savedSessionUser = sessionStorage.getItem(AUTH_USER_KEY);
+        const authUser = savedLocalUser || savedSessionUser;
 
-        if (savedLocalUser !== 'admin' && savedSessionUser !== 'admin') {
+        if (!authUser) {
             router.replace('/auth');
             return;
         }
+
+        const currentLocationSlug = getCurrentLocationSlug();
+        const currentLocationName = getCurrentLocationName();
+        const currentLocationType = getCurrentLocationType();
+
+        if (!canUseWarehouseSection(currentLocationSlug, currentLocationType, 'online-kassa')) {
+            router.replace(getFirstAllowedRouteForLocation(currentLocationSlug, currentLocationType));
+            return;
+        }
+
+        setWarehouseLocationName(currentLocationName);
+        setWarehouseLocationSlug(currentLocationSlug);
+        setWarehouseUserName(getCurrentUserName());
+        setWarehouseUserLogin(getCurrentUserLogin());
 
         const savedShiftStatus = localStorage.getItem(SHIFT_STATUS_KEY);
 
@@ -870,6 +1068,7 @@ export default function PosPage() {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                ...getLocationHeaders(),
             },
             body: JSON.stringify(receipt),
         });
@@ -883,11 +1082,129 @@ export default function PosPage() {
         return data || receipt;
     };
 
+    const isTochkaLocation = warehouseLocationSlug === 'tochka';
+
+    const loadDeliveryAlerts = useCallback(async () => {
+        if (!isTochkaLocation) {
+            setDeliveryAlerts([]);
+            setIsDeliveryAlertOpen(false);
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/deliveries/notifications', {
+                method: 'GET',
+                cache: 'no-store',
+            });
+
+            const data = await response.json().catch(() => null) as { orders?: DeliveryAlertOrder[] } | { message?: string } | null;
+
+            if (!response.ok) {
+                throw new Error(data && 'message' in data ? data.message || 'Не удалось проверить доставки' : 'Не удалось проверить доставки');
+            }
+
+            const orders = data && 'orders' in data && Array.isArray(data.orders) ? data.orders : [];
+            setDeliveryAlerts(orders);
+            setIsDeliveryAlertOpen(orders.length > 0);
+        } catch (error) {
+            console.error('Delivery notification check error:', error);
+        }
+    }, [isTochkaLocation]);
+
+    useEffect(() => {
+        if (!isAuthChecked || !isTochkaLocation) {
+            setDeliveryAlerts([]);
+            setIsDeliveryAlertOpen(false);
+            return;
+        }
+
+        const firstTimer = window.setTimeout(() => {
+            void loadDeliveryAlerts();
+        }, 1200);
+
+        const intervalId = window.setInterval(() => {
+            void loadDeliveryAlerts();
+        }, 60_000);
+
+        return () => {
+            window.clearTimeout(firstTimer);
+            window.clearInterval(intervalId);
+        };
+    }, [isAuthChecked, isTochkaLocation, loadDeliveryAlerts]);
+
+    useEffect(() => {
+        const handleDeliveriesUpdated = () => {
+            void loadDeliveryAlerts();
+        };
+
+        window.addEventListener('deliveries-updated', handleDeliveriesUpdated);
+
+        return () => {
+            window.removeEventListener('deliveries-updated', handleDeliveriesUpdated);
+        };
+    }, [loadDeliveryAlerts]);
+
+    useEffect(() => {
+        if (!isDeliveryAlertOpen || deliveryAlerts.length === 0) {
+            return;
+        }
+
+        playDeliveryAlertTone();
+
+        const intervalId = window.setInterval(() => {
+            playDeliveryAlertTone();
+        }, 2200);
+
+        return () => window.clearInterval(intervalId);
+    }, [deliveryAlerts.length, isDeliveryAlertOpen]);
+
+    const acceptDeliveryFromAlert = async (orderId: string) => {
+        try {
+            setIsAcceptingDeliveryId(orderId);
+
+            const response = await fetch(`/api/deliveries/${orderId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    status: 'accepted',
+                    changedByName: warehouseUserName,
+                }),
+            });
+
+            const data = await response.json().catch(() => null) as { message?: string } | null;
+
+            if (!response.ok) {
+                throw new Error(data?.message || 'Не удалось принять доставку');
+            }
+
+            await loadDeliveryAlerts();
+            window.dispatchEvent(new CustomEvent('deliveries-updated'));
+        } catch (error) {
+            console.error('Accept delivery error:', error);
+            alert(error instanceof Error ? error.message : 'Не удалось принять доставку');
+        } finally {
+            setIsAcceptingDeliveryId(null);
+        }
+    };
+
     const handleLogout = () => {
         localStorage.removeItem(AUTH_USER_KEY);
         localStorage.removeItem(AUTH_LOGIN_KEY);
         localStorage.removeItem(REMEMBER_ME_KEY);
+        localStorage.removeItem(AUTH_LOCATION_SLUG_KEY);
+        localStorage.removeItem(AUTH_LOCATION_NAME_KEY);
+        localStorage.removeItem(AUTH_LOCATION_TYPE_KEY);
+        localStorage.removeItem(AUTH_USER_NAME_KEY);
+        localStorage.removeItem(AUTH_USER_ROLE_KEY);
         sessionStorage.removeItem(AUTH_USER_KEY);
+        sessionStorage.removeItem(AUTH_LOCATION_SLUG_KEY);
+        sessionStorage.removeItem(AUTH_LOCATION_NAME_KEY);
+        sessionStorage.removeItem(AUTH_LOCATION_TYPE_KEY);
+        sessionStorage.removeItem(AUTH_USER_NAME_KEY);
+        sessionStorage.removeItem(AUTH_USER_ROLE_KEY);
+        document.cookie = `${AUTH_LOCATION_SLUG_KEY}=; path=/; max-age=0; SameSite=Lax`;
         router.replace('/auth');
     };
 
@@ -1007,6 +1324,11 @@ export default function PosPage() {
     };
 
     const openMarkingScanModal = (product: Product) => {
+        if (isCheckingMarking) {
+            setError('Дождитесь завершения проверки предыдущей маркировки');
+            return;
+        }
+
         const safeProduct = normalizeProduct(product);
 
         setMarkingModalProduct(safeProduct);
@@ -1030,6 +1352,7 @@ export default function PosPage() {
 
     const addMarkedProductToCheckout = async (product: Product, rawMarkingCode: string) => {
         if (isCheckingMarking) {
+            setError('Дождитесь завершения проверки предыдущей маркировки');
             return;
         }
 
@@ -1090,8 +1413,14 @@ export default function PosPage() {
         try {
             setIsCheckingMarking(true);
             setError(null);
-            setNotice(null);
+            setNotice('Код маркировки отправлен на проверку. Можно продолжать пробивать обычные товары.');
             setMarkingCheckResult(null);
+            setMarkingModalProduct(null);
+            setMarkingCodeInput('');
+
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
 
             const checkResult = await precheckMarkingCode(markingCode);
             const status = checkResult.markingStatus || 'M';
@@ -1509,6 +1838,97 @@ export default function PosPage() {
         setPaymentModal(method);
     };
 
+    const buildCommodityReceiptHtml = (receipt: Receipt): string => {
+        const organizationName = 'ORGANIZATION_NAME';
+        const organizationInn = 'ORGANIZATION_INN';
+        const organizationAddress = 'ORGANIZATION_ADDRESS';
+        const organizationPhone = 'ORGANIZATION_PHONE';
+        const createdAt = new Date(receipt.createdAt).toLocaleString('ru-RU');
+        const rows = receipt.items.map(item => {
+            const qty = `${formatQuantity(item.quantity, item.unit || 'piece')}`;
+            const price = formatCurrency(item.price);
+            const sum = formatCurrency(item.total);
+
+            return `
+                <div class="item">
+                    <div class="name">${escapeHtml(String(item.name || 'Товар'))}</div>
+                    <div class="line"><span>${qty} × ${price}</span><strong>${sum}</strong></div>
+                </div>
+            `;
+        }).join('');
+
+        return `
+            <!doctype html>
+            <html lang="ru">
+            <head>
+                <meta charset="utf-8" />
+                <title>Товарный чек ${receipt.id}</title>
+                <style>
+                    * { box-sizing: border-box; }
+                    body { margin: 0; font-family: Arial, sans-serif; color: #111; }
+                    .receipt { width: 58mm; padding: 4mm 3mm; font-size: 11px; }
+                    h1 { margin: 0 0 6px; text-align: center; font-size: 15px; letter-spacing: .04em; }
+                    .center { text-align: center; }
+                    .muted { color: #555; }
+                    .sep { border-top: 1px dashed #111; margin: 6px 0; }
+                    .meta div { margin: 2px 0; }
+                    .item { margin: 6px 0; }
+                    .name { font-weight: 700; }
+                    .line { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }
+                    .total { display: flex; justify-content: space-between; font-size: 15px; font-weight: 800; }
+                    @media print {
+                        @page { size: 58mm auto; margin: 0; }
+                        body { margin: 0; }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="receipt">
+                    <h1>ТОВАРНЫЙ ЧЕК</h1>
+                    <div class="center muted">${escapeHtml(organizationName)}</div>
+                    <div class="center muted">ИНН: ${escapeHtml(organizationInn)}</div>
+                    <div class="center muted">${escapeHtml(organizationAddress)}</div>
+                    <div class="center muted">${escapeHtml(organizationPhone)}</div>
+                    <div class="sep"></div>
+                    <div class="meta">
+                        <div>Точка: ${receipt.locationName || warehouseLocationName}</div>
+                        <div>Кассир: ${receipt.cashierName || warehouseUserName}</div>
+                        <div>Дата: ${createdAt}</div>
+                        <div>Чек №: ${receipt.id}</div>
+                        <div>Оплата: ${receipt.paymentLabel}</div>
+                    </div>
+                    <div class="sep"></div>
+                    ${rows}
+                    <div class="sep"></div>
+                    <div class="total"><span>ИТОГО</span><span>${formatCurrency(receipt.total)}</span></div>
+                    ${receipt.paymentMethod === 'cash' ? `<div class="line"><span>Получено</span><span>${formatCurrency(receipt.receivedAmount || 0)}</span></div><div class="line"><span>Сдача</span><span>${formatCurrency(receipt.change || 0)}</span></div>` : ''}
+                    <div class="sep"></div>
+                    <div class="center">Спасибо за покупку!</div>
+                </div>
+                <script>
+                    window.onload = function () {
+                        window.focus();
+                        window.print();
+                    };
+                </script>
+            </body>
+            </html>
+        `;
+    };
+
+    const printCommodityReceipt = (receipt: Receipt) => {
+        const printWindow = window.open('', '_blank', 'width=420,height=720');
+
+        if (!printWindow) {
+            setError('Браузер заблокировал окно печати товарного чека');
+            return;
+        }
+
+        printWindow.document.open();
+        printWindow.document.write(buildCommodityReceiptHtml(receipt));
+        printWindow.document.close();
+    };
+
     const completePayment = async (method: PaymentMethod, shouldFiscalize = false) => {
         if (isPaying) {
             return;
@@ -1583,6 +2003,8 @@ export default function PosPage() {
                     category: item.product.category,
                     unit: item.product.unit,
                     quantity: item.quantity,
+                    measureCode: getMeasureCode(item.product.unit),
+                    measureName: getMeasureName(item.product.unit),
                     price,
                     total: price * item.quantity,
                     marked,
@@ -1609,6 +2031,10 @@ export default function PosPage() {
                 change: method === 'cash' ? cashReceivedNumber - receiptTotal : 0,
                 fiscalizationRequested: shouldRunFiscalization,
                 fiscalStatus: shouldRunFiscalization ? undefined : 'skipped',
+                cashierName: warehouseUserName,
+                cashierLogin: warehouseUserLogin,
+                locationName: warehouseLocationName,
+                locationSlug: warehouseLocationSlug,
             };
 
             let receiptForSave: Receipt = receipt;
@@ -1626,6 +2052,17 @@ export default function PosPage() {
             }
 
             const savedReceipt = await createSaleInDb(receiptForSave);
+
+            if (!shouldRunFiscalization) {
+                printCommodityReceipt({
+                    ...receiptForSave,
+                    ...savedReceipt,
+                    cashierName: receiptForSave.cashierName,
+                    cashierLogin: receiptForSave.cashierLogin,
+                    locationName: receiptForSave.locationName,
+                    locationSlug: receiptForSave.locationSlug,
+                });
+            }
 
             updateLocalStockAfterSale(receiptItems);
 
@@ -2221,6 +2658,70 @@ export default function PosPage() {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
+            {isDeliveryAlertOpen && deliveryAlerts.length > 0 && (
+                <div className="fixed inset-0 z-[400] flex items-start justify-center bg-black/25 px-4 py-4 pointer-events-none">
+                    <div className="mt-4 w-full max-w-xl rounded-3xl border border-blue-200 bg-white p-5 shadow-2xl pointer-events-auto">
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <div className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-bold uppercase tracking-wide text-blue-700">
+                                    Новая доставка
+                                </div>
+
+                                <h2 className="mt-2 text-xl font-black text-gray-900">
+                                    Поступила доставка: {deliveryAlerts[0]?.orderNumber}
+                                </h2>
+
+                                <p className="mt-1 text-sm text-gray-500">
+                                    Уведомление будет звучать, пока доставка не будет принята.
+                                </p>
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={() => setIsDeliveryAlertOpen(false)}
+                                className="rounded-full border border-gray-200 bg-white px-3 py-1 text-sm font-bold text-gray-500 hover:bg-gray-50"
+                            >
+                                Скрыть
+                            </button>
+                        </div>
+
+                        <div className="mt-4 space-y-3">
+                            {deliveryAlerts.map(order => (
+                                <div key={order.id} className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+                                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                        <div className="min-w-0">
+                                            <div className="font-bold text-blue-800">
+                                                {order.orderNumber} · {formatDeliveryAlertMoney(order.total)}
+                                            </div>
+
+                                            <div className="mt-1 text-sm font-semibold text-gray-900">
+                                                {order.customerName}
+                                            </div>
+
+                                            <div className="mt-1 text-sm text-gray-600">
+                                                {order.customerPhone}
+                                            </div>
+
+                                            <div className="mt-1 text-sm text-gray-600">
+                                                {order.address}
+                                            </div>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => acceptDeliveryFromAlert(order.id)}
+                                            disabled={isAcceptingDeliveryId === order.id}
+                                            className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                            {isAcceptingDeliveryId === order.id ? 'Принимаю...' : 'Принята доставка'}
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
             <div className="max-w-5xl mx-auto">
                 <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <button
@@ -2232,9 +2733,15 @@ export default function PosPage() {
                         Вернуться в склад
                     </button>
 
-                    <h1 className="text-3xl font-bold text-indigo-800 text-center sm:flex-1">
-                        ТОЧКА онлайн - касса
-                    </h1>
+                    <div className="text-center sm:flex-1">
+                        <h1 className="text-3xl font-bold text-indigo-800">
+                            {warehouseLocationName} онлайн-касса
+                        </h1>
+
+                        <div className="mt-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-bold text-indigo-700 shadow-sm">
+                            Текущая зона: {warehouseLocationName} · {warehouseLocationSlug} · Кассир: {warehouseUserName}
+                        </div>
+                    </div>
 
                     <div className="hidden min-w-[168px] sm:block" />
                 </div>

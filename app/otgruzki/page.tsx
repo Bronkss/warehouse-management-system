@@ -1,135 +1,203 @@
-'use client'
+"use client";
 
-import { useEffect, useMemo, useState } from 'react'
+/* eslint-disable react-hooks/set-state-in-effect */
+
+import { useEffect, useMemo, useState } from "react";
+import JsBarcode from "jsbarcode";
 import {
     clearShipmentState,
     readShipmentState,
     SHIPMENT_MODAL_DRAFT_KEY,
     SHIPMENT_PAGE_DRAFT_KEY,
     writeShipmentState,
-} from '@/app/lib/shipmentStateManager'
-import System from '@/app/components/SystemShell'
-import ProductMovementForm from '@/app/components/ProductMovementForm'
+} from "@/app/lib/shipmentStateManager";
+import System from "@/app/components/SystemShell";
+import ProductMovementForm from "@/app/components/ProductMovementForm";
 
-type ProductUnit = 'piece' | 'weight'
+type ProductUnit = "piece" | "weight";
 
 type ShipmentHistoryItem = {
-    id: number
-    number: string
-    shipper: string
-    consignee: string
-    totalRows: number
-    totalQuantity: number
-    totalAmount: number
-    status: string
-    createdAt: string
-    updatedAt: string
-}
+    id: number;
+    number: string;
+    transferBarcode?: string;
+    fromLocationName?: string;
+    fromLocationSlug?: string;
+    toLocationName?: string;
+    toLocationSlug?: string;
+    direction?: "outgoing" | "incoming" | "legacy";
+    shippedAt?: string | null;
+    receivedAt?: string | null;
+    shipper: string;
+    consignee: string;
+    totalRows: number;
+    totalQuantity: number;
+    totalAmount: number;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+};
 
 type ShipmentDetailRow = {
-    shipmentItemId?: number | null
-    productId: number | null
-    rowId: string
-    rowNumber: number
-    name: string
-    category: string
-    barcode: string
-    unit: ProductUnit
-    quantity: string
-    purchasePrice: string
-    sellingPrice: string
-    previousStock: number | null
-    newStock: number | null
-    result: string
-    error: string | null
-}
+    shipmentItemId?: number | null;
+    productId: number | null;
+    rowId: string;
+    rowNumber: number;
+    name: string;
+    category: string;
+    barcode: string;
+    unit: ProductUnit;
+    quantity: string;
+    purchasePrice: string;
+    sellingPrice: string;
+    previousStock: number | null;
+    newStock: number | null;
+    result: string;
+    error: string | null;
+};
 
 type ShipmentDetail = {
-    id: number
-    number: string
-    shipper: string
-    consignee: string
-    totalRows: number
-    totalQuantity: number
-    totalAmount: number
-    status: string
-    createdAt: string
-    updatedAt: string
-    rows: ShipmentDetailRow[]
-}
+    id: number;
+    number: string;
+    transferBarcode?: string;
+    fromLocationName?: string;
+    fromLocationSlug?: string;
+    toLocationName?: string;
+    toLocationSlug?: string;
+    direction?: "outgoing" | "incoming" | "legacy";
+    shippedAt?: string | null;
+    receivedAt?: string | null;
+    shipper: string;
+    consignee: string;
+    totalRows: number;
+    totalQuantity: number;
+    totalAmount: number;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+    rows: ShipmentDetailRow[];
+};
 
 type ShipmentPageDraftState = {
-    historySearch: string
-}
+    historySearch: string;
+};
 
 type ShipmentModalDraftState = {
-    isOpen: boolean
-    selectedShipment: ShipmentDetail | null
-    modalRows: ShipmentDetailRow[]
-    modalShipper: string
-    modalConsignee: string
-}
+    isOpen: boolean;
+    selectedShipment: ShipmentDetail | null;
+    modalRows: ShipmentDetailRow[];
+    modalShipper: string;
+    modalConsignee: string;
+};
 
-const inputClass = 'h-9 w-full rounded-lg border border-gray-300 px-3 text-sm outline-none focus:ring-1 focus:ring-blue-500'
-const tableInputClass = 'h-8 w-full rounded-md border border-gray-300 px-2 text-xs outline-none focus:ring-1 focus:ring-blue-500'
-const buttonClass = 'rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50'
+const inputClass =
+    "h-9 w-full rounded-lg border border-gray-300 px-3 text-sm outline-none focus:ring-1 focus:ring-blue-500";
+const tableInputClass =
+    "h-8 w-full rounded-md border border-gray-300 px-2 text-xs outline-none focus:ring-1 focus:ring-blue-500";
+const buttonClass =
+    "rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50";
 
 function formatDate(value: string) {
-    if (!value) return '—'
-    return new Date(value).toLocaleString('ru-RU')
+    if (!value) return "—";
+    return new Date(value).toLocaleString("ru-RU");
 }
 
 function toNumber(value: string | number | null | undefined) {
-    const parsed = Number(String(value ?? '0').replace(',', '.'))
-    return Number.isFinite(parsed) ? parsed : 0
+    const parsed = Number(String(value ?? "0").replace(",", "."));
+    return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function money(value: number) {
-    return new Intl.NumberFormat('ru-RU', {
-        style: 'currency',
-        currency: 'RUB',
+    return new Intl.NumberFormat("ru-RU", {
+        style: "currency",
+        currency: "RUB",
         minimumFractionDigits: 0,
         maximumFractionDigits: 0,
-    }).format(Math.round(value || 0))
+    }).format(Math.round(value || 0));
 }
 
 function unitLabel(unit: ProductUnit) {
-    return unit === 'weight' ? 'кг' : 'шт.'
+    return unit === "weight" ? "кг" : "шт.";
 }
 
 function escapeHtml(value: string) {
     return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;')
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+function renderBarcodeSvgFromValue(value: string): string {
+    const code = String(value || "").trim();
+
+    if (!code || typeof document === "undefined") {
+        return "";
+    }
+
+    try {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+
+        JsBarcode(svg, code, {
+            format: "CODE128",
+            width: 1.6,
+            height: 48,
+            displayValue: true,
+            fontSize: 14,
+            margin: 8,
+        });
+
+        return new XMLSerializer().serializeToString(svg);
+    } catch (error) {
+        console.error(error);
+        return "";
+    }
+}
+
+function getStatusLabel(status: string) {
+    if (status === "received") return "Принято";
+    if (status === "shipped") return "В пути";
+    if (status === "cancelled") return "Отменено";
+    if (status === "completed") return "Старый документ";
+    return status || "В пути";
+}
+
+function getDirectionLabel(direction?: string) {
+    if (direction === "incoming") return "Входящее";
+    if (direction === "outgoing") return "Исходящее";
+    return "Старое";
 }
 
 function renumberRows(rows: ShipmentDetailRow[]) {
-    return rows.map((row, index) => ({ ...row, rowNumber: index + 1 }))
+    return rows.map((row, index) => ({ ...row, rowNumber: index + 1 }));
 }
 
 function buildWaybillHtml(data: ShipmentDetail) {
-    const date = data.createdAt ? new Date(data.createdAt).toLocaleDateString('ru-RU') : new Date().toLocaleDateString('ru-RU')
+    const date = data.createdAt
+        ? new Date(data.createdAt).toLocaleDateString("ru-RU")
+        : new Date().toLocaleDateString("ru-RU");
+    const barcodeValue = data.transferBarcode || data.number;
+    const barcodeSvg = renderBarcodeSvgFromValue(barcodeValue);
 
-    const rowsHtml = data.rows.map((item, index) => {
-        const qty = toNumber(item.quantity)
-        const price = toNumber(item.sellingPrice)
-        const sum = qty * price
+    const rowsHtml = data.rows
+        .map((item, index) => {
+            const qty = toNumber(item.quantity);
+            const price = toNumber(item.sellingPrice);
+            const sum = qty * price;
 
-        return `
+            return `
             <tr>
                 <td>${index + 1}</td>
                 <td>${escapeHtml(item.name)}</td>
-                <td>${escapeHtml(item.barcode || '-')}</td>
+                <td>${escapeHtml(item.barcode || "-")}</td>
                 <td>${unitLabel(item.unit)}</td>
                 <td>${qty}</td>
                 <td>${money(price)}</td>
                 <td>${money(sum)}</td>
             </tr>
-        `
-    }).join('')
+        `;
+        })
+        .join("");
 
     return `
         <!doctype html>
@@ -149,6 +217,21 @@ function buildWaybillHtml(data: ShipmentDetail) {
                     text-align: center;
                     font-size: 20px;
                     margin: 0 0 16px;
+                }
+                .transfer-barcode {
+                    margin: 0 auto 18px;
+                    max-width: 360px;
+                    text-align: center;
+                }
+                .transfer-barcode svg {
+                    width: 100%;
+                    max-height: 82px;
+                }
+                .transfer-barcode-text {
+                    margin-top: 4px;
+                    font-size: 13px;
+                    font-weight: 700;
+                    letter-spacing: 0.08em;
                 }
                 .meta {
                     display: grid;
@@ -195,6 +278,12 @@ function buildWaybillHtml(data: ShipmentDetail) {
         <body>
             <h1>Товарно-транспортная накладная № ${escapeHtml(data.number)}</h1>
 
+            <div class="transfer-barcode">
+                ${barcodeSvg || `<div class="transfer-barcode-text">${escapeHtml(barcodeValue)}</div>`}
+                <div class="transfer-barcode-text">${escapeHtml(barcodeValue)}</div>
+                <div style="font-size: 11px; color: #6b7280;">Сканировать в зоне-получателе для автоматической приёмки</div>
+            </div>
+
             <div class="meta">
                 <div>
                     <strong>Дата:</strong>
@@ -206,11 +295,19 @@ function buildWaybillHtml(data: ShipmentDetail) {
                 </div>
                 <div>
                     <strong>Грузоотправитель:</strong>
-                    <div class="line">${escapeHtml(data.shipper || '-')}</div>
+                    <div class="line">${escapeHtml(data.shipper || "-")}</div>
                 </div>
                 <div>
                     <strong>Грузополучатель:</strong>
-                    <div class="line">${escapeHtml(data.consignee || '-')}</div>
+                    <div class="line">${escapeHtml(data.consignee || "-")}</div>
+                </div>
+                <div>
+                    <strong>Из зоны:</strong>
+                    <div class="line">${escapeHtml(data.fromLocationName || "-")}</div>
+                </div>
+                <div>
+                    <strong>В зону:</strong>
+                    <div class="line">${escapeHtml(data.toLocationName || "-")}</div>
                 </div>
             </div>
 
@@ -237,68 +334,72 @@ function buildWaybillHtml(data: ShipmentDetail) {
             </div>
         </body>
         </html>
-    `
+    `;
 }
 
 function printHtml(html: string) {
-    const iframe = document.createElement('iframe')
+    const iframe = document.createElement("iframe");
 
-    iframe.style.position = 'fixed'
-    iframe.style.right = '0'
-    iframe.style.bottom = '0'
-    iframe.style.width = '0'
-    iframe.style.height = '0'
-    iframe.style.border = '0'
+    iframe.style.position = "fixed";
+    iframe.style.right = "0";
+    iframe.style.bottom = "0";
+    iframe.style.width = "0";
+    iframe.style.height = "0";
+    iframe.style.border = "0";
 
-    document.body.appendChild(iframe)
+    document.body.appendChild(iframe);
 
-    const iframeWindow = iframe.contentWindow
-    const iframeDocument = iframe.contentDocument || iframeWindow?.document
+    const iframeWindow = iframe.contentWindow;
+    const iframeDocument = iframe.contentDocument || iframeWindow?.document;
 
     if (!iframeWindow || !iframeDocument) {
-        document.body.removeChild(iframe)
-        alert('Не удалось открыть печать')
-        return
+        document.body.removeChild(iframe);
+        alert("Не удалось открыть печать");
+        return;
     }
 
-    iframeDocument.open()
-    iframeDocument.write(html)
-    iframeDocument.close()
-    iframeWindow.focus()
+    iframeDocument.open();
+    iframeDocument.write(html);
+    iframeDocument.close();
+    iframeWindow.focus();
 
     setTimeout(() => {
-        iframeWindow.print()
+        iframeWindow.print();
 
         setTimeout(() => {
-            document.body.removeChild(iframe)
-        }, 1000)
-    }, 300)
+            document.body.removeChild(iframe);
+        }, 1000);
+    }, 300);
 }
 
 export default function Page() {
-    const [history, setHistory] = useState<ShipmentHistoryItem[]>([])
-    const [historySearch, setHistorySearch] = useState('')
+    const [history, setHistory] = useState<ShipmentHistoryItem[]>([]);
+    const [historySearch, setHistorySearch] = useState("");
 
-    const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false)
-    const [isHistoryLoading, setIsHistoryLoading] = useState(false)
-    const [isShipmentLoading, setIsShipmentLoading] = useState(false)
-    const [isSaveLoading, setIsSaveLoading] = useState(false)
-    const [error, setError] = useState<string | null>(null)
+    const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+    const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+    const [isShipmentLoading, setIsShipmentLoading] = useState(false);
+    const [isSaveLoading, setIsSaveLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [receiveBarcode, setReceiveBarcode] = useState("");
+    const [isReceiveLoading, setIsReceiveLoading] = useState(false);
+    const [receiveMessage, setReceiveMessage] = useState<string | null>(null);
 
-    const [isModalOpen, setIsModalOpen] = useState(false)
-    const [selectedShipment, setSelectedShipment] = useState<ShipmentDetail | null>(null)
-    const [modalRows, setModalRows] = useState<ShipmentDetailRow[]>([])
-    const [modalShipper, setModalShipper] = useState('')
-    const [modalConsignee, setModalConsignee] = useState('')
-    const [isPageHydrated, setIsPageHydrated] = useState(false)
-    const [isModalHydrated, setIsModalHydrated] = useState(false)
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [selectedShipment, setSelectedShipment] =
+        useState<ShipmentDetail | null>(null);
+    const [modalRows, setModalRows] = useState<ShipmentDetailRow[]>([]);
+    const [modalShipper, setModalShipper] = useState("");
+    const [modalConsignee, setModalConsignee] = useState("");
+    const [isPageHydrated, setIsPageHydrated] = useState(false);
+    const [isModalHydrated, setIsModalHydrated] = useState(false);
 
     const filteredHistory = useMemo(() => {
-        const query = historySearch.trim().toLowerCase()
+        const query = historySearch.trim().toLowerCase();
 
-        if (!query) return history
+        if (!query) return history;
 
-        return history.filter(item => {
+        return history.filter((item) => {
             const searchable = [
                 item.number,
                 item.shipper,
@@ -308,102 +409,123 @@ export default function Page() {
                 String(item.totalRows),
                 String(item.totalQuantity),
                 String(item.totalAmount),
-            ].join(' ').toLowerCase()
+            ]
+                .join(" ")
+                .toLowerCase();
 
-            return searchable.includes(query)
-        })
-    }, [history, historySearch])
+            return searchable.includes(query);
+        });
+    }, [history, historySearch]);
 
     const modalSummary = useMemo(() => {
         return {
             totalRows: modalRows.length,
-            totalQuantity: modalRows.reduce((sum, row) => sum + toNumber(row.quantity), 0),
-            totalAmount: modalRows.reduce((sum, row) => sum + toNumber(row.quantity) * toNumber(row.sellingPrice), 0),
-        }
-    }, [modalRows])
+            totalQuantity: modalRows.reduce(
+                (sum, row) => sum + toNumber(row.quantity),
+                0,
+            ),
+            totalAmount: modalRows.reduce(
+                (sum, row) => sum + toNumber(row.quantity) * toNumber(row.sellingPrice),
+                0,
+            ),
+        };
+    }, [modalRows]);
 
     const loadHistory = async () => {
         try {
-            setIsHistoryLoading(true)
-            setError(null)
+            setIsHistoryLoading(true);
+            setError(null);
 
-            const response = await fetch('/api/shipment/history', {
-                method: 'GET',
-                cache: 'no-store',
-            })
+            const response = await fetch("/api/shipment/history", {
+                method: "GET",
+                cache: "no-store",
+            });
 
-            const data = await response.json()
+            const data = await response.json();
 
             if (!response.ok) {
-                throw new Error(data?.message || 'Не удалось загрузить историю отгрузок')
+                throw new Error(
+                    data?.message || "Не удалось загрузить историю отгрузок",
+                );
             }
 
-            setHistory(Array.isArray(data) ? data : [])
+            setHistory(Array.isArray(data) ? data : []);
         } catch (error) {
-            console.error(error)
-            setError(error instanceof Error ? error.message : 'Не удалось загрузить историю отгрузок')
+            console.error(error);
+            setError(
+                error instanceof Error
+                    ? error.message
+                    : "Не удалось загрузить историю отгрузок",
+            );
         } finally {
-            setIsHistoryLoading(false)
+            setIsHistoryLoading(false);
         }
-    }
+    };
 
     useEffect(() => {
-        let isMounted = true
+        let isMounted = true;
 
         const restorePageDraft = async () => {
-            const draft = await readShipmentState<ShipmentPageDraftState>(SHIPMENT_PAGE_DRAFT_KEY)
+            const draft = await readShipmentState<ShipmentPageDraftState>(
+                SHIPMENT_PAGE_DRAFT_KEY,
+            );
 
-            if (!isMounted) return
+            if (!isMounted) return;
 
             if (draft) {
-                setHistorySearch(draft.historySearch || '')
+                setHistorySearch(draft.historySearch || "");
             }
 
-            setIsPageHydrated(true)
-        }
+            setIsPageHydrated(true);
+        };
 
         const restoreModalDraft = async () => {
-            const draft = await readShipmentState<ShipmentModalDraftState>(SHIPMENT_MODAL_DRAFT_KEY)
+            const draft = await readShipmentState<ShipmentModalDraftState>(
+                SHIPMENT_MODAL_DRAFT_KEY,
+            );
 
-            if (!isMounted) return
+            if (!isMounted) return;
 
             if (draft?.isOpen && draft.selectedShipment) {
-                setIsModalOpen(true)
-                setSelectedShipment(draft.selectedShipment)
-                setModalRows(Array.isArray(draft.modalRows) ? draft.modalRows : [])
-                setModalShipper(draft.modalShipper || '')
-                setModalConsignee(draft.modalConsignee || '')
+                setIsModalOpen(true);
+                setSelectedShipment(draft.selectedShipment);
+                setModalRows(Array.isArray(draft.modalRows) ? draft.modalRows : []);
+                setModalShipper(draft.modalShipper || "");
+                setModalConsignee(draft.modalConsignee || "");
             }
 
-            setIsModalHydrated(true)
-        }
+            setIsModalHydrated(true);
+        };
 
-        void restorePageDraft()
-        void restoreModalDraft()
-        void loadHistory()
+        void restorePageDraft();
+        void restoreModalDraft();
+        void loadHistory();
 
         const handleShipmentSaved = () => {
-            void loadHistory()
-        }
+            void loadHistory();
+        };
 
-        window.addEventListener('shipment-history-updated', handleShipmentSaved)
+        window.addEventListener("shipment-history-updated", handleShipmentSaved);
 
         return () => {
-            isMounted = false
-            window.removeEventListener('shipment-history-updated', handleShipmentSaved)
-        }
-    }, [])
+            isMounted = false;
+            window.removeEventListener(
+                "shipment-history-updated",
+                handleShipmentSaved,
+            );
+        };
+    }, []);
 
     useEffect(() => {
-        if (!isPageHydrated) return
+        if (!isPageHydrated) return;
 
         writeShipmentState<ShipmentPageDraftState>(SHIPMENT_PAGE_DRAFT_KEY, {
             historySearch,
-        })
-    }, [historySearch, isPageHydrated])
+        });
+    }, [historySearch, isPageHydrated]);
 
     useEffect(() => {
-        if (!isModalHydrated) return
+        if (!isModalHydrated) return;
 
         writeShipmentState<ShipmentModalDraftState>(SHIPMENT_MODAL_DRAFT_KEY, {
             isOpen: isModalOpen,
@@ -411,166 +533,236 @@ export default function Page() {
             modalRows,
             modalShipper,
             modalConsignee,
-        })
-    }, [isModalOpen, isModalHydrated, modalConsignee, modalRows, modalShipper, selectedShipment])
+        });
+    }, [
+        isModalOpen,
+        isModalHydrated,
+        modalConsignee,
+        modalRows,
+        modalShipper,
+        selectedShipment,
+    ]);
 
     useEffect(() => {
-        const hasOpenModal = isHistoryModalOpen || isModalOpen
+        const hasOpenModal = isHistoryModalOpen || isModalOpen;
 
         if (!hasOpenModal) {
-            return
+            return;
         }
 
-        const bodyOverflow = document.body.style.overflow
-        const htmlOverflow = document.documentElement.style.overflow
+        const bodyOverflow = document.body.style.overflow;
+        const htmlOverflow = document.documentElement.style.overflow;
 
-        document.body.style.overflow = 'hidden'
-        document.documentElement.style.overflow = 'hidden'
+        document.body.style.overflow = "hidden";
+        document.documentElement.style.overflow = "hidden";
 
         return () => {
-            document.body.style.overflow = bodyOverflow
-            document.documentElement.style.overflow = htmlOverflow
-        }
-    }, [isHistoryModalOpen, isModalOpen])
+            document.body.style.overflow = bodyOverflow;
+            document.documentElement.style.overflow = htmlOverflow;
+        };
+    }, [isHistoryModalOpen, isModalOpen]);
 
     const openHistoryModal = () => {
-        setIsHistoryModalOpen(true)
-        setError(null)
-        void loadHistory()
-    }
+        setIsHistoryModalOpen(true);
+        setError(null);
+        void loadHistory();
+    };
 
     const closeModal = () => {
-        setIsModalOpen(false)
-        setSelectedShipment(null)
-        setModalRows([])
-        setModalShipper('')
-        setModalConsignee('')
-        clearShipmentState(SHIPMENT_MODAL_DRAFT_KEY)
-    }
+        setIsModalOpen(false);
+        setSelectedShipment(null);
+        setModalRows([]);
+        setModalShipper("");
+        setModalConsignee("");
+        clearShipmentState(SHIPMENT_MODAL_DRAFT_KEY);
+    };
 
     const openShipmentModal = async (id: number) => {
         try {
-            setIsShipmentLoading(true)
-            setError(null)
-            setIsHistoryModalOpen(false)
-            setIsModalOpen(true)
-            setSelectedShipment(null)
-            setModalRows([])
+            setIsShipmentLoading(true);
+            setError(null);
+            setIsHistoryModalOpen(false);
+            setIsModalOpen(true);
+            setSelectedShipment(null);
+            setModalRows([]);
 
             const response = await fetch(`/api/shipment/history/${id}`, {
-                method: 'GET',
-                cache: 'no-store',
-            })
+                method: "GET",
+                cache: "no-store",
+            });
 
-            const data = await response.json()
+            const data = await response.json();
 
             if (!response.ok) {
-                throw new Error(data?.message || 'Не удалось открыть отгрузку')
+                throw new Error(data?.message || "Не удалось открыть отгрузку");
             }
 
-            const detail = data as ShipmentDetail
-            setSelectedShipment(detail)
-            setModalRows(detail.rows || [])
-            setModalShipper(detail.shipper || '')
-            setModalConsignee(detail.consignee || '')
+            const detail = data as ShipmentDetail;
+            setSelectedShipment(detail);
+            setModalRows(detail.rows || []);
+            setModalShipper(detail.shipper || "");
+            setModalConsignee(detail.consignee || "");
         } catch (error) {
-            console.error(error)
-            setError(error instanceof Error ? error.message : 'Не удалось открыть отгрузку')
+            console.error(error);
+            setError(
+                error instanceof Error ? error.message : "Не удалось открыть отгрузку",
+            );
         } finally {
-            setIsShipmentLoading(false)
+            setIsShipmentLoading(false);
         }
-    }
+    };
 
-    const updateModalRow = (rowId: string, field: keyof ShipmentDetailRow, value: ShipmentDetailRow[keyof ShipmentDetailRow]) => {
-        setModalRows(prev =>
-            prev.map(row =>
-                row.rowId === rowId
-                    ? { ...row, [field]: value }
-                    : row
-            )
-        )
-    }
+    const updateModalRow = (
+        rowId: string,
+        field: keyof ShipmentDetailRow,
+        value: ShipmentDetailRow[keyof ShipmentDetailRow],
+    ) => {
+        setModalRows((prev) =>
+            prev.map((row) =>
+                row.rowId === rowId ? { ...row, [field]: value } : row,
+            ),
+        );
+    };
 
     const deleteModalRow = (rowId: string) => {
-        setModalRows(prev => renumberRows(prev.filter(row => row.rowId !== rowId)))
-    }
+        setModalRows((prev) =>
+            renumberRows(prev.filter((row) => row.rowId !== rowId)),
+        );
+    };
 
     const saveModalShipment = async () => {
-        if (!selectedShipment) return
+        if (!selectedShipment) return;
 
         if (modalRows.length === 0) {
-            setError('В отгрузке должна быть хотя бы одна позиция')
-            return
+            setError("В отгрузке должна быть хотя бы одна позиция");
+            return;
         }
 
         try {
-            setIsSaveLoading(true)
-            setError(null)
+            setIsSaveLoading(true);
+            setError(null);
 
-            const response = await fetch(`/api/shipment/history/${selectedShipment.id}`, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
+            const response = await fetch(
+                `/api/shipment/history/${selectedShipment.id}`,
+                {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        shipper: modalShipper,
+                        consignee: modalConsignee,
+                        rows: renumberRows(modalRows).map((row) => ({
+                            shipmentItemId: row.shipmentItemId,
+                            productId: row.productId,
+                            rowId: row.rowId,
+                            rowNumber: row.rowNumber,
+                            name: row.name,
+                            category: row.category,
+                            barcode: row.barcode,
+                            unit: row.unit,
+                            quantity: row.quantity,
+                            purchasePrice: row.purchasePrice,
+                            sellingPrice: row.sellingPrice,
+                        })),
+                    }),
                 },
-                body: JSON.stringify({
-                    shipper: modalShipper,
-                    consignee: modalConsignee,
-                    rows: renumberRows(modalRows).map(row => ({
-                        shipmentItemId: row.shipmentItemId,
-                        productId: row.productId,
-                        rowId: row.rowId,
-                        rowNumber: row.rowNumber,
-                        name: row.name,
-                        category: row.category,
-                        barcode: row.barcode,
-                        unit: row.unit,
-                        quantity: row.quantity,
-                        purchasePrice: row.purchasePrice,
-                        sellingPrice: row.sellingPrice,
-                    })),
-                }),
-            })
+            );
 
-            const data = await response.json()
+            const data = await response.json();
 
             if (!response.ok) {
-                throw new Error(data?.message || 'Не удалось сохранить отгрузку')
+                throw new Error(data?.message || "Не удалось сохранить отгрузку");
             }
 
-            await loadHistory()
+            await loadHistory();
 
-            const detailResponse = await fetch(`/api/shipment/history/${selectedShipment.id}`, {
-                method: 'GET',
-                cache: 'no-store',
-            })
-            const detail = await detailResponse.json()
+            const detailResponse = await fetch(
+                `/api/shipment/history/${selectedShipment.id}`,
+                {
+                    method: "GET",
+                    cache: "no-store",
+                },
+            );
+            const detail = await detailResponse.json();
 
             if (detailResponse.ok) {
-                setSelectedShipment(detail)
-                setModalRows(detail.rows || [])
-                setModalShipper(detail.shipper || '')
-                setModalConsignee(detail.consignee || '')
+                setSelectedShipment(detail);
+                setModalRows(detail.rows || []);
+                setModalShipper(detail.shipper || "");
+                setModalConsignee(detail.consignee || "");
             }
 
-            alert('Изменения отгрузки сохранены в БД')
+            alert("Изменения отгрузки сохранены в БД");
         } catch (error) {
-            console.error(error)
-            setError(error instanceof Error ? error.message : 'Не удалось сохранить отгрузку')
+            console.error(error);
+            setError(
+                error instanceof Error
+                    ? error.message
+                    : "Не удалось сохранить отгрузку",
+            );
         } finally {
-            setIsSaveLoading(false)
+            setIsSaveLoading(false);
         }
-    }
+    };
 
     const printCurrentShipment = () => {
-        if (!selectedShipment) return
+        if (!selectedShipment) return;
 
-        printHtml(buildWaybillHtml({
-            ...selectedShipment,
-            shipper: modalShipper,
-            consignee: modalConsignee,
-            rows: modalRows,
-        }))
-    }
+        printHtml(
+            buildWaybillHtml({
+                ...selectedShipment,
+                shipper: modalShipper,
+                consignee: modalConsignee,
+                rows: modalRows,
+            }),
+        );
+    };
+
+    const receiveShipmentByBarcode = async () => {
+        const barcode = receiveBarcode.trim();
+
+        if (!barcode) {
+            setError("Отсканируйте штрихкод перемещения");
+            return;
+        }
+
+        try {
+            setIsReceiveLoading(true);
+            setError(null);
+            setReceiveMessage(null);
+
+            const response = await fetch("/api/shipment/receive", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ barcode }),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data?.message || "Не удалось принять перемещение");
+            }
+
+            setReceiveBarcode("");
+            setReceiveMessage(data?.message || "Перемещение принято");
+            await loadHistory();
+            window.dispatchEvent(
+                new CustomEvent("shipment-history-updated", { detail: data }),
+            );
+        } catch (error) {
+            console.error(error);
+            setError(
+                error instanceof Error
+                    ? error.message
+                    : "Не удалось принять перемещение",
+            );
+        } finally {
+            setIsReceiveLoading(false);
+        }
+    };
 
     return (
         <System>
@@ -588,7 +780,8 @@ export default function Page() {
                                 </h1>
 
                                 <p className="mt-1 max-w-3xl text-sm text-gray-500">
-                                    Форма добавления находится сразу под шапкой. История скрыта в отдельном окне и не мешает работе со сканером.
+                                    Форма добавления находится сразу под шапкой. История скрыта в
+                                    отдельном окне и не мешает работе со сканером.
                                 </p>
                             </div>
 
@@ -607,7 +800,7 @@ export default function Page() {
                                     disabled={isHistoryLoading}
                                     className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 disabled:opacity-50"
                                 >
-                                    {isHistoryLoading ? 'Обновляю...' : 'Обновить историю'}
+                                    {isHistoryLoading ? "Обновляю..." : "Обновить историю"}
                                 </button>
                             </div>
                         </div>
@@ -619,10 +812,60 @@ export default function Page() {
                         )}
                     </div>
 
-                    <ProductMovementForm
-                        mode="shipment"
-                        onShipmentSaved={loadHistory}
-                    />
+                    <div className="rounded-2xl border border-emerald-100 bg-white p-5 shadow-sm">
+                        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                            <div className="flex-1">
+                                <div className="inline-flex rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                                    Приём перемещения
+                                </div>
+
+                                <h2 className="mt-2 text-xl font-bold text-gray-900">
+                                    Принять отгрузку по штрихкоду
+                                </h2>
+
+                                <p className="mt-1 text-sm text-gray-500">
+                                    Отсканируйте штрихкод с ТТН. Если документ предназначен для
+                                    текущей зоны, товары автоматически добавятся на остаток.
+                                </p>
+                            </div>
+
+                            <div className="flex w-full flex-col gap-2 sm:flex-row lg:w-[560px]">
+                                <input
+                                    value={receiveBarcode}
+                                    onChange={(e) => {
+                                        setReceiveBarcode(e.target.value);
+                                        setError(null);
+                                        setReceiveMessage(null);
+                                    }}
+                                    onKeyDown={(event) => {
+                                        if (event.key === "Enter") {
+                                            event.preventDefault();
+                                            void receiveShipmentByBarcode();
+                                        }
+                                    }}
+                                    placeholder="DOC-TRF-00000001"
+                                    className="h-12 flex-1 rounded-xl border border-gray-300 px-4 font-mono text-base outline-none focus:ring-2 focus:ring-emerald-500"
+                                />
+
+                                <button
+                                    type="button"
+                                    onClick={receiveShipmentByBarcode}
+                                    disabled={isReceiveLoading || !receiveBarcode.trim()}
+                                    className="h-12 rounded-xl bg-emerald-600 px-5 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    {isReceiveLoading ? "Принимаю..." : "Принять"}
+                                </button>
+                            </div>
+                        </div>
+
+                        {receiveMessage && (
+                            <div className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-700">
+                                {receiveMessage}
+                            </div>
+                        )}
+                    </div>
+
+                    <ProductMovementForm mode="shipment" onShipmentSaved={loadHistory} />
                 </div>
 
                 {isHistoryModalOpen && (
@@ -636,7 +879,8 @@ export default function Page() {
                                         </h2>
 
                                         <p className="mt-1 text-sm text-gray-500">
-                                            Откройте отгрузку для просмотра, редактирования или печати ТТН.
+                                            Откройте отгрузку для просмотра, редактирования или печати
+                                            ТТН.
                                         </p>
                                     </div>
 
@@ -647,7 +891,7 @@ export default function Page() {
                                             disabled={isHistoryLoading}
                                             className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 disabled:opacity-50"
                                         >
-                                            {isHistoryLoading ? 'Обновляю...' : 'Обновить'}
+                                            {isHistoryLoading ? "Обновляю..." : "Обновить"}
                                         </button>
 
                                         <button
@@ -671,9 +915,7 @@ export default function Page() {
 
                             <div className="min-h-0 flex-1 overflow-y-auto p-5">
                                 {(isHistoryLoading || isShipmentLoading) && (
-                                    <div className="mb-3 text-sm text-gray-500">
-                                        Загрузка...
-                                    </div>
+                                    <div className="mb-3 text-sm text-gray-500">Загрузка...</div>
                                 )}
 
                                 {!isHistoryLoading && filteredHistory.length === 0 && (
@@ -683,34 +925,48 @@ export default function Page() {
                                 )}
 
                                 <div className="space-y-2">
-                                    {filteredHistory.map(item => (
+                                    {filteredHistory.map((item) => (
                                         <button
                                             key={item.id}
                                             type="button"
                                             onClick={() => openShipmentModal(item.id)}
-                                            className={`block w-full rounded-xl border p-3 text-left transition-colors hover:bg-blue-50 ${selectedShipment?.id === item.id ? 'border-blue-200 bg-blue-50' : 'border-gray-100 bg-gray-50'}`}
+                                            className={`block w-full rounded-xl border p-3 text-left transition-colors hover:bg-blue-50 ${selectedShipment?.id === item.id ? "border-blue-200 bg-blue-50" : "border-gray-100 bg-gray-50"}`}
                                         >
                                             <div className="flex items-center justify-between gap-2">
                                                 <div className="font-semibold text-blue-700">
                                                     {item.number}
                                                 </div>
 
-                                                <div className={`rounded-full px-2 py-0.5 text-xs ${
-                                                    item.status === 'completed'
-                                                        ? 'bg-green-100 text-green-700'
-                                                        : 'bg-orange-100 text-orange-700'
-                                                }`}>
-                                                    {item.status === 'completed' ? 'Готово' : 'С ошибками'}
+                                                <div
+                                                    className={`rounded-full px-2 py-0.5 text-xs ${
+                                                        item.status === "received"
+                                                            ? "bg-green-100 text-green-700"
+                                                            : item.status === "shipped"
+                                                                ? "bg-blue-100 text-blue-700"
+                                                                : "bg-orange-100 text-orange-700"
+                                                    }`}
+                                                >
+                                                    {getStatusLabel(item.status)}
                                                 </div>
                                             </div>
 
                                             <div className="mt-1 text-xs text-gray-500">
-                                                {formatDate(item.createdAt)}
+                                                {formatDate(item.createdAt)} ·{" "}
+                                                {getDirectionLabel(item.direction)}
+                                                {item.transferBarcode
+                                                    ? ` · ШК: ${item.transferBarcode}`
+                                                    : ""}
                                             </div>
 
                                             {(item.shipper || item.consignee) && (
                                                 <div className="mt-1 truncate text-xs text-gray-500">
-                                                    {item.shipper || 'Отправитель не указан'} → {item.consignee || 'Получатель не указан'}
+                                                    {item.fromLocationName ||
+                                                        item.shipper ||
+                                                        "Отправитель"}{" "}
+                                                    →{" "}
+                                                    {item.toLocationName ||
+                                                        item.consignee ||
+                                                        "Получатель"}
                                                 </div>
                                             )}
 
@@ -727,7 +983,9 @@ export default function Page() {
 
                                                 <div className="rounded bg-green-50 p-1 text-green-700">
                                                     <div>сумма</div>
-                                                    <div className="font-bold">{money(item.totalAmount)}</div>
+                                                    <div className="font-bold">
+                                                        {money(item.totalAmount)}
+                                                    </div>
                                                 </div>
                                             </div>
                                         </button>
@@ -745,11 +1003,14 @@ export default function Page() {
                                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                                     <div>
                                         <h2 className="text-xl font-bold text-gray-900">
-                                            {selectedShipment ? `Отгрузка ${selectedShipment.number}` : 'Загрузка отгрузки...'}
+                                            {selectedShipment
+                                                ? `Отгрузка ${selectedShipment.number}`
+                                                : "Загрузка отгрузки..."}
                                         </h2>
 
                                         <p className="mt-1 text-sm text-gray-500">
-                                            Можно посмотреть позиции, изменить количество и сохранить изменения в БД. Остатки пересчитаются автоматически.
+                                            Можно посмотреть позиции, изменить количество и сохранить
+                                            изменения в БД. Остатки пересчитаются автоматически.
                                         </p>
                                     </div>
 
@@ -777,7 +1038,9 @@ export default function Page() {
                                 {selectedShipment && (
                                     <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
                                         <div>
-                                            <label className="mb-1 block text-xs font-medium text-gray-500">Грузоотправитель</label>
+                                            <label className="mb-1 block text-xs font-medium text-gray-500">
+                                                Грузоотправитель
+                                            </label>
                                             <input
                                                 value={modalShipper}
                                                 onChange={(e) => setModalShipper(e.target.value)}
@@ -786,7 +1049,9 @@ export default function Page() {
                                         </div>
 
                                         <div>
-                                            <label className="mb-1 block text-xs font-medium text-gray-500">Грузополучатель</label>
+                                            <label className="mb-1 block text-xs font-medium text-gray-500">
+                                                Грузополучатель
+                                            </label>
                                             <input
                                                 value={modalConsignee}
                                                 onChange={(e) => setModalConsignee(e.target.value)}
@@ -796,12 +1061,16 @@ export default function Page() {
 
                                         <div className="rounded-xl border border-gray-100 bg-white p-3">
                                             <div className="text-xs text-gray-500">Кол-во строк</div>
-                                            <div className="text-xl font-bold">{modalSummary.totalRows}</div>
+                                            <div className="text-xl font-bold">
+                                                {modalSummary.totalRows}
+                                            </div>
                                         </div>
 
                                         <div className="rounded-xl border border-gray-100 bg-white p-3">
                                             <div className="text-xs text-gray-500">Итого</div>
-                                            <div className="text-xl font-bold">{money(modalSummary.totalAmount)}</div>
+                                            <div className="text-xl font-bold">
+                                                {money(modalSummary.totalAmount)}
+                                            </div>
                                         </div>
                                     </div>
                                 )}
@@ -834,29 +1103,51 @@ export default function Page() {
                                             </thead>
 
                                             <tbody>
-                                            {modalRows.map(row => {
-                                                const sum = toNumber(row.quantity) * toNumber(row.sellingPrice)
+                                            {modalRows.map((row) => {
+                                                const sum =
+                                                    toNumber(row.quantity) * toNumber(row.sellingPrice);
 
                                                 return (
-                                                    <tr key={row.rowId} className="border-t border-gray-100 align-top hover:bg-gray-50">
-                                                        <td className="p-2 font-medium">{row.rowNumber}</td>
-
-                                                        <td className="p-2">
-                                                            <div className="font-medium text-gray-900">{row.name}</div>
-                                                            <div className="mt-1 text-[11px] text-gray-400">ID товара: {row.productId || '—'}</div>
+                                                    <tr
+                                                        key={row.rowId}
+                                                        className="border-t border-gray-100 align-top hover:bg-gray-50"
+                                                    >
+                                                        <td className="p-2 font-medium">
+                                                            {row.rowNumber}
                                                         </td>
 
-                                                        <td className="p-2 text-gray-500">{row.barcode || '-'}</td>
-                                                        <td className="p-2 text-gray-500">{row.category || '-'}</td>
-                                                        <td className="p-2 text-gray-500">{unitLabel(row.unit)}</td>
+                                                        <td className="p-2">
+                                                            <div className="font-medium text-gray-900">
+                                                                {row.name}
+                                                            </div>
+                                                            <div className="mt-1 text-[11px] text-gray-400">
+                                                                ID товара: {row.productId || "—"}
+                                                            </div>
+                                                        </td>
+
+                                                        <td className="p-2 text-gray-500">
+                                                            {row.barcode || "-"}
+                                                        </td>
+                                                        <td className="p-2 text-gray-500">
+                                                            {row.category || "-"}
+                                                        </td>
+                                                        <td className="p-2 text-gray-500">
+                                                            {unitLabel(row.unit)}
+                                                        </td>
 
                                                         <td className="p-2">
                                                             <input
                                                                 type="number"
                                                                 min="0"
-                                                                step={row.unit === 'weight' ? '0.001' : '1'}
+                                                                step={row.unit === "weight" ? "0.001" : "1"}
                                                                 value={row.quantity}
-                                                                onChange={(e) => updateModalRow(row.rowId, 'quantity', e.target.value)}
+                                                                onChange={(e) =>
+                                                                    updateModalRow(
+                                                                        row.rowId,
+                                                                        "quantity",
+                                                                        e.target.value,
+                                                                    )
+                                                                }
                                                                 className={tableInputClass}
                                                             />
                                                         </td>
@@ -867,14 +1158,26 @@ export default function Page() {
                                                                 min="0"
                                                                 step="1"
                                                                 value={row.sellingPrice}
-                                                                onChange={(e) => updateModalRow(row.rowId, 'sellingPrice', e.target.value)}
+                                                                onChange={(e) =>
+                                                                    updateModalRow(
+                                                                        row.rowId,
+                                                                        "sellingPrice",
+                                                                        e.target.value,
+                                                                    )
+                                                                }
                                                                 className={tableInputClass}
                                                             />
                                                         </td>
 
-                                                        <td className="p-2 font-semibold text-gray-900">{money(sum)}</td>
-                                                        <td className="p-2 text-gray-500">{row.previousStock ?? '—'}</td>
-                                                        <td className="p-2 text-gray-500">{row.newStock ?? '—'}</td>
+                                                        <td className="p-2 font-semibold text-gray-900">
+                                                            {money(sum)}
+                                                        </td>
+                                                        <td className="p-2 text-gray-500">
+                                                            {row.previousStock ?? "—"}
+                                                        </td>
+                                                        <td className="p-2 text-gray-500">
+                                                            {row.newStock ?? "—"}
+                                                        </td>
 
                                                         <td className="p-2">
                                                             <button
@@ -886,7 +1189,7 @@ export default function Page() {
                                                             </button>
                                                         </td>
                                                     </tr>
-                                                )
+                                                );
                                             })}
                                             </tbody>
                                         </table>
@@ -896,7 +1199,8 @@ export default function Page() {
 
                             <div className="flex flex-col gap-3 border-t border-gray-100 bg-gray-50 px-5 py-4 md:flex-row md:items-center md:justify-between">
                                 <div className="text-sm text-gray-500">
-                                    При сохранении старая отгрузка возвращается на остаток, затем новая версия снова списывается.
+                                    При сохранении старая отгрузка возвращается на остаток, затем
+                                    новая версия снова списывается.
                                 </div>
 
                                 <div className="flex flex-wrap gap-2">
@@ -914,7 +1218,7 @@ export default function Page() {
                                         disabled={isSaveLoading || !selectedShipment}
                                         className={`${buttonClass} bg-green-600 text-white hover:bg-green-700`}
                                     >
-                                        {isSaveLoading ? 'Сохранение...' : 'Сохранить в БД'}
+                                        {isSaveLoading ? "Сохранение..." : "Сохранить в БД"}
                                     </button>
                                 </div>
                             </div>
@@ -923,5 +1227,5 @@ export default function Page() {
                 )}
             </section>
         </System>
-    )
+    );
 }

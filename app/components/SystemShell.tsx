@@ -3,20 +3,64 @@
 import * as React from 'react'
 import Image from 'next/image'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import type { ReactNode } from 'react'
+import {
+    canUseWarehouseSection,
+    getFirstAllowedRouteForLocation,
+    getForbiddenSectionMessage,
+    getWarehouseSectionFromPathname,
+    type WarehouseSection,
+} from '@/app/lib/warehouseAccess'
 
 const TRAINING_STORAGE_KEY = 'warehouse.system.training.seen.v1.2026_07_01'
-const CURRENT_UPDATE_STORAGE_KEY = 'warehouse.system.current_update.seen.v5.2026_07_01_kassa_news_cards_fixed'
+const CURRENT_UPDATE_STORAGE_KEY = 'warehouse.system.current_update.seen.v6.2026_07_09_update_3_0'
 
-const menuItems = [
+const AUTH_USER_KEY = 'warehouse_auth_user'
+const AUTH_LOGIN_KEY = 'warehouse_auth_login'
+const REMEMBER_ME_KEY = 'warehouse_remember_me'
+const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug'
+const AUTH_LOCATION_NAME_KEY = 'warehouse_location_name'
+const AUTH_LOCATION_TYPE_KEY = 'warehouse_location_type'
+const AUTH_USER_NAME_KEY = 'warehouse_user_name'
+const AUTH_USER_ROLE_KEY = 'warehouse_user_role'
+const LOCATION_COOKIE_NAME = 'warehouse_location_slug'
+const USER_LOGIN_COOKIE_NAME = 'warehouse_user_login'
+const USER_NAME_COOKIE_NAME = 'warehouse_user_name'
+const USER_ROLE_COOKIE_NAME = 'warehouse_user_role'
+const DEFAULT_LOCATION_NAME = 'ТОЧКА'
+
+const BASE_MENU_ITEMS = [
     { title: 'Товары', icon: '/icons/tovar.png', linkName: 'products' },
     { title: 'Продажи', icon: '/icons/order.png', linkName: 'sales' },
     { title: 'Приемки', icon: '/icons/priemka.png', linkName: 'priemka' },
     { title: 'Отгрузки', icon: '/icons/otgruzki.png', linkName: 'otgruzki' },
     { title: 'Доставки', icon: '/icons/delivery.png', linkName: 'deliveries' },
     { title: 'Списания', icon: '/icons/spisaniya.png', linkName: 'writeoff' },
+    { title: 'Инвентаризация', icon: '/icons/inventarizachiya.png', linkName: 'inventory' },
+    { title: 'Статистика', icon: '/icons/statistic.png', linkName: 'statistics' },
+    { title: 'Закупка', icon: '/icons/zakypki.png', linkName: 'purchase' },
 ]
+
+function getMenuItemsForLocation(locationSlug: string, locationType: string) {
+    return BASE_MENU_ITEMS.filter(item => {
+        return canUseWarehouseSection(
+            locationSlug,
+            locationType,
+            item.linkName as WarehouseSection
+        )
+    })
+}
+
+type DeliveryAlertOrder = {
+    id: string
+    orderNumber: string
+    customerName: string
+    customerPhone: string
+    address: string
+    total: number
+    createdAt: string
+}
 
 const trainingSections = [
     {
@@ -78,6 +122,17 @@ const trainingSections = [
             'История списаний открывается в модалке и доступна для редактирования.',
         ],
     },
+    {
+        title: 'Инвентаризация',
+        icon: '📋',
+        text: 'Раздел для пересчёта фактических остатков в торговой точке или на складе и сравнения их с остатками в системе.',
+        steps: [
+            'Откройте раздел “Инвентаризация” и выберите нужную зону проверки.',
+            'Сканируйте штрихкод или находите товар по названию, затем указывайте фактическое количество на полке или складе.',
+            'После проверки сохраните документ инвентаризации, чтобы система зафиксировала расхождения и обновила остатки.',
+            'Используйте историю инвентаризаций, чтобы посмотреть старые проверки и при необходимости вернуться к документу.',
+        ],
+    },
 ]
 
 const previousUpdateItems = [
@@ -98,11 +153,24 @@ const currentUpdateItems = [
     'Урааа, у нас появилось обучение и новостная лента! Можете перейти на главную страницу и посмотреть!',
 ]
 
+const update30Items = [
+    'Обновление 3.0: доступы, зоны и основные разделы приведены к финальной структуре.',
+    'Добавлены персональные входы по именам сотрудников, чтобы сотрудники заходили под своим пользователем, а не под общими техническими логинами.',
+    'Раздел “Инвентаризация” добавлен: сотрудники могут быстро посмотреть, как делать пересчёт фактических остатков и сохранять проверку.',
+    'Перед началом работы после обновления лучше выйти из аккаунта и зайти заново под своим именем, чтобы система подтянула правильную зону и права доступа.',
+]
+
 const updateReleases = [
+    {
+        title: 'Обновление 3.0',
+        date: 'Июль 2026',
+        badge: 'Новое',
+        items: update30Items,
+    },
     {
         title: 'Большое обновление системы',
         date: 'Июль 2026',
-        badge: 'Новое',
+        badge: 'История',
         items: currentUpdateItems,
     },
     {
@@ -223,8 +291,135 @@ function CloseButton({ onClick }: { onClick: () => void }) {
     )
 }
 
+
+function readCurrentLocationName() {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_NAME
+    }
+
+    return (
+        localStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+        sessionStorage.getItem(AUTH_LOCATION_NAME_KEY) ||
+        DEFAULT_LOCATION_NAME
+    )
+}
+
+function readCurrentLocationSlug() {
+    if (typeof window === 'undefined') {
+        return 'tochka'
+    }
+
+    return (
+        localStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        sessionStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        'tochka'
+    )
+}
+
+function readCurrentLocationType() {
+    if (typeof window === 'undefined') {
+        return 'store'
+    }
+
+    return (
+        localStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+        sessionStorage.getItem(AUTH_LOCATION_TYPE_KEY) ||
+        'store'
+    )
+}
+
+
+function readCurrentUserName() {
+    if (typeof window === 'undefined') {
+        return 'Пользователь'
+    }
+
+    return (
+        localStorage.getItem(AUTH_USER_NAME_KEY) ||
+        sessionStorage.getItem(AUTH_USER_NAME_KEY) ||
+        localStorage.getItem(AUTH_USER_KEY) ||
+        sessionStorage.getItem(AUTH_USER_KEY) ||
+        'Пользователь'
+    )
+}
+
+function readCurrentUserLogin() {
+    if (typeof window === 'undefined') {
+        return ''
+    }
+
+    return (
+        localStorage.getItem(AUTH_USER_KEY) ||
+        sessionStorage.getItem(AUTH_USER_KEY) ||
+        localStorage.getItem(AUTH_LOGIN_KEY) ||
+        ''
+    )
+}
+
+function clearCookie(name: string) {
+    document.cookie = `${name}=; path=/; max-age=0; SameSite=Lax`
+}
+
+function formatDeliveryAlertMoney(value: number) {
+    return new Intl.NumberFormat('ru-RU', {
+        style: 'currency',
+        currency: 'RUB',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+    }).format(Math.round(value || 0))
+}
+
+function playDeliveryAlertTone() {
+    try {
+        const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+
+        if (!AudioContextCtor) {
+            return
+        }
+
+        const audioContext = new AudioContextCtor()
+        const masterGain = audioContext.createGain()
+        const now = audioContext.currentTime
+
+        // Более громкий и резкий сигнал: три коротких импульса.
+        // Итоговая громкость всё равно зависит от громкости Windows/браузера.
+        masterGain.gain.setValueAtTime(0.0001, now)
+        masterGain.gain.linearRampToValueAtTime(0.48, now + 0.015)
+        masterGain.gain.linearRampToValueAtTime(0.0001, now + 1.05)
+        masterGain.connect(audioContext.destination)
+
+        const playBeep = (startAt: number, frequency: number) => {
+            const oscillator = audioContext.createOscillator()
+            const gain = audioContext.createGain()
+
+            oscillator.type = 'square'
+            oscillator.frequency.setValueAtTime(frequency, startAt)
+
+            gain.gain.setValueAtTime(0.0001, startAt)
+            gain.gain.linearRampToValueAtTime(0.95, startAt + 0.015)
+            gain.gain.linearRampToValueAtTime(0.0001, startAt + 0.22)
+
+            oscillator.connect(gain)
+            gain.connect(masterGain)
+            oscillator.start(startAt)
+            oscillator.stop(startAt + 0.24)
+        }
+
+        playBeep(now, 880)
+        playBeep(now + 0.32, 1175)
+        playBeep(now + 0.64, 880)
+
+        window.setTimeout(() => {
+            void audioContext.close().catch(() => undefined)
+        }, 1400)
+    } catch (error) {
+        console.warn('Delivery alert sound was blocked by browser:', error)
+    }
+}
+
 export default function SystemShell({ children }: Props) {
     const pathname = usePathname()
+    const router = useRouter()
     const swipeStartXRef = React.useRef<number | null>(null)
     const touchStartXRef = React.useRef<number | null>(null)
 
@@ -233,13 +428,163 @@ export default function SystemShell({ children }: Props) {
     const [isUpdateModalOpen, setIsUpdateModalOpen] = React.useState(false)
     const [activeTrainingIndex, setActiveTrainingIndex] = React.useState(0)
     const [activeUpdateIndex, setActiveUpdateIndex] = React.useState(0)
+    const [currentLocationSlug, setCurrentLocationSlug] = React.useState('tochka')
+    const [currentLocationName, setCurrentLocationName] = React.useState(DEFAULT_LOCATION_NAME)
+    const [currentLocationType, setCurrentLocationType] = React.useState('store')
+    const [currentUserName, setCurrentUserName] = React.useState('Пользователь')
+    const [currentUserLogin, setCurrentUserLogin] = React.useState('')
+    const [isAuthStateHydrated, setIsAuthStateHydrated] = React.useState(false)
+    const [deliveryAlerts, setDeliveryAlerts] = React.useState<DeliveryAlertOrder[]>([])
+    const [isDeliveryAlertOpen, setIsDeliveryAlertOpen] = React.useState(false)
+    const [isAcceptingDeliveryId, setIsAcceptingDeliveryId] = React.useState<string | null>(null)
 
     const hasPageContent = React.Children.count(children) > 0
     const activeTraining = trainingSections[activeTrainingIndex] || trainingSections[0]
+    const isTochkaLocation = currentLocationSlug === 'tochka'
+    const isMainWarehouse = currentLocationType === 'warehouse' || currentLocationSlug === 'main-warehouse'
+    const menuItems = React.useMemo(
+        () => getMenuItemsForLocation(currentLocationSlug, currentLocationType),
+        [currentLocationSlug, currentLocationType]
+    )
 
     React.useEffect(() => {
         setIsMenuOpen(false)
     }, [pathname])
+
+    React.useEffect(() => {
+        setCurrentLocationSlug(readCurrentLocationSlug())
+        setCurrentLocationName(readCurrentLocationName())
+        setCurrentLocationType(readCurrentLocationType())
+        setCurrentUserName(readCurrentUserName())
+        setCurrentUserLogin(readCurrentUserLogin())
+        setIsAuthStateHydrated(true)
+    }, [pathname])
+
+    React.useEffect(() => {
+        if (!pathname || !isAuthStateHydrated) {
+            return
+        }
+
+        const section = getWarehouseSectionFromPathname(pathname)
+
+        if (!section) {
+            return
+        }
+
+        if (!canUseWarehouseSection(currentLocationSlug, currentLocationType, section)) {
+            console.warn(getForbiddenSectionMessage(currentLocationName, section))
+            router.replace(getFirstAllowedRouteForLocation(currentLocationSlug, currentLocationType))
+        }
+    }, [
+        currentLocationName,
+        currentLocationSlug,
+        currentLocationType,
+        isAuthStateHydrated,
+        pathname,
+        router,
+    ])
+
+    const loadDeliveryAlerts = React.useCallback(async () => {
+        if (!isTochkaLocation) {
+            setDeliveryAlerts([])
+            setIsDeliveryAlertOpen(false)
+            return
+        }
+
+        try {
+            const response = await fetch('/api/deliveries/notifications', {
+                method: 'GET',
+                cache: 'no-store',
+            })
+
+            const data = await response.json().catch(() => null) as { orders?: DeliveryAlertOrder[] } | { message?: string } | null
+
+            if (!response.ok) {
+                throw new Error(data && 'message' in data ? data.message || 'Не удалось проверить доставки' : 'Не удалось проверить доставки')
+            }
+
+            const orders = data && 'orders' in data && Array.isArray(data.orders) ? data.orders : []
+            setDeliveryAlerts(orders)
+            setIsDeliveryAlertOpen(orders.length > 0)
+        } catch (error) {
+            console.error('Delivery notification check error:', error)
+        }
+    }, [isTochkaLocation])
+
+    React.useEffect(() => {
+        if (!isTochkaLocation) {
+            setDeliveryAlerts([])
+            setIsDeliveryAlertOpen(false)
+            return
+        }
+
+        const firstTimer = window.setTimeout(() => {
+            void loadDeliveryAlerts()
+        }, 1200)
+
+        const intervalId = window.setInterval(() => {
+            void loadDeliveryAlerts()
+        }, 60_000)
+
+        return () => {
+            window.clearTimeout(firstTimer)
+            window.clearInterval(intervalId)
+        }
+    }, [isTochkaLocation, loadDeliveryAlerts])
+
+    React.useEffect(() => {
+        const handleDeliveriesUpdated = () => {
+            void loadDeliveryAlerts()
+        }
+
+        window.addEventListener('deliveries-updated', handleDeliveriesUpdated)
+
+        return () => {
+            window.removeEventListener('deliveries-updated', handleDeliveriesUpdated)
+        }
+    }, [loadDeliveryAlerts])
+
+    React.useEffect(() => {
+        if (!isDeliveryAlertOpen || deliveryAlerts.length === 0) {
+            return
+        }
+
+        playDeliveryAlertTone()
+
+        const intervalId = window.setInterval(() => {
+            playDeliveryAlertTone()
+        }, 2200)
+
+        return () => window.clearInterval(intervalId)
+    }, [deliveryAlerts.length, isDeliveryAlertOpen])
+
+    const acceptDeliveryFromAlert = async (orderId: string) => {
+        try {
+            setIsAcceptingDeliveryId(orderId)
+
+            const response = await fetch(`/api/deliveries/${orderId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ status: 'accepted' }),
+            })
+
+            const data = await response.json().catch(() => null) as { message?: string } | null
+
+            if (!response.ok) {
+                throw new Error(data?.message || 'Не удалось принять доставку')
+            }
+
+            await loadDeliveryAlerts()
+            window.dispatchEvent(new CustomEvent('deliveries-updated'))
+        } catch (error) {
+            console.error('Accept delivery error:', error)
+            alert(error instanceof Error ? error.message : 'Не удалось принять доставку')
+        } finally {
+            setIsAcceptingDeliveryId(null)
+        }
+    }
 
     React.useEffect(() => {
         const trainingSeen = localStorage.getItem(TRAINING_STORAGE_KEY) === 'read'
@@ -292,6 +637,30 @@ export default function SystemShell({ children }: Props) {
     const closeUpdateModal = () => {
         localStorage.setItem(CURRENT_UPDATE_STORAGE_KEY, 'read')
         setIsUpdateModalOpen(false)
+    }
+
+    const handleLogout = () => {
+        localStorage.removeItem(AUTH_USER_KEY)
+        localStorage.removeItem(AUTH_LOGIN_KEY)
+        localStorage.removeItem(REMEMBER_ME_KEY)
+        localStorage.removeItem(AUTH_LOCATION_SLUG_KEY)
+        localStorage.removeItem(AUTH_LOCATION_NAME_KEY)
+        localStorage.removeItem(AUTH_LOCATION_TYPE_KEY)
+        localStorage.removeItem(AUTH_USER_NAME_KEY)
+        localStorage.removeItem(AUTH_USER_ROLE_KEY)
+
+        sessionStorage.removeItem(AUTH_USER_KEY)
+        sessionStorage.removeItem(AUTH_LOCATION_SLUG_KEY)
+        sessionStorage.removeItem(AUTH_LOCATION_NAME_KEY)
+        sessionStorage.removeItem(AUTH_LOCATION_TYPE_KEY)
+        sessionStorage.removeItem(AUTH_USER_NAME_KEY)
+        sessionStorage.removeItem(AUTH_USER_ROLE_KEY)
+
+        clearCookie(LOCATION_COOKIE_NAME)
+        clearCookie(USER_LOGIN_COOKIE_NAME)
+        clearCookie(USER_NAME_COOKIE_NAME)
+        clearCookie(USER_ROLE_COOKIE_NAME)
+        router.replace('/auth')
     }
 
     const goToUpdate = (index: number) => {
@@ -424,40 +793,80 @@ export default function SystemShell({ children }: Props) {
 
     return (
         <div className="system-root min-h-screen w-full bg-[#ececec] m-0 p-0">
-            <div className="system-wrapper min-h-screen overflow-x-hidden bg-[#ececec] pt-[76px] md:pt-[84px]">
+            <div className="system-wrapper min-h-screen overflow-x-hidden bg-[#ececec] pt-[150px]">
                 <header className="system-header fixed left-0 right-0 top-0 z-[50] bg-[#e5765d] px-4 py-4 shadow-[0_8px_22px_rgba(0,0,0,0.12)] md:px-6">
-                    <div className="system-header-content mx-auto grid max-w-[1800px] grid-cols-[auto_1fr_auto] items-center gap-4">
-                        <div className="system-header-left flex min-w-0 shrink-0 items-center gap-3">
-                            <Link
-                                href="/system"
-                                className="system-home-button flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#e5765d] shadow-sm transition hover:-translate-y-0.5 hover:bg-[#fff7f4]"
-                                aria-label="На главную"
-                                title="На главную"
-                            >
-                                <HomeIcon />
-                            </Link>
+                    <div className="mx-auto flex max-w-[1900px] flex-col gap-3">
+                        <div className="system-header-top flex items-center justify-between gap-4">
+                            <div className="system-header-left flex min-w-0 shrink-0 items-center gap-3">
+                                <Link
+                                    href="/system"
+                                    className="system-home-button flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#e5765d] shadow-sm transition hover:-translate-y-0.5 hover:bg-[#fff7f4]"
+                                    aria-label="На главную"
+                                    title="На главную"
+                                >
+                                    <HomeIcon />
+                                </Link>
 
-                            <div className="system-brand hidden min-w-0 sm:block">
-                                <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/70">
-                                    Складской учёт
+                                <div className="system-brand hidden min-w-0 sm:block">
+                                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/70">
+                                        Складской учёт
+                                    </div>
+                                    <div className="truncate text-lg font-bold leading-5 text-white">
+                                        {currentLocationName}
+                                    </div>
                                 </div>
-                                <div className="truncate text-lg font-bold leading-5 text-white">
-                                    ТОЧКА
-                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setIsMenuOpen((prev) => !prev)}
+                                    className="system-mobile-menu-button h-11 items-center gap-2 rounded-2xl bg-white px-4 text-sm font-bold text-[#e5765d] shadow-sm transition hover:bg-[#fff7f4]"
+                                >
+                                    <MenuIcon />
+                                    <span>Меню</span>
+                                </button>
                             </div>
 
-                            <button
-                                type="button"
-                                onClick={() => setIsMenuOpen((prev) => !prev)}
-                                className="system-mobile-menu-button h-11 items-center gap-2 rounded-2xl bg-white px-4 text-sm font-bold text-[#e5765d] shadow-sm transition hover:bg-[#fff7f4]"
-                            >
-                                <MenuIcon />
-                                <span>Меню</span>
-                            </button>
+                            <div className="system-header-actions ml-auto flex shrink-0 items-center justify-end gap-2">
+                                <div
+                                    className="system-location-pill hidden h-11 min-w-[320px] max-w-[420px] items-center rounded-2xl bg-white/18 px-4 text-left text-white ring-1 ring-white/20 lg:flex"
+                                    title={`${currentLocationName} · ${currentUserName}${currentUserLogin ? ` (${currentUserLogin})` : ''}`}
+                                >
+                                    <div className="min-w-0">
+                                        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/70">
+                                            Зона / пользователь
+                                        </div>
+                                        <div className="max-w-[390px] truncate text-sm font-extrabold leading-4">
+                                            {currentLocationName} · {currentUserName}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {!isMainWarehouse && (
+                                    <Link
+                                        href="/online-kassa"
+                                        className={`system-kassa-button flex h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
+                                            pathname === '/online-kassa'
+                                                ? 'bg-[#2f2f2f] text-white shadow-[0_8px_18px_rgba(0,0,0,0.16)]'
+                                                : 'bg-[#2f2f2f]/88 text-white hover:-translate-y-0.5 hover:bg-[#2f2f2f]'
+                                        }`}
+                                    >
+                                        <CashRegisterIcon />
+                                        <span>Касса</span>
+                                    </Link>
+                                )}
+
+                                <button
+                                    type="button"
+                                    onClick={handleLogout}
+                                    className="system-logout-button flex h-11 items-center justify-center rounded-2xl border border-white/24 bg-white/14 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-white/22"
+                                >
+                                    Выйти
+                                </button>
+                            </div>
                         </div>
 
-                        <nav className="system-desktop-menu min-w-0 justify-self-center">
-                            <div className="flex max-w-full items-center justify-center gap-2 overflow-x-auto px-1 py-1">
+                        <nav className="system-desktop-menu min-w-0">
+                            <div className="grid w-full grid-cols-[repeat(auto-fit,minmax(145px,1fr))] gap-2">
                                 {menuItems.map((item) => {
                                     const href = `/${item.linkName}`
                                     const isActive = pathname === href
@@ -466,50 +875,37 @@ export default function SystemShell({ children }: Props) {
                                         <Link
                                             href={href}
                                             key={item.title}
-                                            className={`group flex h-11 shrink-0 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
+                                            className={`group system-menu-link relative flex h-12 min-w-0 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-extrabold shadow-sm transition ${
                                                 isActive
-                                                    ? 'bg-[#2f2f2f] text-white'
-                                                    : 'bg-white/92 text-[#3a3a3a] hover:-translate-y-0.5 hover:bg-white'
+                                                    ? 'border-white bg-white text-[#2f2f2f] shadow-[0_8px_20px_rgba(0,0,0,0.16)] ring-2 ring-[#2f2f2f]/12'
+                                                    : 'border-white/70 bg-white/92 text-[#3a3a3a] hover:-translate-y-0.5 hover:border-white hover:bg-white hover:shadow-[0_8px_18px_rgba(0,0,0,0.12)]'
                                             }`}
                                         >
-                                            <span className="relative flex h-[20px] w-[20px] items-center justify-center rounded-lg bg-white/70 p-0.5">
+                                            <span className={`relative flex h-[25px] w-[25px] shrink-0 items-center justify-center rounded-xl p-1 ${
+                                                isActive
+                                                    ? 'bg-[#fff4ef] ring-1 ring-[#e5765d]/25'
+                                                    : 'bg-[#fff7f4] ring-1 ring-black/5'
+                                            }`}>
                                                 <Image
                                                     src={item.icon}
                                                     alt={item.title}
                                                     fill
-                                                    className="object-contain"
+                                                    className="object-contain p-1"
                                                 />
                                             </span>
 
-                                            <span>{item.title}</span>
+                                            <span className="min-w-0 truncate">
+                                                {item.title}
+                                            </span>
+
+                                            {isActive && (
+                                                <span className="pointer-events-none absolute inset-x-5 bottom-1.5 h-1 rounded-full bg-[#e5765d]/70" />
+                                            )}
                                         </Link>
                                     )
                                 })}
                             </div>
                         </nav>
-
-                        <div className="system-header-actions ml-auto flex shrink-0 items-center justify-end gap-2">
-                            <Link
-                                href="/online-kassa"
-                                className={`system-kassa-button flex h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
-                                    pathname === '/online-kassa'
-                                        ? 'bg-[#2f2f2f] text-white'
-                                        : 'bg-[#2f2f2f]/88 text-white hover:-translate-y-0.5 hover:bg-[#2f2f2f]'
-                                }`}
-                            >
-                                <CashRegisterIcon />
-                                <span>Касса</span>
-                            </Link>
-
-                            <button
-                                type="button"
-                                onClick={() => setIsUpdateModalOpen(true)}
-                                className="system-news-button flex h-11 items-center gap-2 rounded-2xl bg-white px-4 text-sm font-bold text-[#e5765d] shadow-sm transition hover:-translate-y-0.5 hover:bg-[#fff7f4]"
-                            >
-                                <NewsIcon />
-                                <span>Новости</span>
-                            </button>
-                        </div>
                     </div>
 
                     {isMenuOpen && (
@@ -519,7 +915,7 @@ export default function SystemShell({ children }: Props) {
                                     href="/system"
                                     className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
                                         pathname === '/system'
-                                            ? 'bg-white text-[#e5765d]'
+                                            ? 'bg-white text-[#e5765d] ring-2 ring-white/45'
                                             : 'bg-white/16 text-white hover:bg-white/22'
                                     }`}
                                 >
@@ -530,20 +926,34 @@ export default function SystemShell({ children }: Props) {
                                     <span className="truncate">Главная</span>
                                 </Link>
 
-                                <Link
-                                    href="/online-kassa"
-                                    className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
-                                        pathname === '/online-kassa'
-                                            ? 'bg-white text-[#e5765d]'
-                                            : 'bg-white/16 text-white hover:bg-white/22'
-                                    }`}
-                                >
-                                    <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center">
-                                        <CashRegisterIcon />
-                                    </span>
+                                {!isMainWarehouse && (
+                                    <Link
+                                        href="/online-kassa"
+                                        className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
+                                            pathname === '/online-kassa'
+                                                ? 'bg-white text-[#e5765d] ring-2 ring-white/45'
+                                                : 'bg-white/16 text-white hover:bg-white/22'
+                                        }`}
+                                    >
+                                        <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center">
+                                            <CashRegisterIcon />
+                                        </span>
 
-                                    <span className="truncate">Касса</span>
-                                </Link>
+                                        <span className="truncate">Касса</span>
+                                    </Link>
+                                )}
+
+                                <div className="rounded-2xl bg-white/12 px-4 py-3 text-sm text-white shadow-sm">
+                                    <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/60">
+                                        Текущая зона
+                                    </div>
+                                    <div className="mt-1 font-extrabold">
+                                        {currentLocationName}
+                                    </div>
+                                    <div className="mt-0.5 text-xs text-white/70">
+                                        {currentLocationType === 'warehouse' ? 'Склад' : 'Торговая точка'} · {currentUserName}
+                                    </div>
+                                </div>
 
                                 {menuItems.map((item) => {
                                     const href = `/${item.linkName}`
@@ -555,16 +965,20 @@ export default function SystemShell({ children }: Props) {
                                             key={item.title}
                                             className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
                                                 isActive
-                                                    ? 'bg-white text-[#e5765d]'
+                                                    ? 'bg-white text-[#2f2f2f] ring-2 ring-white/45'
                                                     : 'bg-white/16 text-white hover:bg-white/22'
                                             }`}
                                         >
-                                            <span className="relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-lg bg-white/85 p-0.5">
+                                            <span className={`relative flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded-xl p-1 ${
+                                                isActive
+                                                    ? 'bg-[#fff4ef] ring-1 ring-[#e5765d]/25'
+                                                    : 'bg-white/85'
+                                            }`}>
                                                 <Image
                                                     src={item.icon}
                                                     alt={item.title}
                                                     fill
-                                                    className="object-contain"
+                                                    className="object-contain p-1"
                                                 />
                                             </span>
 
@@ -577,10 +991,10 @@ export default function SystemShell({ children }: Props) {
 
                                 <button
                                     type="button"
-                                    onClick={() => setIsUpdateModalOpen(true)}
-                                    className="rounded-2xl bg-white px-4 py-3 text-sm font-bold text-[#e5765d] shadow-sm"
+                                    onClick={handleLogout}
+                                    className="rounded-2xl bg-white/16 px-4 py-3 text-sm font-bold text-white shadow-sm hover:bg-white/22"
                                 >
-                                    Новости
+                                    Выйти из зоны
                                 </button>
                             </nav>
                         </div>
@@ -608,11 +1022,11 @@ export default function SystemShell({ children }: Props) {
                                                 </div>
 
                                                 <h1 className="welcome-title text-[30px] font-semibold leading-tight text-[#2f2f2f]">
-                                                    ТОЧКА — складской учёт
+                                                    {currentLocationName} — складской учёт
                                                 </h1>
 
                                                 <p className="welcome-text mt-3 max-w-4xl text-[16px] leading-7 text-[#646464]">
-                                                    Здесь собраны разделы системы, обучение и новости обновлений. Рабочие страницы открываются из верхнего меню.
+                                                    Здесь собраны разделы системы, обучение и новости обновлений. Все операции выполняются в текущей зоне: {currentLocationName}.
                                                 </p>
                                             </div>
                                         </div>
@@ -712,6 +1126,66 @@ export default function SystemShell({ children }: Props) {
                     )}
                 </main>
             </div>
+
+            {isDeliveryAlertOpen && deliveryAlerts.length > 0 && (
+                <div className="fixed inset-x-0 top-[92px] z-[240] mx-auto w-full max-w-[680px] px-3 sm:top-[96px]">
+                    <div className="overflow-hidden rounded-3xl border border-orange-200 bg-white shadow-2xl ring-1 ring-orange-100">
+                        <div className="bg-orange-50 px-5 py-4">
+                            <div className="flex items-start justify-between gap-4">
+                                <div>
+                                    <div className="text-xs font-bold uppercase tracking-[0.14em] text-orange-600">
+                                        Новая доставка
+                                    </div>
+                                    <h2 className="mt-1 text-xl font-extrabold text-gray-900">
+                                        Нужно принять доставку в работу
+                                    </h2>
+                                    <p className="mt-1 text-sm text-gray-600">
+                                        Уведомление будет звучать, пока доставка находится в статусе “Новый”.
+                                    </p>
+                                </div>
+
+                                <Link
+                                    href="/deliveries"
+                                    className="rounded-2xl bg-orange-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-orange-700"
+                                >
+                                    Открыть
+                                </Link>
+                            </div>
+                        </div>
+
+                        <div className="max-h-[360px] overflow-y-auto p-4">
+                            <div className="space-y-3">
+                                {deliveryAlerts.map(order => (
+                                    <div key={order.id} className="rounded-2xl border border-gray-100 bg-gray-50 p-4">
+                                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                            <div className="min-w-0">
+                                                <div className="font-extrabold text-gray-900">
+                                                    {order.orderNumber} · {formatDeliveryAlertMoney(order.total)}
+                                                </div>
+                                                <div className="mt-1 text-sm font-semibold text-gray-700">
+                                                    {order.customerName} · {order.customerPhone}
+                                                </div>
+                                                <div className="mt-1 line-clamp-2 text-sm text-gray-500">
+                                                    {order.address}
+                                                </div>
+                                            </div>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => void acceptDeliveryFromAlert(order.id)}
+                                                disabled={isAcceptingDeliveryId === order.id}
+                                                className="shrink-0 rounded-2xl bg-green-600 px-4 py-2 text-sm font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                            >
+                                                {isAcceptingDeliveryId === order.id ? 'Принимаю...' : 'Принята доставка'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {isTrainingOpen && (
                 <div className="fixed inset-0 z-[240] flex items-center justify-center overflow-hidden overscroll-none bg-gray-950/55 px-3 py-4 backdrop-blur-[2px]">
@@ -903,12 +1377,10 @@ export default function SystemShell({ children }: Props) {
                     display: none;
                 }
 
-                .system-desktop-menu > div,
                 .news-cards-scroll {
                     scrollbar-width: none;
                 }
 
-                .system-desktop-menu > div::-webkit-scrollbar,
                 .news-cards-scroll::-webkit-scrollbar {
                     display: none;
                 }
@@ -939,7 +1411,7 @@ export default function SystemShell({ children }: Props) {
                         padding-top: 72px;
                     }
 
-                    .system-header-content {
+                    .system-header-top {
                         display: flex;
                         justify-content: space-between;
                     }
@@ -960,13 +1432,15 @@ export default function SystemShell({ children }: Props) {
                         gap: 8px;
                     }
 
-                    .system-kassa-button span,
-                    .system-news-button span {
+                    .system-kassa-button span {
                         display: none;
                     }
 
-                    .system-kassa-button,
-                    .system-news-button {
+                    .system-logout-button {
+                        display: none;
+                    }
+
+                    .system-kassa-button {
                         width: 44px;
                         padding-left: 0;
                         padding-right: 0;
@@ -1021,23 +1495,37 @@ export default function SystemShell({ children }: Props) {
                     }
                 }
 
-                @media (min-width: 768px) and (max-width: 1280px) {
+                @media (min-width: 768px) and (max-width: 1180px) {
                     .system-wrapper {
-                        padding-top: 136px;
+                        padding-top: 206px;
                     }
 
-                    .system-header-content {
-                        grid-template-columns: auto auto;
+                    .system-header-top {
+                        align-items: flex-start;
+                        gap: 12px;
                     }
 
-                    .system-desktop-menu {
-                        grid-column: 1 / -1;
-                        order: 3;
-                        justify-self: stretch;
+                    .system-header-actions {
+                        flex-wrap: wrap;
+                    }
+
+                    .system-location-pill {
+                        min-width: 260px;
+                        max-width: 330px;
                     }
 
                     .system-desktop-menu > div {
-                        justify-content: flex-start;
+                        grid-template-columns: repeat(3, minmax(0, 1fr));
+                    }
+                }
+
+                @media (min-width: 1181px) and (max-width: 1550px) {
+                    .system-wrapper {
+                        padding-top: 152px;
+                    }
+
+                    .system-desktop-menu > div {
+                        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
                     }
                 }
             `}</style>

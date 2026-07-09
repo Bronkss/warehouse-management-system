@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
+import type { QueryResult, QueryResultRow } from 'pg'
 import { pool } from '@/app/lib/db'
+import { resolveWarehouseContext, type WarehouseLocation, type WarehouseUser } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -39,7 +41,7 @@ type CommitRequestBody = {
     comment?: string
 }
 
-type ProductDbRow = {
+type ProductDbRow = QueryResultRow & {
     id: number
     name: string
     category: string
@@ -49,16 +51,23 @@ type ProductDbRow = {
     unit: ProductUnit
     stock: string
     min_stock: string
-    image: string
+    image?: string | null
+    image_url?: string | null
 }
 
-type QueryResultLike<T> = {
-    rows: T[]
-    rowCount: number | null
+type AcceptanceIdRow = QueryResultRow & {
+    id: number
+}
+
+type StockRow = QueryResultRow & {
+    stock: string
 }
 
 type DbClient = {
-    query<T = unknown>(text: string, params?: unknown[]): Promise<QueryResultLike<T>>
+    query<T extends QueryResultRow = QueryResultRow>(
+        text: string,
+        params?: readonly unknown[]
+    ): Promise<QueryResult<T>>
     release(): void
 }
 
@@ -95,6 +104,8 @@ type ProcessRowParams = {
     sellingPrice: number
     unit: ProductUnit
     acceptanceId: number
+    location: WarehouseLocation
+    user: WarehouseUser
 }
 
 function normalizeText(value: unknown) {
@@ -152,7 +163,7 @@ function productSnapshot(row: ProductDbRow | null) {
         unit: row.unit,
         stock: Number(row.stock ?? 0),
         minStock: Number(row.min_stock ?? 0),
-        image: row.image ?? '',
+        image: row.image_url || row.image || '',
     }
 }
 
@@ -162,6 +173,150 @@ function makeAcceptanceItemResult(params: InsertAcceptanceItemParams) {
     if (params.createdProduct) return 'created'
     if (params.action === 'update') return 'updated'
     return 'success'
+}
+
+async function ensureProductStockRows(
+    client: DbClient,
+    productId: number,
+    locationId: number,
+    currentLocationInitialStock = 0
+) {
+    await client.query(
+        `
+        INSERT INTO product_stocks (product_id, location_id, stock)
+        SELECT
+            $1,
+            l.id,
+            CASE WHEN l.id = $2 THEN $3 ELSE 0 END
+        FROM locations l
+        WHERE l.is_active = TRUE
+        ON CONFLICT (product_id, location_id) DO NOTHING
+        `,
+        [productId, locationId, currentLocationInitialStock]
+    )
+}
+
+async function getProductWithLocationStockForUpdate(
+    client: DbClient,
+    productId: number,
+    locationId: number
+): Promise<ProductDbRow | null> {
+    const productResult = await client.query<ProductDbRow>(
+        `
+        SELECT
+            id,
+            name,
+            category,
+            barcode,
+            purchase_price,
+            selling_price,
+            unit,
+            stock,
+            min_stock,
+            image,
+            image_url
+        FROM products
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [productId]
+    )
+
+    if (productResult.rowCount === 0) {
+        return null
+    }
+
+    await ensureProductStockRows(client, productId, locationId, 0)
+
+    const stockResult = await client.query<StockRow>(
+        `
+        SELECT stock
+        FROM product_stocks
+        WHERE product_id = $1 AND location_id = $2
+        FOR UPDATE
+        `,
+        [productId, locationId]
+    )
+
+    return {
+        ...productResult.rows[0],
+        stock: String(stockResult.rows[0]?.stock ?? 0),
+    }
+}
+
+async function addLocationStock(
+    client: DbClient,
+    productId: number,
+    location: WarehouseLocation,
+    quantityDelta: number,
+    acceptanceId: number,
+    comment: string,
+    createdBy: string
+): Promise<number> {
+    await ensureProductStockRows(client, productId, location.id, 0)
+
+    const stockResult = await client.query<StockRow>(
+        `
+        UPDATE product_stocks
+        SET
+            stock = COALESCE(stock, 0) + $3,
+            updated_at = NOW()
+        WHERE product_id = $1 AND location_id = $2
+        RETURNING stock
+        `,
+        [productId, location.id, quantityDelta]
+    )
+
+    const stockAfter = Number(stockResult.rows[0]?.stock ?? 0)
+
+    await client.query(
+        `
+        INSERT INTO stock_movements (
+            product_id,
+            location_id,
+            movement_type,
+            quantity_delta,
+            stock_after,
+            document_type,
+            document_id,
+            comment,
+            created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `,
+        [
+            productId,
+            location.id,
+            quantityDelta >= 0 ? 'acceptance' : 'acceptance_reverse',
+            quantityDelta,
+            stockAfter,
+            'product_acceptance',
+            acceptanceId,
+            comment,
+            createdBy,
+        ]
+    )
+
+    return stockAfter
+}
+
+async function updateLegacyProductStockIfNeeded(
+    client: DbClient,
+    productId: number,
+    location: WarehouseLocation,
+    quantityDelta: number
+) {
+    if (location.slug !== 'tochka') {
+        return
+    }
+
+    await client.query(
+        `
+        UPDATE products
+        SET stock = COALESCE(stock, 0) + $1
+        WHERE id = $2
+        `,
+        [quantityDelta, productId]
+    )
 }
 
 async function insertAcceptanceItem(client: DbClient, params: InsertAcceptanceItemParams) {
@@ -269,6 +424,8 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
         sellingPrice,
         unit,
         acceptanceId,
+        location,
+        user,
     } = params
 
     if (action === 'skip') {
@@ -311,33 +468,27 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
             throw new Error('Для обновления нужно выбрать товар из БД')
         }
 
-        const beforeResult = await client.query<ProductDbRow>(
-            'SELECT * FROM products WHERE id = $1 FOR UPDATE',
-            [productId]
-        )
+        const productBefore = await getProductWithLocationStockForUpdate(client, productId, location.id)
 
-        if (beforeResult.rowCount === 0) {
+        if (!productBefore) {
             throw new Error(`Товар ID ${productId} не найден`)
         }
 
-        const productBefore = beforeResult.rows[0]
-
-        const afterResult = await client.query<ProductDbRow>(
+        const afterProductResult = await client.query<ProductDbRow>(
             `UPDATE products
              SET
-                stock = COALESCE(stock, 0) + $1,
-                purchase_price = $2,
-                selling_price = $3,
-                unit = $4,
-                min_stock = $5,
-                name = COALESCE(NULLIF($6, ''), name),
-                category = COALESCE(NULLIF($7, ''), category),
-                barcode = COALESCE(NULLIF($8, ''), barcode),
-                image = COALESCE(NULLIF($9, ''), image)
-             WHERE id = $10
-             RETURNING *`,
+                purchase_price = $1,
+                selling_price = $2,
+                unit = $3,
+                min_stock = $4,
+                name = COALESCE(NULLIF($5, ''), name),
+                category = COALESCE(NULLIF($6, ''), category),
+                barcode = COALESCE(NULLIF($7, ''), barcode),
+                image = COALESCE(NULLIF($8, ''), image),
+                image_url = COALESCE(NULLIF($8, ''), image_url)
+             WHERE id = $9
+             RETURNING id, name, category, barcode, purchase_price, selling_price, unit, stock, min_stock, image, image_url`,
             [
-                quantity,
                 purchasePrice,
                 sellingPrice,
                 unit,
@@ -350,6 +501,23 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
             ]
         )
 
+        const stockAfter = await addLocationStock(
+            client,
+            productId,
+            location,
+            quantity,
+            acceptanceId,
+            `Приёмка ${location.name}`,
+            user.login
+        )
+
+        await updateLegacyProductStockIfNeeded(client, productId, location, quantity)
+
+        const productAfter = {
+            ...afterProductResult.rows[0],
+            stock: String(stockAfter),
+        }
+
         await insertAcceptanceItem(client, {
             acceptanceId,
             row,
@@ -361,7 +529,7 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
             matchedProductName: normalizeText(row.matchedProductName) || productBefore.name,
             matchedProductBarcode: normalizeText(row.matchedProductBarcode) || productBefore.barcode,
             productBefore,
-            productAfter: afterResult.rows[0],
+            productAfter,
             appliedQuantity: quantity,
             createdProduct: false,
             error: null,
@@ -377,8 +545,9 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
     }
 
     const barcode = normalizeText(row.barcode) || makeAutoBarcode(acceptanceId, rowNumber)
+    const legacyStock = location.slug === 'tochka' ? quantity : 0
 
-    const afterResult = await client.query<ProductDbRow>(
+    const afterProductResult = await client.query<ProductDbRow>(
         `INSERT INTO products (
             name,
             category,
@@ -388,9 +557,10 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
             unit,
             stock,
             min_stock,
-            image
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING *`,
+            image,
+            image_url
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+        RETURNING id, name, category, barcode, purchase_price, selling_price, unit, stock, min_stock, image, image_url`,
         [
             name,
             normalizeText(row.category),
@@ -398,13 +568,30 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
             purchasePrice,
             sellingPrice,
             unit,
-            quantity,
+            legacyStock,
             toNumber(row.minStock, 0),
             normalizeText(row.image),
         ]
     )
 
-    const createdProduct = afterResult.rows[0]
+    const createdProduct = afterProductResult.rows[0]
+    const productId = Number(createdProduct.id)
+
+    await ensureProductStockRows(client, productId, location.id, 0)
+    const stockAfter = await addLocationStock(
+        client,
+        productId,
+        location,
+        quantity,
+        acceptanceId,
+        `Создание товара через приёмку ${location.name}`,
+        user.login
+    )
+
+    const productAfter = {
+        ...createdProduct,
+        stock: String(stockAfter),
+    }
 
     await insertAcceptanceItem(client, {
         acceptanceId,
@@ -412,12 +599,12 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
         rowNumber,
         action,
         status,
-        productId: Number(createdProduct.id),
+        productId,
         matchedProductId: null,
         matchedProductName: '',
         matchedProductBarcode: '',
         productBefore: null,
-        productAfter: createdProduct,
+        productAfter,
         appliedQuantity: quantity,
         createdProduct: true,
         error: null,
@@ -427,9 +614,10 @@ async function processRow(client: DbClient, params: ProcessRowParams): Promise<R
 }
 
 export async function POST(request: NextRequest) {
-    const client = await pool.connect() as DbClient
+    const client = await pool.connect() as unknown as DbClient
 
     try {
+        const { location, user } = await resolveWarehouseContext(client, request)
         const body = await request.json() as CommitRequestBody
         const rows: IncomingRow[] = Array.isArray(body.rows) ? body.rows : []
         const sourceFileName = normalizeText(body.sourceFileName)
@@ -443,17 +631,20 @@ export async function POST(request: NextRequest) {
 
         await client.query('BEGIN')
 
-        const headerResult = await client.query<{ id: number }>(
+        const headerResult = await client.query<AcceptanceIdRow>(
             `INSERT INTO product_acceptances (
                 number,
                 source_file_name,
                 supplier,
                 invoice_number,
                 comment,
-                status
-            ) VALUES ('TEMP', $1, $2, $3, $4, 'completed')
+                status,
+                location_id,
+                created_by_name,
+                created_by_login
+            ) VALUES ('TEMP', $1, $2, $3, $4, 'completed', $5, $6, $7)
             RETURNING id`,
-            [sourceFileName || null, supplier || null, invoiceNumber || null, comment || null]
+            [sourceFileName || null, supplier || null, invoiceNumber || null, comment || null, location.id, user.name, user.login]
         )
 
         const acceptanceId = Number(headerResult.rows[0].id)
@@ -496,6 +687,8 @@ export async function POST(request: NextRequest) {
                     sellingPrice,
                     unit,
                     acceptanceId,
+                    location,
+                    user,
                 })
 
                 created += result.created
@@ -512,6 +705,7 @@ export async function POST(request: NextRequest) {
                     action,
                     productId: row.productId,
                     matchedProductId: row.matchedProductId,
+                    location: location.slug,
                     message,
                     error,
                 })
@@ -565,6 +759,11 @@ export async function POST(request: NextRequest) {
             acceptanceId,
             acceptanceNumber,
             number: acceptanceNumber,
+            locationId: location.id,
+            locationName: location.name,
+            locationSlug: location.slug,
+            createdByName: user.name,
+            createdByLogin: user.login,
             totalRows: rows.length,
             created,
             updated,

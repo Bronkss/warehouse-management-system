@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
+import { resolveWarehouseLocation } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -146,13 +147,16 @@ export async function GET(request: NextRequest) {
     const startedAt = performance.now()
 
     try {
+        const location = await resolveWarehouseLocation(pool, request)
         const { searchParams } = new URL(request.url)
 
         const search = String(searchParams.get('search') || '').trim()
         const limit = parseLimit(searchParams.get('limit'))
         const cursor = parseCursor(searchParams.get('cursor'))
 
-        const values: Array<string | number> = []
+        const values: Array<string | number> = [location.id, DEFAULT_PRODUCT_IMAGE]
+        const locationIndex = 1
+        const defaultImageIndex = 2
         const whereParts: string[] = []
 
         if (search) {
@@ -167,9 +171,9 @@ export async function GET(request: NextRequest) {
 
                 whereParts.push(`
                     (
-                        barcode = $${exactBarcodeIndex}
-                        OR barcode ILIKE $${likeIndex}
-                        OR name ILIKE $${likeIndex}
+                        p.barcode = $${exactBarcodeIndex}
+                        OR p.barcode ILIKE $${likeIndex}
+                        OR p.name ILIKE $${likeIndex}
                     )
                 `)
             } else {
@@ -178,8 +182,9 @@ export async function GET(request: NextRequest) {
 
                 whereParts.push(`
                     (
-                        name ILIKE $${likeIndex}
-                        OR barcode ILIKE $${likeIndex}
+                        p.name ILIKE $${likeIndex}
+                        OR p.barcode ILIKE $${likeIndex}
+                        OR p.category ILIKE $${likeIndex}
                     )
                 `)
             }
@@ -189,15 +194,12 @@ export async function GET(request: NextRequest) {
             values.push(cursor)
             const cursorIndex = values.length
 
-            whereParts.push(`id < $${cursorIndex}`)
+            whereParts.push(`p.id < $${cursorIndex}`)
         }
 
         const whereSql = whereParts.length > 0
             ? `WHERE ${whereParts.join(' AND ')}`
             : ''
-
-        values.push(DEFAULT_PRODUCT_IMAGE)
-        const defaultImageIndex = values.length
 
         values.push(limit + 1)
         const limitIndex = values.length
@@ -205,20 +207,23 @@ export async function GET(request: NextRequest) {
         const result = await pool.query<ProductRow>(
             `
             SELECT
-                id,
-                name,
-                category,
-                barcode,
-                purchase_price,
-                selling_price,
-                unit,
-                stock,
-                min_stock,
-                COALESCE(marked, false) AS marked,
-                COALESCE(NULLIF(image_url, ''), $${defaultImageIndex}) AS image
-            FROM products
+                p.id,
+                p.name,
+                p.category,
+                p.barcode,
+                p.purchase_price,
+                p.selling_price,
+                p.unit,
+                COALESCE(ps.stock, 0) AS stock,
+                p.min_stock,
+                COALESCE(p.marked, false) AS marked,
+                COALESCE(NULLIF(p.image_url, ''), NULLIF(p.image, ''), $${defaultImageIndex}) AS image
+            FROM products p
+            LEFT JOIN product_stocks ps
+                ON ps.product_id = p.id
+               AND ps.location_id = $${locationIndex}
             ${whereSql}
-            ORDER BY id DESC
+            ORDER BY p.id DESC
             LIMIT $${limitIndex}
             `,
             values
@@ -242,6 +247,7 @@ export async function GET(request: NextRequest) {
                 hasMore,
                 limit,
                 durationMs,
+                location,
             },
             {
                 headers: {
@@ -254,15 +260,18 @@ export async function GET(request: NextRequest) {
         console.error('GET /api/products error:', error)
 
         return NextResponse.json(
-            { message: 'Ошибка при получении товаров' },
+            { message: error instanceof Error ? error.message : 'Ошибка при получении товаров' },
             { status: 500 }
         )
     }
 }
 
 export async function POST(request: NextRequest) {
+    const client = await pool.connect()
+
     try {
         const body = await request.json()
+        const location = await resolveWarehouseLocation(client, request)
 
         const name = String(body.name || '').trim()
         const category = String(body.category || '').trim()
@@ -332,7 +341,9 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        const result = await pool.query<ProductRow>(
+        await client.query('BEGIN')
+
+        const result = await client.query<{ id: number }>(
             `
             INSERT INTO products (
                 name,
@@ -347,18 +358,7 @@ export async function POST(request: NextRequest) {
                 image_url
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING
-                id,
-                name,
-                category,
-                barcode,
-                purchase_price,
-                selling_price,
-                unit,
-                stock,
-                min_stock,
-                COALESCE(marked, false) AS marked,
-                COALESCE(NULLIF(image_url, ''), $11) AS image
+            RETURNING id
             `,
             [
                 name,
@@ -367,16 +367,76 @@ export async function POST(request: NextRequest) {
                 purchasePrice,
                 sellingPrice,
                 unit,
-                stock,
+                location.slug === 'tochka' ? stock : 0,
                 minStock,
                 marked,
                 image,
-                DEFAULT_PRODUCT_IMAGE,
             ]
         )
 
-        return NextResponse.json(mapProduct(result.rows[0]), { status: 201 })
+        const productId = Number(result.rows[0].id)
+
+        await client.query(
+            `
+            INSERT INTO product_stocks (product_id, location_id, stock)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (product_id, location_id) DO UPDATE
+            SET stock = EXCLUDED.stock,
+                updated_at = NOW()
+            `,
+            [productId, location.id, stock]
+        )
+
+        if (stock !== 0) {
+            await client.query(
+                `
+                INSERT INTO stock_movements (
+                    product_id,
+                    location_id,
+                    movement_type,
+                    quantity_delta,
+                    stock_after,
+                    document_type,
+                    document_id,
+                    comment,
+                    created_by
+                )
+                VALUES ($1, $2, 'product_create', $3, $3, 'products', $1, $4, 'products-api')
+                `,
+                [productId, location.id, stock, `Создание товара в зоне ${location.name}`]
+            )
+        }
+
+        const selected = await client.query<ProductRow>(
+            `
+            SELECT
+                p.id,
+                p.name,
+                p.category,
+                p.barcode,
+                p.purchase_price,
+                p.selling_price,
+                p.unit,
+                COALESCE(ps.stock, 0) AS stock,
+                p.min_stock,
+                COALESCE(p.marked, false) AS marked,
+                COALESCE(NULLIF(p.image_url, ''), NULLIF(p.image, ''), $3) AS image
+            FROM products p
+            LEFT JOIN product_stocks ps
+                ON ps.product_id = p.id
+               AND ps.location_id = $2
+            WHERE p.id = $1
+            LIMIT 1
+            `,
+            [productId, location.id, DEFAULT_PRODUCT_IMAGE]
+        )
+
+        await client.query('COMMIT')
+
+        return NextResponse.json(mapProduct(selected.rows[0]), { status: 201 })
     } catch (error: any) {
+        await client.query('ROLLBACK').catch(() => undefined)
+
         console.error('POST /api/products error:', error)
 
         if (error?.code === '23505') {
@@ -394,8 +454,10 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json(
-            { message: 'Ошибка при создании товара' },
+            { message: error instanceof Error ? error.message : 'Ошибка при создании товара' },
             { status: 500 }
         )
+    } finally {
+        client.release()
     }
 }

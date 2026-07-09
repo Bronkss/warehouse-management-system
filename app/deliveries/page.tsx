@@ -2,6 +2,7 @@
 
 import * as React from 'react'
 import System from '@/app/components/SystemShell'
+import { useRouter } from 'next/navigation'
 
 type OrderStatus =
     | 'new'
@@ -59,6 +60,30 @@ type TabKey = 'current' | 'history' | 'all'
 
 type ApiErrorResponse = {
     message?: string
+}
+
+const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug'
+const AUTH_USER_NAME_KEY = 'warehouse_user_name'
+const AUTH_USER_KEY = 'warehouse_auth_user'
+
+function readBrowserStorageValue(key: string) {
+    if (typeof window === 'undefined') {
+        return ''
+    }
+
+    return localStorage.getItem(key) || sessionStorage.getItem(key) || ''
+}
+
+function getCurrentLocationSlug() {
+    return readBrowserStorageValue(AUTH_LOCATION_SLUG_KEY) || 'tochka'
+}
+
+function getCurrentUserName() {
+    return (
+        readBrowserStorageValue(AUTH_USER_NAME_KEY) ||
+        readBrowserStorageValue(AUTH_USER_KEY) ||
+        'Сотрудник ТОЧКИ'
+    )
 }
 
 const STATUS_LABELS: Record<OrderStatus, string> = {
@@ -142,6 +167,7 @@ async function readApiJson<T>(response: Response): Promise<T> {
 }
 
 export default function Page() {
+    const router = useRouter()
     const [orders, setOrders] = React.useState<DeliveryOrder[]>([])
     const [isLoading, setIsLoading] = React.useState(true)
     const [isRefreshing, setIsRefreshing] = React.useState(false)
@@ -150,6 +176,12 @@ export default function Page() {
     const [activeTab, setActiveTab] = React.useState<TabKey>('current')
     const [openedOrderId, setOpenedOrderId] = React.useState<string | null>(null)
     const [updatingOrderId, setUpdatingOrderId] = React.useState<string | null>(null)
+
+    React.useEffect(() => {
+        if (getCurrentLocationSlug() !== 'tochka') {
+            router.replace('/system')
+        }
+    }, [router])
 
     const loadOrders = React.useCallback(async () => {
         try {
@@ -196,6 +228,18 @@ export default function Page() {
         return () => window.clearTimeout(timer)
     }, [loadOrders])
 
+    React.useEffect(() => {
+        const handleDeliveriesUpdated = () => {
+            void loadOrders()
+        }
+
+        window.addEventListener('deliveries-updated', handleDeliveriesUpdated)
+
+        return () => {
+            window.removeEventListener('deliveries-updated', handleDeliveriesUpdated)
+        }
+    }, [loadOrders])
+
     const currentOrders = React.useMemo(
         () => orders.filter(isCurrentDelivery),
         [orders],
@@ -223,7 +267,7 @@ export default function Page() {
                 },
                 body: JSON.stringify({
                     status,
-                    changedByName: 'Администратор',
+                    changedByName: getCurrentUserName(),
                 }),
             })
 
@@ -258,6 +302,8 @@ export default function Page() {
 
                 return next
             })
+
+            window.dispatchEvent(new CustomEvent('deliveries-updated'))
         } catch (err) {
             console.error(err)
             setError(err instanceof Error ? err.message : 'Ошибка обновления статуса')
@@ -282,7 +328,7 @@ export default function Page() {
                                 </h1>
 
                                 <p className="mt-1 text-sm text-gray-500">
-                                    Текущие заказы, история доставок, состав заказа и история смены статусов.
+                                    Текущие заказы зоны ТОЧКА, история доставок, состав заказа и история смены статусов.
                                 </p>
                             </div>
 

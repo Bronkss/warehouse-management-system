@@ -1,14 +1,34 @@
 import type { Product } from '@/app/types/product'
 
-const DB_NAME = 'warehouse-db'
+const DB_NAME_PREFIX = 'warehouse-db-v2'
 const DB_VERSION = 1
 
 const PRODUCTS_STORE = 'products'
 const META_STORE = 'meta'
 
+const DEFAULT_LOCATION_SLUG = 'tochka'
+const AUTH_LOCATION_SLUG_KEY = 'warehouse_location_slug'
+
 type MetaRecord = {
     key: string
     value: unknown
+}
+
+function getCurrentLocationSlug(): string {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_SLUG
+    }
+
+    const raw =
+        localStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        sessionStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        DEFAULT_LOCATION_SLUG
+
+    return raw.trim().toLowerCase() || DEFAULT_LOCATION_SLUG
+}
+
+function getDbName(): string {
+    return `${DB_NAME_PREFIX}:${getCurrentLocationSlug()}`
 }
 
 function openWarehouseDb(): Promise<IDBDatabase> {
@@ -23,7 +43,7 @@ function openWarehouseDb(): Promise<IDBDatabase> {
             return
         }
 
-        const request = window.indexedDB.open(DB_NAME, DB_VERSION)
+        const request = window.indexedDB.open(getDbName(), DB_VERSION)
 
         request.onupgradeneeded = () => {
             const db = request.result
@@ -213,7 +233,6 @@ export async function searchProductsInIndexedDb(
         })
         .slice(0, limit)
 }
-
 
 export async function deleteProductsNotInIndexedDbIds(
     validProductIds: Set<number>

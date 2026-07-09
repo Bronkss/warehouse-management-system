@@ -55,13 +55,49 @@ type PosCheckoutStoreState = {
     clearHeldCheckouts: () => void
 }
 
-const POS_CHECKOUT_STORE_KEY = 'warehouse.pos.checkout.state.v1'
+const POS_CHECKOUT_STORE_KEY = 'warehouse.pos.checkout.state.v2'
 const MAX_HELD_CHECKOUTS = 50
+const LOCATION_SLUG_KEY = 'warehouse_location_slug'
+const DEFAULT_LOCATION_SLUG = 'tochka'
 
 const noopStorage: StateStorage = {
     getItem: () => null,
     setItem: () => undefined,
     removeItem: () => undefined,
+}
+
+const getCurrentLocationSlug = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_LOCATION_SLUG
+    }
+
+    return String(
+        sessionStorage.getItem(LOCATION_SLUG_KEY) ||
+        localStorage.getItem(LOCATION_SLUG_KEY) ||
+        DEFAULT_LOCATION_SLUG
+    ).trim() || DEFAULT_LOCATION_SLUG
+}
+
+const getLocationAwareStorageKey = (name: string): string => {
+    return `${name}:${getCurrentLocationSlug()}`
+}
+
+const createLocationAwareStorage = (): StateStorage => {
+    if (typeof window === 'undefined') {
+        return noopStorage
+    }
+
+    return {
+        getItem: name => {
+            return window.localStorage.getItem(getLocationAwareStorageKey(name))
+        },
+        setItem: (name, value) => {
+            window.localStorage.setItem(getLocationAwareStorageKey(name), value)
+        },
+        removeItem: name => {
+            window.localStorage.removeItem(getLocationAwareStorageKey(name))
+        },
+    }
 }
 
 const normalizeMoney = (value: number): number => {
@@ -77,7 +113,7 @@ const createHeldCheckoutId = (): string => {
     const date = now.toISOString().slice(0, 10).replaceAll('-', '')
     const time = String(now.getTime()).slice(-6)
 
-    return `held-${date}-${time}-${Math.random().toString(16).slice(2, 8)}`
+    return `held-${getCurrentLocationSlug()}-${date}-${time}-${Math.random().toString(16).slice(2, 8)}`
 }
 
 const getCheckoutTitle = (items: StoredCheckoutItem[]): string => {
@@ -156,14 +192,8 @@ export const usePosCheckoutStore = create<PosCheckoutStoreState>()(
         }),
         {
             name: POS_CHECKOUT_STORE_KEY,
-            version: 1,
-            storage: createJSONStorage(() => {
-                if (typeof window === 'undefined') {
-                    return noopStorage
-                }
-
-                return window.localStorage
-            }),
+            version: 2,
+            storage: createJSONStorage(createLocationAwareStorage),
             partialize: state => ({
                 currentItems: state.currentItems,
                 heldCheckouts: state.heldCheckouts,
