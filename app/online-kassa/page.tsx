@@ -503,6 +503,14 @@ const getMarkingPackageModeFromBarcodeScan = (product: Product, rawQuery = ""): 
     return isCigaretteBlockBarcodeScan(product, rawQuery) ? "block" : "single";
 };
 
+const getMarkingPackageQuantity = (packageMode: MarkingPackageMode): number => {
+    return packageMode === "block" ? CIGARETTE_BLOCK_QUANTITY : 1;
+};
+
+const getMarkingPackageTotalPrice = (product: Product, packageMode: MarkingPackageMode): number => {
+    return getSellingPrice(product) * getMarkingPackageQuantity(packageMode);
+};
+
 const normalizeSearchText = (value: unknown): string => {
     return String(value ?? "")
         .trim()
@@ -737,7 +745,7 @@ const precheckMarkingCode = async (
             body: JSON.stringify({
                 markingCode,
                 markingPackageMode: packageMode,
-                markingPackageQuantity: packageMode === "block" ? CIGARETTE_BLOCK_QUANTITY : 1,
+                markingPackageQuantity: getMarkingPackageQuantity(packageMode),
             }),
         },
     );
@@ -1656,7 +1664,7 @@ export default function PosPage() {
         const safeProduct = normalizeProduct(product);
         const markingCode = normalizeMarkingCode(rawMarkingCode);
         const stock = getStock(safeProduct);
-        const saleQuantity = packageMode === "block" ? CIGARETTE_BLOCK_QUANTITY : 1;
+        const saleQuantity = getMarkingPackageQuantity(packageMode);
 
         if (!markingCode) {
             setMarkingCheckResult(null);
@@ -3775,11 +3783,19 @@ export default function PosPage() {
                             )}
 
                             <div className="mb-6 rounded-xl bg-gray-50 p-4">
-                                <div className="text-sm text-gray-500">Цена:</div>
+                                <div className="text-sm text-gray-500">
+                                    {markingPackageMode === "block" ? "Цена блока:" : "Цена:"}
+                                </div>
 
                                 <div className="text-3xl font-bold text-gray-800">
-                                    {formatCurrency(getSellingPrice(markingModalProduct))}
+                                    {formatCurrency(getMarkingPackageTotalPrice(markingModalProduct, markingPackageMode))}
                                 </div>
+
+                                {markingPackageMode === "block" && (
+                                    <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">
+                                        {formatCurrency(getSellingPrice(markingModalProduct))} × {CIGARETTE_BLOCK_QUANTITY} шт. = {formatCurrency(getMarkingPackageTotalPrice(markingModalProduct, "block"))}
+                                    </div>
+                                )}
 
                                 <div className="mt-2 text-sm text-gray-500">
                                     Остаток:{" "}
