@@ -30,10 +30,10 @@ const MARKING_STATUS_INTERVAL_MS = Number(process.env.MARKING_STATUS_INTERVAL_MS
 // Для пачек и блоков сигарет используем одинаковую строгую проверку [M+].
 // Блок определяется на фронте по отдельному штрихкоду товара, но КМ блока
 // всё равно должен пройти beginMarkingCodeValidation -> getMarkingCodeValidationStatus -> assert [M+] -> acceptMarkingCode.
-const ATOL_MARKING_DEFAULT_IMC_TYPE = Number(process.env.ATOL_MARKING_DEFAULT_IMC_TYPE || 256);
-const ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS = Number(process.env.ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS || 1);
-const ATOL_MARKING_BLOCK_IMC_TYPE = Number(process.env.ATOL_MARKING_BLOCK_IMC_TYPE || ATOL_MARKING_DEFAULT_IMC_TYPE);
-const ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS = Number(process.env.ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS || ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS);
+const ATOL_MARKING_DEFAULT_IMC_TYPE = String(process.env.ATOL_MARKING_DEFAULT_IMC_TYPE || 'auto');
+const ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS = String(process.env.ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS || 'itemPieceSold');
+const ATOL_MARKING_BLOCK_IMC_TYPE = String(process.env.ATOL_MARKING_BLOCK_IMC_TYPE || ATOL_MARKING_DEFAULT_IMC_TYPE);
+const ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS = String(process.env.ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS || ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS);
 const ATOL_MARKING_BLOCK_VALIDATION_MODE = 'strict';
 
 app.use(express.json({ limit: '4mb' }));
@@ -499,14 +499,32 @@ const getMarkingOptionsForItem = item => {
     };
 };
 
+const encodeImcForAtolJson = value => {
+    return Buffer.from(String(value || ''), 'utf8').toString('base64');
+};
+
 const buildNativeDriverMarkingParams = (markingCode, options = {}) => {
     const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
+    const encodedImc = encodeImcForAtolJson(normalizedMarkingCode);
+    const imcType = options.imcType || ATOL_MARKING_DEFAULT_IMC_TYPE;
+    const itemEstimatedStatus = options.itemEstimatedStatus || ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS;
+
+    console.log('ATOL marking params prepared:');
+    console.log(JSON.stringify({
+        imcType,
+        itemEstimatedStatus,
+        rawLength: normalizedMarkingCode.length,
+        base64Length: encodedImc.length,
+        rawPreview: normalizedMarkingCode.replaceAll(GS_CHAR, '<GS>'),
+    }, null, 2));
 
     return {
-        imcType: Number(options.imcType || ATOL_MARKING_DEFAULT_IMC_TYPE),
-        imc: normalizedMarkingCode,
-        itemEstimatedStatus: Number(options.itemEstimatedStatus || ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS),
+        imcType,
+        imc: encodedImc,
+        itemEstimatedStatus,
         imcModeProcessing: 0,
+        itemQuantity: 1,
+        itemUnits: 'piece',
     };
 };
 
@@ -1020,6 +1038,8 @@ app.get('/health', requireToken, async (req, res) => {
         markingStatusAttempts: MARKING_STATUS_ATTEMPTS,
         markingStatusIntervalMs: MARKING_STATUS_INTERVAL_MS,
         strictMarkingSell: true,
+        markingImcType: ATOL_MARKING_DEFAULT_IMC_TYPE,
+        markingItemEstimatedStatus: ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS,
         blockMarkingValidationMode: ATOL_MARKING_BLOCK_VALIDATION_MODE,
         blockImcType: ATOL_MARKING_BLOCK_IMC_TYPE,
         blockItemEstimatedStatus: ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS,
