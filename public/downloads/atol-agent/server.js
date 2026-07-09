@@ -342,17 +342,19 @@ const getAtolResultPayload = item => {
     return item;
 };
 
-const restoreMissingGsBeforeAi93 = value => {
+const restoreMissingGsBeforeAi21VariablePart = value => {
     const code = String(value || '');
 
     if (!code) {
         return code;
     }
 
+    // Если сканер корректно передал FNC1 / GS, ничего не трогаем.
     if (code.includes(GS_CHAR)) {
         return code;
     }
 
+    // Ожидаемый старт GS1 DataMatrix: (01) GTIN14 (21) serial.
     if (!code.startsWith('01')) {
         return code;
     }
@@ -364,27 +366,50 @@ const restoreMissingGsBeforeAi93 = value => {
     }
 
     const serialStartIndex = ai21Index + 2;
-    const lastAi93Index = code.lastIndexOf('93');
+    const serialMinLength = 4;
+    const serialMaxLength = 20;
+    const minCandidateIndex = serialStartIndex + serialMinLength;
+    const maxCandidateIndex = Math.min(code.length - 2, serialStartIndex + serialMaxLength);
 
-    if (lastAi93Index <= serialStartIndex) {
+    const candidateAis = ['8005', '91', '92', '93'];
+    const candidates = [];
+
+    for (let index = minCandidateIndex; index <= maxCandidateIndex; index += 1) {
+        for (const ai of candidateAis) {
+            if (!code.startsWith(ai, index)) {
+                continue;
+            }
+
+            const tailLength = code.length - index;
+
+            // Блок сигарет может иметь длинный криптохвост. Старое ограничение 12 символов ломало длинные КМ.
+            if (tailLength < ai.length + 1) {
+                continue;
+            }
+
+            candidates.push({ index, ai, tailLength });
+        }
+    }
+
+    if (candidates.length === 0) {
         return code;
     }
 
-    const tailLength = code.length - lastAi93Index;
+    candidates.sort((a, b) => a.index - b.index || b.ai.length - a.ai.length);
 
-    if (tailLength >= 4 && tailLength <= 12) {
-        const restored = `${code.slice(0, lastAi93Index)}${GS_CHAR}${code.slice(lastAi93Index)}`;
+    const candidate = candidates[0];
+    const restored = `${code.slice(0, candidate.index)}${GS_CHAR}${code.slice(candidate.index)}`;
 
-        console.log('Marking code GS/FNC1 restored before AI 93:');
-        console.log(JSON.stringify({
-            before: code,
-            after: restored,
-        }, null, 2));
+    console.log('Marking code GS/FNC1 restored after AI 21 variable part:');
+    console.log(JSON.stringify({
+        beforeLength: code.length,
+        afterLength: restored.length,
+        insertedBeforeAi: candidate.ai,
+        serialLength: candidate.index - serialStartIndex,
+        tailLength: candidate.tailLength,
+    }, null, 2));
 
-        return restored;
-    }
-
-    return code;
+    return restored;
 };
 
 const normalizeMarkingCodeInput = value => {
@@ -396,7 +421,7 @@ const normalizeMarkingCodeInput = value => {
         .replaceAll('[GS]', GS_CHAR)
         .trim();
 
-    return restoreMissingGsBeforeAi93(normalized);
+    return restoreMissingGsBeforeAi21VariablePart(normalized);
 };
 
 const isTobaccoBlockItem = item => {
