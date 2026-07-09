@@ -1,11 +1,12 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
+import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 type RouteContext = {
-    params: Promise<{ id: string }>
+    params: Promise<{ id: string }> | { id: string }
 }
 
 type OrderStatus =
@@ -24,6 +25,23 @@ const ORDER_STATUSES: OrderStatus[] = [
     'completed',
     'cancelled',
 ]
+
+async function getRouteParams(context: RouteContext) {
+    return await context.params
+}
+
+function forbiddenDeliveriesResponse() {
+    return NextResponse.json(
+        { message: 'Раздел «Доставки» доступен только в зоне ТОЧКА' },
+        { status: 403 },
+    )
+}
+
+function assertTochkaLocation(locationSlug: string) {
+    if (locationSlug !== 'tochka') {
+        throw new Error('DELIVERIES_FORBIDDEN')
+    }
+}
 
 async function getDeliveryById(id: string) {
     const result = await pool.query(
@@ -102,10 +120,12 @@ async function getDeliveryById(id: string) {
     return result.rows[0] || null
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(request: NextRequest, context: RouteContext) {
     try {
-        const { id } = await params
+        const { location } = await resolveWarehouseContext(pool, request)
+        assertTochkaLocation(location.slug)
 
+        const { id } = await getRouteParams(context)
         const delivery = await getDeliveryById(id)
 
         if (!delivery) {
@@ -117,6 +137,10 @@ export async function GET(_request: Request, { params }: RouteContext) {
 
         return NextResponse.json(delivery)
     } catch (error) {
+        if (error instanceof Error && error.message === 'DELIVERIES_FORBIDDEN') {
+            return forbiddenDeliveriesResponse()
+        }
+
         console.error(error)
 
         return NextResponse.json(
@@ -126,15 +150,18 @@ export async function GET(_request: Request, { params }: RouteContext) {
     }
 }
 
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: NextRequest, context: RouteContext) {
     const client = await pool.connect()
 
     try {
-        const { id } = await params
+        const { location, user } = await resolveWarehouseContext(pool, request)
+        assertTochkaLocation(location.slug)
+
+        const { id } = await getRouteParams(context)
         const body = await request.json()
 
         const status = String(body.status || '').trim() as OrderStatus
-        const changedByName = String(body.changedByName || 'Администратор').trim()
+        const changedByName = user.name || user.login || 'Сотрудник ТОЧКИ'
 
         if (!ORDER_STATUSES.includes(status)) {
             return NextResponse.json(
@@ -170,7 +197,9 @@ export async function PATCH(request: Request, { params }: RouteContext) {
             await client.query(
                 `
                 UPDATE orders
-                SET status = $2
+                SET
+                    status = $2,
+                    updated_at = NOW()
                 WHERE id = $1
                 `,
                 [id, status],
@@ -186,7 +215,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
                 )
                 VALUES ($1, $2, $3, $4)
                 `,
-                [id, oldStatus, status, changedByName || 'Администратор'],
+                [id, oldStatus, status, changedByName],
             )
         }
 
@@ -197,6 +226,10 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         return NextResponse.json(updatedDelivery)
     } catch (error) {
         await client.query('ROLLBACK')
+
+        if (error instanceof Error && error.message === 'DELIVERIES_FORBIDDEN') {
+            return forbiddenDeliveriesResponse()
+        }
 
         console.error(error)
 

@@ -1,11 +1,28 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { pool } from '@/app/lib/db'
+import { resolveWarehouseContext } from '@/app/lib/serverWarehouseLocation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function GET(request: Request) {
+function forbiddenDeliveriesResponse() {
+    return NextResponse.json(
+        { message: 'Раздел «Доставки» доступен только в зоне ТОЧКА' },
+        { status: 403 },
+    )
+}
+
+function assertTochkaLocation(locationSlug: string) {
+    if (locationSlug !== 'tochka') {
+        throw new Error('DELIVERIES_FORBIDDEN')
+    }
+}
+
+export async function GET(request: NextRequest) {
     try {
+        const { location } = await resolveWarehouseContext(pool, request)
+        assertTochkaLocation(location.slug)
+
         const { searchParams } = new URL(request.url)
 
         const search = searchParams.get('search')?.trim() || ''
@@ -108,8 +125,9 @@ export async function GET(request: Request) {
             ${whereSql}
             ORDER BY
                 CASE
-                    WHEN o.status IN ('new', 'accepted', 'assembling', 'delivering') THEN 0
-                    ELSE 1
+                    WHEN o.status = 'new' THEN 0
+                    WHEN o.status IN ('accepted', 'assembling', 'delivering') THEN 1
+                    ELSE 2
                 END ASC,
                 o.created_at DESC
             `,
@@ -118,6 +136,10 @@ export async function GET(request: Request) {
 
         return NextResponse.json(result.rows)
     } catch (error) {
+        if (error instanceof Error && error.message === 'DELIVERIES_FORBIDDEN') {
+            return forbiddenDeliveriesResponse()
+        }
+
         console.error(error)
 
         return NextResponse.json(

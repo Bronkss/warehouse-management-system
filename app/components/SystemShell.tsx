@@ -23,7 +23,7 @@ const USER_NAME_COOKIE_NAME = 'warehouse_user_name'
 const USER_ROLE_COOKIE_NAME = 'warehouse_user_role'
 const DEFAULT_LOCATION_NAME = 'ТОЧКА'
 
-const menuItems = [
+const BASE_MENU_ITEMS = [
     { title: 'Товары', icon: '/icons/tovar.png', linkName: 'products' },
     { title: 'Продажи', icon: '/icons/order.png', linkName: 'sales' },
     { title: 'Приемки', icon: '/icons/priemka.png', linkName: 'priemka' },
@@ -31,6 +31,33 @@ const menuItems = [
     { title: 'Доставки', icon: '/icons/delivery.png', linkName: 'deliveries' },
     { title: 'Списания', icon: '/icons/spisaniya.png', linkName: 'writeoff' },
 ]
+
+const MAIN_WAREHOUSE_HIDDEN_LINKS = new Set(['sales', 'deliveries'])
+const TOCHKA_ONLY_LINKS = new Set(['deliveries'])
+
+function getMenuItemsForLocation(locationSlug: string, locationType: string) {
+    return BASE_MENU_ITEMS.filter(item => {
+        if (locationType === 'warehouse' || locationSlug === 'main-warehouse') {
+            return !MAIN_WAREHOUSE_HIDDEN_LINKS.has(item.linkName)
+        }
+
+        if (TOCHKA_ONLY_LINKS.has(item.linkName)) {
+            return locationSlug === 'tochka'
+        }
+
+        return true
+    })
+}
+
+type DeliveryAlertOrder = {
+    id: string
+    orderNumber: string
+    customerName: string
+    customerPhone: string
+    address: string
+    total: number
+    createdAt: string
+}
 
 const trainingSections = [
     {
@@ -250,6 +277,18 @@ function readCurrentLocationName() {
     )
 }
 
+function readCurrentLocationSlug() {
+    if (typeof window === 'undefined') {
+        return 'tochka'
+    }
+
+    return (
+        localStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        sessionStorage.getItem(AUTH_LOCATION_SLUG_KEY) ||
+        'tochka'
+    )
+}
+
 function readCurrentLocationType() {
     if (typeof window === 'undefined') {
         return 'store'
@@ -294,6 +333,63 @@ function clearCookie(name: string) {
     document.cookie = `${name}=; path=/; max-age=0; SameSite=Lax`
 }
 
+function formatDeliveryAlertMoney(value: number) {
+    return new Intl.NumberFormat('ru-RU', {
+        style: 'currency',
+        currency: 'RUB',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+    }).format(Math.round(value || 0))
+}
+
+function playDeliveryAlertTone() {
+    try {
+        const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+
+        if (!AudioContextCtor) {
+            return
+        }
+
+        const audioContext = new AudioContextCtor()
+        const masterGain = audioContext.createGain()
+        const now = audioContext.currentTime
+
+        // Более громкий и резкий сигнал: три коротких импульса.
+        // Итоговая громкость всё равно зависит от громкости Windows/браузера.
+        masterGain.gain.setValueAtTime(0.0001, now)
+        masterGain.gain.linearRampToValueAtTime(0.48, now + 0.015)
+        masterGain.gain.linearRampToValueAtTime(0.0001, now + 1.05)
+        masterGain.connect(audioContext.destination)
+
+        const playBeep = (startAt: number, frequency: number) => {
+            const oscillator = audioContext.createOscillator()
+            const gain = audioContext.createGain()
+
+            oscillator.type = 'square'
+            oscillator.frequency.setValueAtTime(frequency, startAt)
+
+            gain.gain.setValueAtTime(0.0001, startAt)
+            gain.gain.linearRampToValueAtTime(0.95, startAt + 0.015)
+            gain.gain.linearRampToValueAtTime(0.0001, startAt + 0.22)
+
+            oscillator.connect(gain)
+            gain.connect(masterGain)
+            oscillator.start(startAt)
+            oscillator.stop(startAt + 0.24)
+        }
+
+        playBeep(now, 880)
+        playBeep(now + 0.32, 1175)
+        playBeep(now + 0.64, 880)
+
+        window.setTimeout(() => {
+            void audioContext.close().catch(() => undefined)
+        }, 1400)
+    } catch (error) {
+        console.warn('Delivery alert sound was blocked by browser:', error)
+    }
+}
+
 export default function SystemShell({ children }: Props) {
     const pathname = usePathname()
     const router = useRouter()
@@ -305,24 +401,152 @@ export default function SystemShell({ children }: Props) {
     const [isUpdateModalOpen, setIsUpdateModalOpen] = React.useState(false)
     const [activeTrainingIndex, setActiveTrainingIndex] = React.useState(0)
     const [activeUpdateIndex, setActiveUpdateIndex] = React.useState(0)
+    const [currentLocationSlug, setCurrentLocationSlug] = React.useState('tochka')
     const [currentLocationName, setCurrentLocationName] = React.useState(DEFAULT_LOCATION_NAME)
     const [currentLocationType, setCurrentLocationType] = React.useState('store')
     const [currentUserName, setCurrentUserName] = React.useState('Пользователь')
     const [currentUserLogin, setCurrentUserLogin] = React.useState('')
+    const [deliveryAlerts, setDeliveryAlerts] = React.useState<DeliveryAlertOrder[]>([])
+    const [isDeliveryAlertOpen, setIsDeliveryAlertOpen] = React.useState(false)
+    const [isAcceptingDeliveryId, setIsAcceptingDeliveryId] = React.useState<string | null>(null)
 
     const hasPageContent = React.Children.count(children) > 0
     const activeTraining = trainingSections[activeTrainingIndex] || trainingSections[0]
+    const isTochkaLocation = currentLocationSlug === 'tochka'
+    const isMainWarehouse = currentLocationType === 'warehouse' || currentLocationSlug === 'main-warehouse'
+    const menuItems = React.useMemo(
+        () => getMenuItemsForLocation(currentLocationSlug, currentLocationType),
+        [currentLocationSlug, currentLocationType]
+    )
 
     React.useEffect(() => {
         setIsMenuOpen(false)
     }, [pathname])
 
     React.useEffect(() => {
+        setCurrentLocationSlug(readCurrentLocationSlug())
         setCurrentLocationName(readCurrentLocationName())
         setCurrentLocationType(readCurrentLocationType())
         setCurrentUserName(readCurrentUserName())
         setCurrentUserLogin(readCurrentUserLogin())
     }, [pathname])
+
+    React.useEffect(() => {
+        if (!pathname) {
+            return
+        }
+
+        if (!isTochkaLocation && pathname === '/deliveries') {
+            router.replace('/system')
+            return
+        }
+
+        if (isMainWarehouse && (pathname === '/online-kassa' || pathname === '/sales')) {
+            router.replace('/system')
+        }
+    }, [isMainWarehouse, isTochkaLocation, pathname, router])
+
+    const loadDeliveryAlerts = React.useCallback(async () => {
+        if (!isTochkaLocation) {
+            setDeliveryAlerts([])
+            setIsDeliveryAlertOpen(false)
+            return
+        }
+
+        try {
+            const response = await fetch('/api/deliveries/notifications', {
+                method: 'GET',
+                cache: 'no-store',
+            })
+
+            const data = await response.json().catch(() => null) as { orders?: DeliveryAlertOrder[] } | { message?: string } | null
+
+            if (!response.ok) {
+                throw new Error(data && 'message' in data ? data.message || 'Не удалось проверить доставки' : 'Не удалось проверить доставки')
+            }
+
+            const orders = data && 'orders' in data && Array.isArray(data.orders) ? data.orders : []
+            setDeliveryAlerts(orders)
+            setIsDeliveryAlertOpen(orders.length > 0)
+        } catch (error) {
+            console.error('Delivery notification check error:', error)
+        }
+    }, [isTochkaLocation])
+
+    React.useEffect(() => {
+        if (!isTochkaLocation) {
+            setDeliveryAlerts([])
+            setIsDeliveryAlertOpen(false)
+            return
+        }
+
+        const firstTimer = window.setTimeout(() => {
+            void loadDeliveryAlerts()
+        }, 1200)
+
+        const intervalId = window.setInterval(() => {
+            void loadDeliveryAlerts()
+        }, 60_000)
+
+        return () => {
+            window.clearTimeout(firstTimer)
+            window.clearInterval(intervalId)
+        }
+    }, [isTochkaLocation, loadDeliveryAlerts])
+
+    React.useEffect(() => {
+        const handleDeliveriesUpdated = () => {
+            void loadDeliveryAlerts()
+        }
+
+        window.addEventListener('deliveries-updated', handleDeliveriesUpdated)
+
+        return () => {
+            window.removeEventListener('deliveries-updated', handleDeliveriesUpdated)
+        }
+    }, [loadDeliveryAlerts])
+
+    React.useEffect(() => {
+        if (!isDeliveryAlertOpen || deliveryAlerts.length === 0) {
+            return
+        }
+
+        playDeliveryAlertTone()
+
+        const intervalId = window.setInterval(() => {
+            playDeliveryAlertTone()
+        }, 2200)
+
+        return () => window.clearInterval(intervalId)
+    }, [deliveryAlerts.length, isDeliveryAlertOpen])
+
+    const acceptDeliveryFromAlert = async (orderId: string) => {
+        try {
+            setIsAcceptingDeliveryId(orderId)
+
+            const response = await fetch(`/api/deliveries/${orderId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ status: 'accepted' }),
+            })
+
+            const data = await response.json().catch(() => null) as { message?: string } | null
+
+            if (!response.ok) {
+                throw new Error(data?.message || 'Не удалось принять доставку')
+            }
+
+            await loadDeliveryAlerts()
+            window.dispatchEvent(new CustomEvent('deliveries-updated'))
+        } catch (error) {
+            console.error('Accept delivery error:', error)
+            alert(error instanceof Error ? error.message : 'Не удалось принять доставку')
+        } finally {
+            setIsAcceptingDeliveryId(null)
+        }
+    }
 
     React.useEffect(() => {
         const trainingSeen = localStorage.getItem(TRAINING_STORAGE_KEY) === 'read'
@@ -596,28 +820,30 @@ export default function SystemShell({ children }: Props) {
                         </nav>
 
                         <div className="system-header-actions ml-auto flex shrink-0 items-center justify-end gap-2">
-                            <div className="system-location-pill hidden h-11 min-w-[250px] max-w-[340px] items-center rounded-2xl bg-white/18 px-4 text-left text-white ring-1 ring-white/20 lg:flex">
+                            <div className="system-location-pill hidden h-11 min-w-[285px] max-w-[340px] items-center rounded-2xl bg-white/18 px-4 text-left text-white ring-1 ring-white/20 lg:flex">
                                 <div>
                                     <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/70">
                                         Зона / пользователь
                                     </div>
                                     <div className="max-w-[310px] truncate text-sm font-extrabold leading-4">
-                                        {currentLocationName} · {currentUserName}
+                                        {currentLocationName} · {currentUserName}{currentUserLogin ? ` (${currentUserLogin})` : ''}
                                     </div>
                                 </div>
                             </div>
 
-                            <Link
-                                href="/online-kassa"
-                                className={`system-kassa-button flex h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
-                                    pathname === '/online-kassa'
-                                        ? 'bg-[#2f2f2f] text-white'
-                                        : 'bg-[#2f2f2f]/88 text-white hover:-translate-y-0.5 hover:bg-[#2f2f2f]'
-                                }`}
-                            >
-                                <CashRegisterIcon />
-                                <span>Касса</span>
-                            </Link>
+                            {!isMainWarehouse && (
+                                <Link
+                                    href="/online-kassa"
+                                    className={`system-kassa-button flex h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
+                                        pathname === '/online-kassa'
+                                            ? 'bg-[#2f2f2f] text-white'
+                                            : 'bg-[#2f2f2f]/88 text-white hover:-translate-y-0.5 hover:bg-[#2f2f2f]'
+                                    }`}
+                                >
+                                    <CashRegisterIcon />
+                                    <span>Касса</span>
+                                </Link>
+                            )}
 
                             <button
                                 type="button"
@@ -647,20 +873,22 @@ export default function SystemShell({ children }: Props) {
                                     <span className="truncate">Главная</span>
                                 </Link>
 
-                                <Link
-                                    href="/online-kassa"
-                                    className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
-                                        pathname === '/online-kassa'
-                                            ? 'bg-white text-[#e5765d]'
-                                            : 'bg-white/16 text-white hover:bg-white/22'
-                                    }`}
-                                >
-                                    <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center">
-                                        <CashRegisterIcon />
-                                    </span>
+                                {!isMainWarehouse && (
+                                    <Link
+                                        href="/online-kassa"
+                                        className={`flex h-[48px] items-center gap-3 rounded-2xl px-4 text-sm font-bold shadow-sm transition ${
+                                            pathname === '/online-kassa'
+                                                ? 'bg-white text-[#e5765d]'
+                                                : 'bg-white/16 text-white hover:bg-white/22'
+                                        }`}
+                                    >
+                                        <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center">
+                                            <CashRegisterIcon />
+                                        </span>
 
-                                    <span className="truncate">Касса</span>
-                                </Link>
+                                        <span className="truncate">Касса</span>
+                                    </Link>
+                                )}
 
                                 <div className="rounded-2xl bg-white/12 px-4 py-3 text-sm text-white shadow-sm">
                                     <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/60">
@@ -841,6 +1069,66 @@ export default function SystemShell({ children }: Props) {
                     )}
                 </main>
             </div>
+
+            {isDeliveryAlertOpen && deliveryAlerts.length > 0 && (
+                <div className="fixed inset-x-0 top-[92px] z-[240] mx-auto w-full max-w-[680px] px-3 sm:top-[96px]">
+                    <div className="overflow-hidden rounded-3xl border border-orange-200 bg-white shadow-2xl ring-1 ring-orange-100">
+                        <div className="bg-orange-50 px-5 py-4">
+                            <div className="flex items-start justify-between gap-4">
+                                <div>
+                                    <div className="text-xs font-bold uppercase tracking-[0.14em] text-orange-600">
+                                        Новая доставка
+                                    </div>
+                                    <h2 className="mt-1 text-xl font-extrabold text-gray-900">
+                                        Нужно принять доставку в работу
+                                    </h2>
+                                    <p className="mt-1 text-sm text-gray-600">
+                                        Уведомление будет звучать, пока доставка находится в статусе “Новый”.
+                                    </p>
+                                </div>
+
+                                <Link
+                                    href="/deliveries"
+                                    className="rounded-2xl bg-orange-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-orange-700"
+                                >
+                                    Открыть
+                                </Link>
+                            </div>
+                        </div>
+
+                        <div className="max-h-[360px] overflow-y-auto p-4">
+                            <div className="space-y-3">
+                                {deliveryAlerts.map(order => (
+                                    <div key={order.id} className="rounded-2xl border border-gray-100 bg-gray-50 p-4">
+                                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                            <div className="min-w-0">
+                                                <div className="font-extrabold text-gray-900">
+                                                    {order.orderNumber} · {formatDeliveryAlertMoney(order.total)}
+                                                </div>
+                                                <div className="mt-1 text-sm font-semibold text-gray-700">
+                                                    {order.customerName} · {order.customerPhone}
+                                                </div>
+                                                <div className="mt-1 line-clamp-2 text-sm text-gray-500">
+                                                    {order.address}
+                                                </div>
+                                            </div>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => void acceptDeliveryFromAlert(order.id)}
+                                                disabled={isAcceptingDeliveryId === order.id}
+                                                className="shrink-0 rounded-2xl bg-green-600 px-4 py-2 text-sm font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                            >
+                                                {isAcceptingDeliveryId === order.id ? 'Принимаю...' : 'Принята доставка'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {isTrainingOpen && (
                 <div className="fixed inset-0 z-[240] flex items-center justify-center overflow-hidden overscroll-none bg-gray-950/55 px-3 py-4 backdrop-blur-[2px]">

@@ -8,7 +8,7 @@ import {
 } from './pos-checkout-store';
 import JsBarcode from 'jsbarcode';
 import { useRouter } from 'next/navigation';
-import { useState, useEffect, useMemo, useRef, type KeyboardEvent } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     AiOutlineDelete,
@@ -54,6 +54,16 @@ type ProductsApiResponse = {
     hasMore: boolean;
     limit: number;
     durationMs?: number;
+};
+
+type DeliveryAlertOrder = {
+    id: string;
+    orderNumber: string;
+    customerName: string;
+    customerPhone: string;
+    address: string;
+    total: number;
+    createdAt: string;
 };
 
 type MarkingStatus = 'M+' | 'M-' | 'M';
@@ -685,6 +695,62 @@ const fetchAllProducts = async (): Promise<Product[]> => {
     return allProducts;
 };
 
+
+function formatDeliveryAlertMoney(value: number) {
+    return new Intl.NumberFormat('ru-RU', {
+        style: 'currency',
+        currency: 'RUB',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+    }).format(Math.round(value || 0));
+}
+
+function playDeliveryAlertTone() {
+    try {
+        const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+        if (!AudioContextCtor) {
+            return;
+        }
+
+        const audioContext = new AudioContextCtor();
+        const masterGain = audioContext.createGain();
+        const now = audioContext.currentTime;
+
+        masterGain.gain.setValueAtTime(0.0001, now);
+        masterGain.gain.linearRampToValueAtTime(0.48, now + 0.015);
+        masterGain.gain.linearRampToValueAtTime(0.0001, now + 1.05);
+        masterGain.connect(audioContext.destination);
+
+        const playBeep = (startAt: number, frequency: number) => {
+            const oscillator = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+
+            oscillator.type = 'square';
+            oscillator.frequency.setValueAtTime(frequency, startAt);
+
+            gain.gain.setValueAtTime(0.0001, startAt);
+            gain.gain.linearRampToValueAtTime(0.95, startAt + 0.015);
+            gain.gain.linearRampToValueAtTime(0.0001, startAt + 0.22);
+
+            oscillator.connect(gain);
+            gain.connect(masterGain);
+            oscillator.start(startAt);
+            oscillator.stop(startAt + 0.24);
+        };
+
+        playBeep(now, 880);
+        playBeep(now + 0.32, 1175);
+        playBeep(now + 0.64, 880);
+
+        window.setTimeout(() => {
+            void audioContext.close().catch(() => undefined);
+        }, 1400);
+    } catch (error) {
+        console.warn('Delivery alert sound was blocked by browser:', error);
+    }
+}
+
 export default function PosPage() {
     const router = useRouter();
 
@@ -693,6 +759,9 @@ export default function PosPage() {
     const [warehouseLocationSlug, setWarehouseLocationSlug] = useState(DEFAULT_LOCATION_SLUG);
     const [warehouseUserName, setWarehouseUserName] = useState('Кассир');
     const [warehouseUserLogin, setWarehouseUserLogin] = useState('');
+    const [deliveryAlerts, setDeliveryAlerts] = useState<DeliveryAlertOrder[]>([]);
+    const [isDeliveryAlertOpen, setIsDeliveryAlertOpen] = useState(false);
+    const [isAcceptingDeliveryId, setIsAcceptingDeliveryId] = useState<string | null>(null);
     const [shiftStatus, setShiftStatus] = useState<ShiftStatus>('unknown');
     const [isShiftActionLoading, setIsShiftActionLoading] = useState(false);
     const [fiscalConfirmModal, setFiscalConfirmModal] = useState(false);
@@ -989,6 +1058,113 @@ export default function PosPage() {
         }
 
         return data || receipt;
+    };
+
+    const isTochkaLocation = warehouseLocationSlug === 'tochka';
+
+    const loadDeliveryAlerts = useCallback(async () => {
+        if (!isTochkaLocation) {
+            setDeliveryAlerts([]);
+            setIsDeliveryAlertOpen(false);
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/deliveries/notifications', {
+                method: 'GET',
+                cache: 'no-store',
+            });
+
+            const data = await response.json().catch(() => null) as { orders?: DeliveryAlertOrder[] } | { message?: string } | null;
+
+            if (!response.ok) {
+                throw new Error(data && 'message' in data ? data.message || 'Не удалось проверить доставки' : 'Не удалось проверить доставки');
+            }
+
+            const orders = data && 'orders' in data && Array.isArray(data.orders) ? data.orders : [];
+            setDeliveryAlerts(orders);
+            setIsDeliveryAlertOpen(orders.length > 0);
+        } catch (error) {
+            console.error('Delivery notification check error:', error);
+        }
+    }, [isTochkaLocation]);
+
+    useEffect(() => {
+        if (!isAuthChecked || !isTochkaLocation) {
+            setDeliveryAlerts([]);
+            setIsDeliveryAlertOpen(false);
+            return;
+        }
+
+        const firstTimer = window.setTimeout(() => {
+            void loadDeliveryAlerts();
+        }, 1200);
+
+        const intervalId = window.setInterval(() => {
+            void loadDeliveryAlerts();
+        }, 60_000);
+
+        return () => {
+            window.clearTimeout(firstTimer);
+            window.clearInterval(intervalId);
+        };
+    }, [isAuthChecked, isTochkaLocation, loadDeliveryAlerts]);
+
+    useEffect(() => {
+        const handleDeliveriesUpdated = () => {
+            void loadDeliveryAlerts();
+        };
+
+        window.addEventListener('deliveries-updated', handleDeliveriesUpdated);
+
+        return () => {
+            window.removeEventListener('deliveries-updated', handleDeliveriesUpdated);
+        };
+    }, [loadDeliveryAlerts]);
+
+    useEffect(() => {
+        if (!isDeliveryAlertOpen || deliveryAlerts.length === 0) {
+            return;
+        }
+
+        playDeliveryAlertTone();
+
+        const intervalId = window.setInterval(() => {
+            playDeliveryAlertTone();
+        }, 2200);
+
+        return () => window.clearInterval(intervalId);
+    }, [deliveryAlerts.length, isDeliveryAlertOpen]);
+
+    const acceptDeliveryFromAlert = async (orderId: string) => {
+        try {
+            setIsAcceptingDeliveryId(orderId);
+
+            const response = await fetch(`/api/deliveries/${orderId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    status: 'accepted',
+                    changedByName: warehouseUserName,
+                }),
+            });
+
+            const data = await response.json().catch(() => null) as { message?: string } | null;
+
+            if (!response.ok) {
+                throw new Error(data?.message || 'Не удалось принять доставку');
+            }
+
+            await loadDeliveryAlerts();
+            window.dispatchEvent(new CustomEvent('deliveries-updated'));
+        } catch (error) {
+            console.error('Accept delivery error:', error);
+            alert(error instanceof Error ? error.message : 'Не удалось принять доставку');
+        } finally {
+            setIsAcceptingDeliveryId(null);
+        }
     };
 
     const handleLogout = () => {
@@ -2460,6 +2636,70 @@ export default function PosPage() {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
+            {isDeliveryAlertOpen && deliveryAlerts.length > 0 && (
+                <div className="fixed inset-0 z-[400] flex items-start justify-center bg-black/25 px-4 py-4 pointer-events-none">
+                    <div className="mt-4 w-full max-w-xl rounded-3xl border border-blue-200 bg-white p-5 shadow-2xl pointer-events-auto">
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <div className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-bold uppercase tracking-wide text-blue-700">
+                                    Новая доставка
+                                </div>
+
+                                <h2 className="mt-2 text-xl font-black text-gray-900">
+                                    Поступила доставка: {deliveryAlerts[0]?.orderNumber}
+                                </h2>
+
+                                <p className="mt-1 text-sm text-gray-500">
+                                    Уведомление будет звучать, пока доставка не будет принята.
+                                </p>
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={() => setIsDeliveryAlertOpen(false)}
+                                className="rounded-full border border-gray-200 bg-white px-3 py-1 text-sm font-bold text-gray-500 hover:bg-gray-50"
+                            >
+                                Скрыть
+                            </button>
+                        </div>
+
+                        <div className="mt-4 space-y-3">
+                            {deliveryAlerts.map(order => (
+                                <div key={order.id} className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+                                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                        <div className="min-w-0">
+                                            <div className="font-bold text-blue-800">
+                                                {order.orderNumber} · {formatDeliveryAlertMoney(order.total)}
+                                            </div>
+
+                                            <div className="mt-1 text-sm font-semibold text-gray-900">
+                                                {order.customerName}
+                                            </div>
+
+                                            <div className="mt-1 text-sm text-gray-600">
+                                                {order.customerPhone}
+                                            </div>
+
+                                            <div className="mt-1 text-sm text-gray-600">
+                                                {order.address}
+                                            </div>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => acceptDeliveryFromAlert(order.id)}
+                                            disabled={isAcceptingDeliveryId === order.id}
+                                            className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                            {isAcceptingDeliveryId === order.id ? 'Принимаю...' : 'Принята доставка'}
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
             <div className="max-w-5xl mx-auto">
                 <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <button
