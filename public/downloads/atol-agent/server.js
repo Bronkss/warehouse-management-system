@@ -564,14 +564,50 @@ const getItemMarkingCode = item => {
 };
 
 const buildDriverJsonSellItem = item => {
-    const price = money(item.price);
-    const quantity = Number(item.quantity || 1);
-    const amount = money(item.total || item.amount || price * quantity);
     const marked = hasMarkingCode(item);
     const markingCode = getItemMarkingCode(item);
+    const isBlock = isTobaccoBlockItem(item);
+    const stockQuantity = Number(item.stockQuantity || item.markingPackageQuantity || item.quantity || 1);
+    const fiscalQuantity = Number(
+        item.fiscalQuantity !== undefined && item.fiscalQuantity !== null && item.fiscalQuantity !== ''
+            ? item.fiscalQuantity
+            : isBlock
+                ? 1
+                : item.quantity || 1
+    );
+    const fiscalPriceSource =
+              item.fiscalPrice !== undefined && item.fiscalPrice !== null && item.fiscalPrice !== ''
+                  ? item.fiscalPrice
+                  : isBlock
+                      ? money(Number(item.price || 0) * stockQuantity)
+                      : item.price;
+    const price = money(fiscalPriceSource);
+    const quantity = Number.isFinite(fiscalQuantity) && fiscalQuantity > 0 ? fiscalQuantity : 1;
+    const amount = money(
+        item.fiscalTotal !== undefined && item.fiscalTotal !== null && item.fiscalTotal !== ''
+            ? item.fiscalTotal
+            : item.fiscalAmount !== undefined && item.fiscalAmount !== null && item.fiscalAmount !== ''
+                ? item.fiscalAmount
+                : isBlock
+                    ? price * quantity
+                    : item.total || item.amount || price * quantity
+    );
+
+    if (isBlock) {
+        console.log('Tobacco block fiscal item mapped as one marked unit:');
+        console.log(JSON.stringify({
+            name: item.name,
+            stockQuantity,
+            originalQuantity: item.quantity,
+            fiscalQuantity: quantity,
+            unitPrice: money(item.price),
+            fiscalPrice: price,
+            amount,
+        }, null, 2));
+    }
 
     const sellItem = {
-        name: String(item.name || 'Товар').slice(0, 128),
+        name: String(isBlock ? `${item.name || 'Товар'} блок` : item.name || 'Товар').slice(0, 128),
         paymentMethod: 'fullPayment',
         paymentObject: marked ? 'commodityWithMarking' : 'commodity',
         price,

@@ -105,6 +105,11 @@ type ReceiptItem = {
     quantity: number;
     price: number;
     total: number;
+    stockQuantity?: number;
+    fiscalQuantity?: number;
+    fiscalPrice?: number;
+    fiscalTotal?: number;
+    fiscalPackageName?: string;
     measureCode?: number;
     measureName?: string;
     marked?: boolean;
@@ -2355,6 +2360,11 @@ export default function PosPage() {
                 const price = getSellingPrice(item.product);
                 const marked = isMarkedProduct(item.product);
                 const markingCode = normalizeMarkingCode(item.markingCode);
+                const isBlockPackage = marked && item.markingPackageMode === "block";
+                const lineTotal = price * item.quantity;
+                const fiscalQuantity = isBlockPackage ? 1 : item.quantity;
+                const fiscalPrice = isBlockPackage ? lineTotal : price;
+                const fiscalTotal = fiscalPrice * fiscalQuantity;
 
                 return {
                     productId: item.product.id,
@@ -2363,10 +2373,11 @@ export default function PosPage() {
                     category: item.product.category,
                     unit: item.product.unit,
                     quantity: item.quantity,
+                    stockQuantity: item.quantity,
                     measureCode: getMeasureCode(item.product.unit),
                     measureName: getMeasureName(item.product.unit),
                     price,
-                    total: price * item.quantity,
+                    total: lineTotal,
                     marked,
                     ...(marked && markingCode
                         ? {
@@ -2375,6 +2386,14 @@ export default function PosPage() {
                             markingMessage: item.markingMessage,
                             markingPackageMode: item.markingPackageMode,
                             markingPackageQuantity: item.markingPackageQuantity,
+                            ...(isBlockPackage
+                                ? {
+                                    fiscalQuantity,
+                                    fiscalPrice,
+                                    fiscalTotal,
+                                    fiscalPackageName: "Блок сигарет",
+                                }
+                                : {}),
                         }
                         : {}),
                 };
