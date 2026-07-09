@@ -222,8 +222,8 @@ export default function Auth() {
 
     return (
         <div className="auth-page min-h-screen bg-[#cfcfcf] flex items-center justify-center px-4 py-6">
-            <div className="auth-card w-full max-w-[500px] relative rounded-[30px] border-[3px] border-[#e67c63] bg-white shadow-[0_8px_20px_rgba(0,0,0,0.12)] px-9 pb-8 pt-7">
-                <div className="auth-logo absolute left-1/2 -translate-x-1/2 -top-[42px] w-[340px] max-w-[92%] h-[155px] pointer-events-none select-none">
+            <div className="auth-card w-full max-w-[500px] relative rounded-[30px] border-[3px] border-[#e67c63] bg-white shadow-[0_8px_20px_rgba(0,0,0,0.12)] px-9 pb-8 pt-9">
+                <div className="auth-logo absolute left-1/2 -translate-x-1/2 -top-[24px] w-[315px] max-w-[88%] h-[130px] pointer-events-none select-none">
                     <Image
                         src="/logo.gif"
                         alt="Точка"
@@ -234,7 +234,7 @@ export default function Auth() {
                     />
                 </div>
 
-                <form onSubmit={handleSubmit} className="auth-form flex flex-col pt-[86px]">
+                <form onSubmit={handleSubmit} className="auth-form flex flex-col pt-[78px]">
                     <label className="auth-label text-[16px] font-semibold text-[#222] mb-2.5">
                         Торговая зона
                     </label>
@@ -324,6 +324,23 @@ export default function Auth() {
             <style>{`
                 .auth-input:focus {
                     box-shadow: 0 0 0 3px rgba(230, 124, 99, 0.18);
+                }
+
+                @media (min-width: 769px) and (min-height: 721px) {
+                    .auth-page {
+                        padding-top: 64px;
+                        padding-bottom: 44px;
+                    }
+
+                    .auth-logo {
+                        top: -24px;
+                        width: 315px;
+                        height: 130px;
+                    }
+
+                    .auth-form {
+                        padding-top: 78px;
+                    }
                 }
 
                 @media (max-height: 720px) and (min-width: 481px) {
