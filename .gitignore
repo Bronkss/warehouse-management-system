@@ -49,3 +49,4 @@ public/downloads/KKT10-10.10.8.0-windows32-setup.exe
 
 # dump DB
 *.sql
+*.dump
