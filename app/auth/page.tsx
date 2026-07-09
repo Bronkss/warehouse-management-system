@@ -333,9 +333,9 @@ export default function Auth() {
                     }
 
                     .auth-logo {
-                        top: -24px;
-                        width: 315px;
-                        height: 130px;
+                        top: -40px;
+                        width: 550px;
+                        height: 222px;
                     }
 
                     .auth-form {
