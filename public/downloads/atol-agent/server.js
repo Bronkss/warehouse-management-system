@@ -27,16 +27,14 @@ const GS_CHAR = '\u001d';
 const MARKING_STATUS_ATTEMPTS = Number(process.env.MARKING_STATUS_ATTEMPTS || 10);
 const MARKING_STATUS_INTERVAL_MS = Number(process.env.MARKING_STATUS_INTERVAL_MS || 1200);
 
-// Для обычной пачки оставляем строгую проверку [M+].
-// Для блока сигарет фронт передаёт markingPackageMode: 'block'.
-// У некоторых касс/версий драйвера предварительная проверка групповой упаковки возвращает M/M-,
-// хотя сам чек может пройти через JSON-команду sell с imcParams.
-// Поэтому для блоков отдельный режим: по умолчанию не запускаем ручной precheck, а отдаём КМ в sell.
+// Для пачек и блоков сигарет используем одинаковую строгую проверку [M+].
+// Блок определяется на фронте по отдельному штрихкоду товара, но КМ блока
+// всё равно должен пройти beginMarkingCodeValidation -> getMarkingCodeValidationStatus -> assert [M+] -> acceptMarkingCode.
 const ATOL_MARKING_DEFAULT_IMC_TYPE = Number(process.env.ATOL_MARKING_DEFAULT_IMC_TYPE || 256);
 const ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS = Number(process.env.ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS || 1);
 const ATOL_MARKING_BLOCK_IMC_TYPE = Number(process.env.ATOL_MARKING_BLOCK_IMC_TYPE || ATOL_MARKING_DEFAULT_IMC_TYPE);
 const ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS = Number(process.env.ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS || ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS);
-const ATOL_MARKING_BLOCK_VALIDATION_MODE = String(process.env.ATOL_MARKING_BLOCK_VALIDATION_MODE || 'strict').trim().toLowerCase();
+const ATOL_MARKING_BLOCK_VALIDATION_MODE = 'strict';
 
 app.use(express.json({ limit: '4mb' }));
 
@@ -424,7 +422,7 @@ const getMarkingOptionsForItem = item => {
         itemEstimatedStatus: isBlock
             ? ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS
             : ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS,
-        validationMode: isBlock ? ATOL_MARKING_BLOCK_VALIDATION_MODE : 'strict',
+        validationMode: 'strict',
     };
 };
 
@@ -1163,6 +1161,10 @@ app.post('/marking/precheck', requireToken, async (req, res) => {
     try {
         const { markingCode } = req.body || {};
         const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
+        const markingOptions = getMarkingOptionsForItem({
+            markingPackageMode: req.body?.markingPackageMode,
+            markingPackageQuantity: req.body?.markingPackageQuantity,
+        });
 
         if (!normalizedMarkingCode) {
             res.status(400).json({
@@ -1174,7 +1176,7 @@ app.post('/marking/precheck', requireToken, async (req, res) => {
             return;
         }
 
-        const commands = buildNativeMarkingStatusPollCommands(normalizedMarkingCode);
+        const commands = buildNativeMarkingStatusPollCommands(normalizedMarkingCode, markingOptions);
 
         console.log('Driver marking precheck command:');
         console.log(JSON.stringify(commands, null, 2));
