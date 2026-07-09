@@ -31,6 +31,7 @@ type WarehouseUser = {
     name: string
     role: 'admin' | 'warehouse' | 'cashier'
     locationSlugs: string[]
+    aliases?: string[]
 }
 
 const WAREHOUSE_LOCATIONS: WarehouseLocation[] = [
@@ -42,49 +43,47 @@ const WAREHOUSE_LOCATIONS: WarehouseLocation[] = [
 const WAREHOUSE_USERS: WarehouseUser[] = [
     {
         login: 'sklad',
-        password: 'sklad112233',
+        password: 'Sklad-90N2',
         name: 'Главный склад',
         role: 'warehouse',
         locationSlugs: ['main-warehouse'],
+        aliases: ['sklad_admin'],
     },
     {
-        login: 'tochka_lada',
-        password: 'lada112233',
+        login: 'lada',
+        password: 'Lada-47K9',
         name: 'Лада Якимова',
         role: 'cashier',
         locationSlugs: ['tochka'],
+        aliases: ['tochka_lada'],
     },
     {
-        login: 'tochka_elena',
-        password: 'elena112233',
+        login: 'elena',
+        password: 'Elena-82M4',
         name: 'Елена Цыганкова',
         role: 'cashier',
         locationSlugs: ['tochka'],
+        aliases: ['tochka_elena'],
     },
     {
-        login: 'tochka_anastasia',
-        password: 'anastasia112233',
+        login: 'anastasia',
+        password: 'Anastasia-61R8',
         name: 'Анастасия Котова',
         role: 'cashier',
-        locationSlugs: ['tochka'],
+        locationSlugs: ['tochka', 'rodnik'],
+        aliases: ['tochka_anastasia', 'rodnik_anastasia'],
     },
     {
-        login: 'rodnik_anastasia',
-        password: 'anastasia112233',
-        name: 'Анастасия Котова',
-        role: 'cashier',
-        locationSlugs: ['rodnik'],
-    },
-    {
-        login: 'rodnik_tatyana',
-        password: 'tatyana112233',
+        login: 'tatyana',
+        password: 'Tatyana-35V7',
         name: 'Татьяна',
         role: 'cashier',
         locationSlugs: ['rodnik'],
+        aliases: ['rodnik_tatyana'],
     },
     {
         login: 'admin',
-        password: '112233',
+        password: 'Admin-54P8',
         name: 'Администратор',
         role: 'admin',
         locationSlugs: ['main-warehouse', 'tochka', 'rodnik'],
@@ -98,7 +97,13 @@ function findLocation(slug: string): WarehouseLocation {
 function findUser(login: string): WarehouseUser | null {
     const normalizedLogin = login.trim().toLowerCase()
 
-    return WAREHOUSE_USERS.find(user => user.login === normalizedLogin) || null
+    return WAREHOUSE_USERS.find(user => {
+        if (user.login === normalizedLogin) {
+            return true
+        }
+
+        return user.aliases?.includes(normalizedLogin) || false
+    }) || null
 }
 
 function setCookie(name: string, value: string, remember: boolean) {
@@ -169,7 +174,7 @@ export default function Auth() {
 
             if (rememberMe) {
                 localStorage.setItem(AUTH_USER_KEY, selectedUser.login)
-                localStorage.setItem(AUTH_LOGIN_KEY, normalizedLogin)
+                localStorage.setItem(AUTH_LOGIN_KEY, selectedUser.login)
                 localStorage.setItem(AUTH_USER_NAME_KEY, selectedUser.name)
                 localStorage.setItem(AUTH_USER_ROLE_KEY, selectedUser.role)
                 localStorage.setItem(REMEMBER_ME_KEY, 'true')
@@ -205,7 +210,7 @@ export default function Auth() {
             return
         }
 
-        if (selectedUser && !selectedUser.locationSlugs.includes(selectedLocation.slug)) {
+        if (selectedUser && password === selectedUser.password && !selectedUser.locationSlugs.includes(selectedLocation.slug)) {
             setError(`Пользователь «${selectedUser.name}» не имеет доступа к зоне «${selectedLocation.name}»`)
             return
         }
@@ -213,10 +218,12 @@ export default function Auth() {
         setError('Неверный логин, пароль или выбранная торговая зона')
     }
 
+    const selectedLocation = findLocation(selectedLocationSlug)
+
     return (
-        <div className="auth-page min-h-screen bg-[#cfcfcf] flex items-center justify-center px-4">
-            <div className="auth-card w-full max-w-[560px] relative rounded-[32px] border-[3px] border-[#e67c63] bg-white shadow-[0_8px_20px_rgba(0,0,0,0.12)] px-10 py-8">
-                <div className="auth-logo absolute left-1/2 -translate-x-1/2 -top-[50px] w-[460px] max-w-[95%] h-[250px] pointer-events-none select-none">
+        <div className="auth-page min-h-screen bg-[#cfcfcf] flex items-center justify-center px-4 py-6">
+            <div className="auth-card w-full max-w-[500px] relative rounded-[30px] border-[3px] border-[#e67c63] bg-white shadow-[0_8px_20px_rgba(0,0,0,0.12)] px-9 pb-8 pt-7">
+                <div className="auth-logo absolute left-1/2 -translate-x-1/2 -top-[42px] w-[340px] max-w-[92%] h-[155px] pointer-events-none select-none">
                     <Image
                         src="/logo.gif"
                         alt="Точка"
@@ -227,8 +234,8 @@ export default function Auth() {
                     />
                 </div>
 
-                <form onSubmit={handleSubmit} className="auth-form flex flex-col pt-[80px]">
-                    <label className="auth-label text-[18px] text-[#222] mb-3">
+                <form onSubmit={handleSubmit} className="auth-form flex flex-col pt-[86px]">
+                    <label className="auth-label text-[16px] font-semibold text-[#222] mb-2.5">
                         Торговая зона
                     </label>
 
@@ -238,7 +245,7 @@ export default function Auth() {
                             setSelectedLocationSlug(e.target.value)
                             if (error) setError('')
                         }}
-                        className="auth-input h-[70px] rounded-[26px] border-[3px] border-[#e67c63] bg-white px-8 text-[20px] text-[#222] outline-none mb-7"
+                        className="auth-input h-[60px] rounded-[22px] border-[2px] border-[#e67c63] bg-white px-6 text-[19px] text-[#222] outline-none mb-4"
                     >
                         {WAREHOUSE_LOCATIONS.map(location => (
                             <option key={location.slug} value={location.slug}>
@@ -247,7 +254,7 @@ export default function Auth() {
                         ))}
                     </select>
 
-                    <label className="auth-label text-[18px] text-[#222] mb-3">
+                    <label className="auth-label text-[16px] font-semibold text-[#222] mb-2.5">
                         Логин
                     </label>
 
@@ -258,12 +265,12 @@ export default function Auth() {
                             setLogin(e.target.value)
                             if (error) setError('')
                         }}
-                        placeholder="Введите логин"
+                        placeholder="Например: lada"
                         autoComplete="username"
-                        className="auth-input h-[70px] rounded-[26px] border-[3px] border-[#e67c63] px-8 text-[20px] text-[#222] placeholder:text-[#c9c9c9] outline-none mb-7"
+                        className="auth-input h-[60px] rounded-[22px] border-[2px] border-[#e67c63] px-6 text-[19px] text-[#222] placeholder:text-[#b9b9b9] outline-none mb-4"
                     />
 
-                    <label className="auth-label text-[18px] text-[#222] mb-3">
+                    <label className="auth-label text-[16px] font-semibold text-[#222] mb-2.5">
                         Пароль
                     </label>
 
@@ -276,107 +283,128 @@ export default function Auth() {
                         }}
                         placeholder="Введите пароль"
                         autoComplete="current-password"
-                        className="auth-input h-[70px] rounded-[26px] border-[3px] border-[#e67c63] px-8 text-[20px] text-[#222] placeholder:text-[#c9c9c9] outline-none"
+                        className="auth-input h-[60px] rounded-[22px] border-[2px] border-[#e67c63] px-6 text-[19px] text-[#222] placeholder:text-[#b9b9b9] outline-none"
                     />
 
-                    <div className="mt-4 rounded-2xl bg-[#fff7f4] px-4 py-3 text-sm leading-6 text-[#8a3f2e]">
-                        Доступы: tochka_lada/lada112233, tochka_elena/elena112233, tochka_anastasia/anastasia112233, rodnik_anastasia/anastasia112233, rodnik_tatyana/tatyana112233, sklad/sklad112233. Admin: admin/112233.
-                    </div>
-
-                    <label className="auth-remember flex items-center gap-4 mt-5 mb-4 cursor-pointer">
+                    <label className="auth-remember flex items-center gap-3.5 mt-5 mb-4 cursor-pointer">
                         <input
                             type="checkbox"
                             checked={rememberMe}
                             onChange={(e) => setRememberMe(e.target.checked)}
-                            className="auth-checkbox h-6 w-6 appearance-none rounded-full bg-[#d9d9d9] checked:bg-[#e67c63]"
+                            className="auth-checkbox h-6 w-6 min-w-6 appearance-none rounded-full bg-[#d9d9d9] checked:bg-[#e67c63]"
                         />
 
-                        <span className="auth-remember-text text-[18px] text-[#4a4a4a]">
+                        <span className="auth-remember-text text-[17px] text-[#4a4a4a]">
                             Запомнить меня
                         </span>
                     </label>
 
                     {error && (
-                        <p className="auth-error mb-5 text-[16px] text-red-500">
+                        <p className="auth-error mb-3 rounded-xl bg-red-50 px-3 py-2 text-[14px] leading-5 text-red-600">
                             {error}
                         </p>
                     )}
 
-                    <div className="auth-actions flex items-end justify-between gap-4">
+                    <div className="auth-actions flex items-center justify-between gap-4">
                         <button
                             type="submit"
-                            className="auth-submit min-w-[190px] h-[56px] rounded-full bg-[#e67c63] text-white text-[28px] font-semibold hover:opacity-90 transition"
+                            className="auth-submit h-[56px] min-w-[175px] rounded-full bg-[#e67c63] px-10 text-[24px] font-semibold text-white transition hover:opacity-90"
                         >
                             Войти
                         </button>
 
-                        <div className="auth-location-hint text-left text-[15px] leading-[1.45] text-[#6b6b6b]">
-                            Все остатки, продажи, приёмки и списания будут относиться к выбранной зоне.
+                        <div className="auth-location-hint text-right text-[14px] leading-[1.4] text-[#6b6b6b]">
+                            Зона входа:<br />
+                            <span className="font-semibold text-[#333]">{selectedLocation.name}</span>
                         </div>
                     </div>
                 </form>
             </div>
 
             <style>{`
-                @media (max-width: 768px) {
+                .auth-input:focus {
+                    box-shadow: 0 0 0 3px rgba(230, 124, 99, 0.18);
+                }
+
+                @media (max-height: 720px) and (min-width: 481px) {
                     .auth-page {
-                        align-items: flex-start;
-                        padding: 90px 16px 24px;
+                        padding-top: 24px;
+                        padding-bottom: 20px;
                     }
 
                     .auth-card {
-                        max-width: 440px;
-                        border-radius: 28px;
-                        padding: 32px 28px 28px;
+                        max-width: 470px;
+                        border-radius: 26px;
+                        padding: 22px 30px 26px;
                     }
 
                     .auth-logo {
-                        top: -45px;
-                        width: 360px;
-                        height: 210px;
+                        top: -40px;
+                        width: 285px;
+                        height: 200px;
                     }
 
                     .auth-form {
-                        padding-top: 70px;
-                    }
-
-                    .auth-label {
-                        font-size: 17px;
-                        margin-bottom: 10px;
+                        padding-top: 68px;
                     }
 
                     .auth-input {
-                        height: 62px;
-                        border-radius: 22px;
-                        padding-left: 22px;
-                        padding-right: 22px;
-                        font-size: 18px;
+                        height: 52px;
+                        border-radius: 18px;
+                        font-size: 17px;
                     }
 
-                    .auth-remember {
-                        gap: 12px;
-                        margin-top: 18px;
+                    .auth-label {
+                        font-size: 15px;
+                        margin-bottom: 7px;
                     }
 
-                    .auth-checkbox {
-                        width: 22px;
-                        height: 22px;
+                    .auth-submit {
+                        height: 50px;
+                        font-size: 21px;
+                    }
+                }
+
+                @media (max-width: 768px) {
+                    .auth-page {
+                        align-items: flex-start;
+                        padding: 80px 16px 24px;
                     }
 
-                    .auth-remember-text {
+                    .auth-card {
+                        max-width: 460px;
+                        border-radius: 26px;
+                        padding: 28px 28px 28px;
+                    }
+
+                    .auth-logo {
+                        top: -30px;
+                        width: 300px;
+                        height: 180px;
+                    }
+
+                    .auth-form {
+                        padding-top: 72px;
+                    }
+
+                    .auth-input {
+                        height: 54px;
+                        border-radius: 18px;
+                        padding-left: 20px;
+                        padding-right: 20px;
                         font-size: 17px;
                     }
 
                     .auth-actions {
                         align-items: stretch;
                         flex-direction: column;
-                        gap: 18px;
+                        gap: 14px;
                     }
 
                     .auth-submit {
                         width: 100%;
-                        height: 56px;
-                        font-size: 24px;
+                        height: 52px;
+                        font-size: 22px;
                     }
 
                     .auth-location-hint {
@@ -386,44 +414,45 @@ export default function Auth() {
 
                 @media (max-width: 480px) {
                     .auth-page {
-                        padding: 78px 12px 20px;
+                        padding: 70px 12px 18px;
                     }
 
                     .auth-card {
                         max-width: 100%;
                         border-width: 2px;
                         border-radius: 24px;
-                        padding: 28px 20px 24px;
+                        padding: 24px 20px 24px;
                     }
 
                     .auth-logo {
-                        top: -40px;
-                        width: 300px;
-                        height: 185px;
+                        top: -25px;
+                        width: 250px;
+                        height: 150px;
                     }
 
                     .auth-form {
-                        padding-top: 58px;
+                        padding-top: 60px;
                     }
 
                     .auth-label {
-                        font-size: 16px;
-                        margin-bottom: 8px;
+                        font-size: 15px;
+                        margin-bottom: 7px;
                     }
 
                     .auth-input {
-                        height: 56px;
+                        height: 50px;
                         border-width: 2px;
-                        border-radius: 18px;
+                        border-radius: 16px;
                         padding-left: 18px;
                         padding-right: 18px;
                         font-size: 16px;
+                        margin-bottom: 13px;
                     }
 
                     .auth-remember {
                         gap: 10px;
-                        margin-top: 16px;
-                        margin-bottom: 16px;
+                        margin-top: 13px;
+                        margin-bottom: 13px;
                     }
 
                     .auth-checkbox {
@@ -433,24 +462,23 @@ export default function Auth() {
                     }
 
                     .auth-remember-text {
-                        font-size: 16px;
+                        font-size: 15px;
                     }
 
                     .auth-error {
                         font-size: 14px;
-                        margin-bottom: 16px;
                     }
 
                     .auth-submit {
                         min-width: 0;
-                        height: 52px;
-                        font-size: 22px;
+                        height: 50px;
+                        font-size: 21px;
                     }
                 }
 
                 @media (max-width: 360px) {
                     .auth-page {
-                        padding-top: 70px;
+                        padding-top: 62px;
                     }
 
                     .auth-card {
@@ -459,26 +487,22 @@ export default function Auth() {
                     }
 
                     .auth-logo {
-                        width: 200px;
-                        height: 165px;
+                        width: 210px;
+                        height: 108px;
                     }
 
                     .auth-form {
-                        padding-top: 48px;
+                        padding-top: 52px;
                     }
 
                     .auth-input {
-                        height: 52px;
+                        height: 47px;
                         font-size: 15px;
                     }
 
                     .auth-submit {
-                        height: 50px;
+                        height: 48px;
                         font-size: 20px;
-                    }
-
-                    .auth-remember-text {
-                        font-size: 15px;
                     }
                 }
             `}</style>
