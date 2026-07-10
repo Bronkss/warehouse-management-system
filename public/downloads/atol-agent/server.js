@@ -26,6 +26,10 @@ const ATOL_POWERSHELL_TIMEOUT_MS = Number(process.env.ATOL_POWERSHELL_TIMEOUT_MS
 const GS_CHAR = '\u001d';
 const MARKING_STATUS_ATTEMPTS = Number(process.env.MARKING_STATUS_ATTEMPTS || 10);
 const MARKING_STATUS_INTERVAL_MS = Number(process.env.MARKING_STATUS_INTERVAL_MS || 1200);
+const MARKING_FAST_STATUS_ATTEMPTS = Number(process.env.MARKING_FAST_STATUS_ATTEMPTS || 14);
+const MARKING_FAST_STATUS_INTERVAL_MS = Number(process.env.MARKING_FAST_STATUS_INTERVAL_MS || 450);
+const MARKING_ACCEPT_CACHE_TTL_MS = Number(process.env.MARKING_ACCEPT_CACHE_TTL_MS || 20 * 60 * 1000);
+const SKIP_ACCEPTED_MARKING_RECHECK = String(process.env.SKIP_ACCEPTED_MARKING_RECHECK || 'true').toLowerCase() !== 'false';
 
 // Для пачек и блоков сигарет используем одинаковую строгую проверку [M+].
 // Блок определяется на фронте по отдельному штрихкоду товара, но КМ блока
@@ -35,6 +39,82 @@ const ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS = String(process.env.ATOL_MARKI
 const ATOL_MARKING_BLOCK_IMC_TYPE = String(process.env.ATOL_MARKING_BLOCK_IMC_TYPE || ATOL_MARKING_DEFAULT_IMC_TYPE);
 const ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS = String(process.env.ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS || ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS);
 const ATOL_MARKING_BLOCK_VALIDATION_MODE = 'strict';
+
+const acceptedMarkingCache = new Map();
+
+const hashMarkingCodeForLog = markingCode => {
+    return crypto
+        .createHash('sha1')
+        .update(String(markingCode || ''))
+        .digest('hex')
+        .slice(0, 12);
+};
+
+const cleanupAcceptedMarkingCache = () => {
+    const now = Date.now();
+
+    for (const [key, value] of acceptedMarkingCache.entries()) {
+        if (!value?.expiresAt || value.expiresAt <= now) {
+            acceptedMarkingCache.delete(key);
+        }
+    }
+};
+
+const rememberAcceptedMarkingCode = (markingCode, meta = {}) => {
+    const key = normalizeMarkingCodeInput(markingCode);
+
+    if (!key) {
+        return;
+    }
+
+    cleanupAcceptedMarkingCache();
+
+    acceptedMarkingCache.set(key, {
+        acceptedAt: Date.now(),
+        expiresAt: Date.now() + MARKING_ACCEPT_CACHE_TTL_MS,
+        ...meta,
+    });
+
+    console.log('Marking code accepted and cached for fast fiscal sell:');
+    console.log(JSON.stringify({
+        key: hashMarkingCodeForLog(key),
+        cacheSize: acceptedMarkingCache.size,
+        ttlMs: MARKING_ACCEPT_CACHE_TTL_MS,
+        packageMode: meta.packageMode || 'single',
+    }, null, 2));
+};
+
+const hasFreshAcceptedMarkingCode = markingCode => {
+    const key = normalizeMarkingCodeInput(markingCode);
+
+    if (!key) {
+        return false;
+    }
+
+    cleanupAcceptedMarkingCache();
+
+    return acceptedMarkingCache.has(key);
+};
+
+const forgetAcceptedMarkingCode = markingCode => {
+    const key = normalizeMarkingCodeInput(markingCode);
+
+    if (key) {
+        acceptedMarkingCache.delete(key);
+    }
+};
+
+const forgetReceiptAcceptedMarkingCodes = receipt => {
+    for (const item of receipt?.items || []) {
+        if (hasMarkingCode(item)) {
+            forgetAcceptedMarkingCode(getItemMarkingCode(item));
+        }
+    }
+};
+
+const clearAcceptedMarkingCache = () => {
+    acceptedMarkingCache.clear();
+};
 
 app.use(express.json({ limit: '4mb' }));
 
@@ -311,15 +391,17 @@ const runAtolCommands = async commands => {
     });
 };
 
-const runAtolCommandsRaw = async commands => {
-    return runExclusiveAtolTask(async () => {
-        const result = await runPowerShellBridge(commands);
+const runAtolCommandsRawUnlocked = async commands => {
+    const result = await runPowerShellBridge(commands);
 
-        return {
-            uuid: crypto.randomUUID(),
-            result,
-        };
-    });
+    return {
+        uuid: crypto.randomUUID(),
+        result,
+    };
+};
+
+const runAtolCommandsRaw = async commands => {
+    return runExclusiveAtolTask(async () => runAtolCommandsRawUnlocked(commands));
 };
 
 const getAtolResultPayload = item => {
@@ -802,8 +884,11 @@ const buildNativeMarkingCheckCommands = (markingCode, options = {}) => {
     return commands;
 };
 
-const buildNativeMarkedReceiptBatchCommands = receipt => {
+const buildNativeMarkedReceiptBatchCommands = (receipt, options = {}) => {
     const commands = [];
+    const skipAcceptedRecheck = options.skipAcceptedMarkingRecheck !== false && SKIP_ACCEPTED_MARKING_RECHECK;
+
+    cleanupAcceptedMarkingCache();
 
     for (const item of receipt.items) {
         if (!hasMarkingCode(item)) {
@@ -814,6 +899,16 @@ const buildNativeMarkedReceiptBatchCommands = receipt => {
 
         if (!markingCode) {
             throw new Error(`Для маркированного товара "${item.name || 'Товар'}" не передан DataMatrix`);
+        }
+
+        if (skipAcceptedRecheck && hasFreshAcceptedMarkingCode(markingCode)) {
+            console.log('Skip repeated marking validation before fiscal sell:');
+            console.log(JSON.stringify({
+                itemName: item.name || 'Товар',
+                markingKey: hashMarkingCodeForLog(markingCode),
+                reason: 'already accepted after precheck',
+            }, null, 2));
+            continue;
         }
 
         const markingOptions = getMarkingOptionsForItem(item);
@@ -866,6 +961,38 @@ const parseBatchResult = batch => {
         sell: getAtolResultPayload(sellItem),
         sellItem,
     };
+};
+
+
+const flattenAtolBatchResults = batches => {
+    return batches.flatMap(batch => batch?.result?.results || []);
+};
+
+const makeSyntheticAtolBatch = batches => {
+    return {
+        uuid: crypto.randomUUID(),
+        result: {
+            jsonParam: 65645,
+            ok: batches.every(batch => batch?.result?.ok !== false),
+            results: flattenAtolBatchResults(batches),
+            transport: 'AddIn.Fptr10',
+            optimized: true,
+        },
+    };
+};
+
+const isAtolBatchFailed = batch => {
+    const parsed = parseBatchResult(batch);
+
+    return parsed.failed;
+};
+
+const getFirstAtolBatchErrorMessage = batch => {
+    const failed = isAtolBatchFailed(batch);
+
+    return failed
+        ? getAtolResultErrorMessage(failed) || failed.errorDescription || failed.message || 'Ошибка АТОЛ'
+        : null;
 };
 
 const getLatestMarkingStatus = statuses => {
@@ -945,6 +1072,111 @@ const determineMarkingStatus = statuses => {
         message: 'Проверка КМ не дала положительный результат [M+]. Продажа заблокирована.',
         status,
     };
+};
+
+const runFastMarkingPrecheckAndAccept = async (markingCode, options = {}) => {
+    const normalizedMarkingCode = normalizeMarkingCodeInput(markingCode);
+    const params = buildNativeDriverMarkingParams(normalizedMarkingCode, options);
+    const startedAt = Date.now();
+
+    return runExclusiveAtolTask(async () => {
+        const batches = [];
+        const markingStatuses = [];
+        let acceptBatch = null;
+
+        const beginBatch = await runAtolCommandsRawUnlocked([
+            {
+                type: 'beginMarkingCodeValidation',
+                params,
+            },
+        ]);
+
+        batches.push(beginBatch);
+
+        const beginError = getFirstAtolBatchErrorMessage(beginBatch);
+
+        if (beginError) {
+            throw new Error(beginError);
+        }
+
+        for (let attempt = 0; attempt < MARKING_FAST_STATUS_ATTEMPTS; attempt += 1) {
+            await sleep(MARKING_FAST_STATUS_INTERVAL_MS);
+
+            const statusBatch = await runAtolCommandsRawUnlocked([
+                {
+                    type: 'getMarkingCodeValidationStatus',
+                },
+            ]);
+
+            batches.push(statusBatch);
+
+            const statusError = getFirstAtolBatchErrorMessage(statusBatch);
+
+            if (statusError) {
+                throw new Error(statusError);
+            }
+
+            const parsedStatusBatch = parseBatchResult(statusBatch);
+            markingStatuses.push(...parsedStatusBatch.markingStatuses);
+
+            const statusInfo = determineMarkingStatus(markingStatuses);
+            const latestStatus = getLatestMarkingStatus(markingStatuses);
+
+            console.log('ATOL fast marking poll:');
+            console.log(JSON.stringify({
+                attempt: attempt + 1,
+                maxAttempts: MARKING_FAST_STATUS_ATTEMPTS,
+                elapsedMs: Date.now() - startedAt,
+                ready: latestStatus?.ready === true,
+                sentImcRequest: latestStatus?.sentImcRequest === true,
+                markingStatus: statusInfo.markingStatus,
+                canSell: statusInfo.canSell,
+            }, null, 2));
+
+            if (statusInfo.markingStatus === 'M+' || statusInfo.markingStatus === 'M-') {
+                break;
+            }
+
+            if (latestStatus?.ready === true && latestStatus?.sentImcRequest === true) {
+                break;
+            }
+        }
+
+        const statusInfo = determineMarkingStatus(markingStatuses);
+
+        if (statusInfo.canSell && statusInfo.markingStatus === 'M+') {
+            acceptBatch = await runAtolCommandsRawUnlocked([
+                {
+                    type: 'acceptMarkingCode',
+                },
+            ]);
+
+            batches.push(acceptBatch);
+
+            const acceptError = getFirstAtolBatchErrorMessage(acceptBatch);
+
+            if (acceptError) {
+                throw new Error(acceptError);
+            }
+
+            rememberAcceptedMarkingCode(normalizedMarkingCode, {
+                packageMode: options.packageMode || options.markingPackageMode || 'single',
+                acceptedBy: 'precheck',
+            });
+        }
+
+        const batch = makeSyntheticAtolBatch(batches);
+        const parsed = parseBatchResult(batch);
+
+        return {
+            batch,
+            parsed,
+            statusInfo,
+            elapsedMs: Date.now() - startedAt,
+            optimized: true,
+            acceptBatch,
+        };
+    });
 };
 
 const findFiscalParams = value => {
@@ -1043,7 +1275,9 @@ const runNativeMarkedReceiptWithRetry = async ({
                                                    receipt,
                                                    logLabel = 'Driver native marked fiscal batch command:',
                                                }) => {
-    let commands = buildNativeMarkedReceiptBatchCommands(receipt);
+    let commands = buildNativeMarkedReceiptBatchCommands(receipt, {
+        skipAcceptedMarkingRecheck: true,
+    });
 
     console.log(logLabel);
     console.log(JSON.stringify(commands, null, 2));
@@ -1060,21 +1294,33 @@ const runNativeMarkedReceiptWithRetry = async ({
                   parsed.failed.message ||
                   '';
 
-        if (isInvalidMarkingProcessStateError(failedMessage) && !isMarkingRejectedError(failedMessage)) {
-            console.warn('Invalid marking process state. Reset marking state and retry once.');
+        const looksLikeStaleAcceptedCache = isHarmlessMarkingCleanupError(new Error(failedMessage));
 
+        if (
+            (isInvalidMarkingProcessStateError(failedMessage) || looksLikeStaleAcceptedCache) &&
+            !isMarkingRejectedError(failedMessage)
+        ) {
+            console.warn('Invalid or stale marking state. Reset marking state, clear fast cache and retry once with full strict validation.');
+
+            forgetReceiptAcceptedMarkingCodes(receipt);
             reset = await resetMarkingValidationState();
-            await sleep(1500);
+            await sleep(1200);
 
-            commands = buildNativeMarkedReceiptBatchCommands(receipt);
+            commands = buildNativeMarkedReceiptBatchCommands(receipt, {
+                skipAcceptedMarkingRecheck: false,
+            });
 
-            console.log('Driver native marked fiscal batch retry command:');
+            console.log('Driver native marked fiscal batch retry command with full validation:');
             console.log(JSON.stringify(commands, null, 2));
 
             batch = await runAtolCommandsRaw(commands);
             parsed = parseBatchResult(batch);
             retried = true;
         }
+    }
+
+    if (!parsed.failed) {
+        forgetReceiptAcceptedMarkingCodes(receipt);
     }
 
     return {
@@ -1097,6 +1343,11 @@ app.get('/health', requireToken, async (req, res) => {
         useSavedSettings: process.env.ATOL_DRIVER_USE_SAVED_SETTINGS || 'true',
         markingStatusAttempts: MARKING_STATUS_ATTEMPTS,
         markingStatusIntervalMs: MARKING_STATUS_INTERVAL_MS,
+        fastMarkingStatusAttempts: MARKING_FAST_STATUS_ATTEMPTS,
+        fastMarkingStatusIntervalMs: MARKING_FAST_STATUS_INTERVAL_MS,
+        acceptedMarkingCacheTtlMs: MARKING_ACCEPT_CACHE_TTL_MS,
+        acceptedMarkingCacheSize: acceptedMarkingCache.size,
+        skipAcceptedMarkingRecheck: SKIP_ACCEPTED_MARKING_RECHECK,
         strictMarkingSell: true,
         markingImcType: ATOL_MARKING_DEFAULT_IMC_TYPE,
         markingItemEstimatedStatus: ATOL_MARKING_DEFAULT_ITEM_ESTIMATED_STATUS,
@@ -1365,24 +1616,36 @@ app.post('/marking/precheck', requireToken, async (req, res) => {
             return;
         }
 
-        const commands = buildNativeMarkingStatusPollCommands(normalizedMarkingCode, markingOptions);
+        console.log('Driver fast marking precheck started:');
+        console.log(JSON.stringify({
+            key: hashMarkingCodeForLog(normalizedMarkingCode),
+            packageMode: req.body?.markingPackageMode || 'single',
+            fastAttempts: MARKING_FAST_STATUS_ATTEMPTS,
+            fastIntervalMs: MARKING_FAST_STATUS_INTERVAL_MS,
+        }, null, 2));
 
-        console.log('Driver marking precheck command:');
-        console.log(JSON.stringify(commands, null, 2));
+        const fastResult = await runFastMarkingPrecheckAndAccept(normalizedMarkingCode, {
+            ...markingOptions,
+            packageMode: req.body?.markingPackageMode || 'single',
+        });
 
-        batch = await runAtolCommandsRaw(commands);
-        const parsed = parseBatchResult(batch);
-        const statusInfo = determineMarkingStatus(parsed.markingStatuses);
+        batch = fastResult.batch;
+        const parsed = fastResult.parsed;
+        const statusInfo = fastResult.statusInfo;
 
-        console.log('ATOL marking precheck result:');
+        console.log('ATOL fast marking precheck result:');
         console.log(JSON.stringify({
             markingStatus: statusInfo.markingStatus,
             canSell: statusInfo.canSell,
             message: statusInfo.message,
             latestStatus: statusInfo.status,
+            elapsedMs: fastResult.elapsedMs,
+            acceptedCacheSize: acceptedMarkingCache.size,
         }, null, 2));
 
-        reset = await resetMarkingValidationState();
+        if (!statusInfo.canSell) {
+            reset = await resetMarkingValidationState();
+        }
 
         res.json({
             ok: statusInfo.canSell,
@@ -1390,8 +1653,13 @@ app.post('/marking/precheck', requireToken, async (req, res) => {
             markingStatus: statusInfo.markingStatus,
             normalizedMarkingCode,
             message: statusInfo.message,
+            elapsedMs: fastResult.elapsedMs,
+            optimized: true,
+            acceptedForFastSell: statusInfo.canSell,
+            acceptedCacheSize: acceptedMarkingCache.size,
             markingBegins: parsed.markingBegins,
             markingStatuses: parsed.markingStatuses,
+            markingAccepts: parsed.markingAccepts,
             reset,
             batch,
         });
@@ -1448,10 +1716,13 @@ app.post('/marking/clear', requireToken, async (req, res) => {
             },
         ]);
 
+        clearAcceptedMarkingCache();
+
         res.json({
             ok: true,
             message: 'Таблица проверенных КМ очищена',
             result,
+            acceptedCacheSize: acceptedMarkingCache.size,
         });
     } catch (error) {
         console.error(error);
@@ -1468,11 +1739,13 @@ app.post('/marking/clear', requireToken, async (req, res) => {
 app.post('/marking/reset', requireToken, async (req, res) => {
     try {
         const reset = await resetMarkingValidationState();
+        clearAcceptedMarkingCache();
 
         res.json({
             ok: true,
             message: 'Состояние проверки КМ сброшено',
             reset,
+            acceptedCacheSize: acceptedMarkingCache.size,
         });
     } catch (error) {
         console.error(error);
@@ -1668,6 +1941,9 @@ app.listen(PORT, '127.0.0.1', () => {
     console.log(`VAT type: ${ATOL_VAT_TYPE}`);
     console.log(`Marking status attempts: ${MARKING_STATUS_ATTEMPTS}`);
     console.log(`Marking status interval: ${MARKING_STATUS_INTERVAL_MS} ms`);
+    console.log(`Fast marking attempts: ${MARKING_FAST_STATUS_ATTEMPTS}`);
+    console.log(`Fast marking interval: ${MARKING_FAST_STATUS_INTERVAL_MS} ms`);
+    console.log(`Skip accepted marking recheck: ${SKIP_ACCEPTED_MARKING_RECHECK ? 'enabled' : 'disabled'}`);
     console.log('Strict marking sell: enabled. Only [M+] can be fiscalized.');
     console.log('Marking final fix: base64 auto, no itemQuantity for full piece sold, no double validation.');
 });
