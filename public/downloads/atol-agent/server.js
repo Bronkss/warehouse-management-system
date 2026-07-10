@@ -1080,93 +1080,78 @@ const runFastMarkingPrecheckAndAccept = async (markingCode, options = {}) => {
     const startedAt = Date.now();
 
     return runExclusiveAtolTask(async () => {
-        const batches = [];
-        const markingStatuses = [];
-        let acceptBatch = null;
-
-        const beginBatch = await runAtolCommandsRawUnlocked([
+        // Важно: begin/getStatus/accept должны выполняться в одном JSON-пакете.
+        // Если разнести их на разные вызовы PowerShell bridge, АТОЛ 10.10 теряет
+        // таблицу текущей проверки и возвращает "Данный КМ отсутствует в таблице".
+        // Поэтому ускоряем не отдельными COM-вызовами, а коротким единым batch.
+        const commands = [
             {
                 type: 'beginMarkingCodeValidation',
                 params,
             },
-        ]);
-
-        batches.push(beginBatch);
-
-        const beginError = getFirstAtolBatchErrorMessage(beginBatch);
-
-        if (beginError) {
-            throw new Error(beginError);
-        }
+        ];
 
         for (let attempt = 0; attempt < MARKING_FAST_STATUS_ATTEMPTS; attempt += 1) {
-            await sleep(MARKING_FAST_STATUS_INTERVAL_MS);
-
-            const statusBatch = await runAtolCommandsRawUnlocked([
+            commands.push(
+                {
+                    type: '__sleep',
+                    ms: MARKING_FAST_STATUS_INTERVAL_MS,
+                },
                 {
                     type: 'getMarkingCodeValidationStatus',
-                },
-            ]);
-
-            batches.push(statusBatch);
-
-            const statusError = getFirstAtolBatchErrorMessage(statusBatch);
-
-            if (statusError) {
-                throw new Error(statusError);
-            }
-
-            const parsedStatusBatch = parseBatchResult(statusBatch);
-            markingStatuses.push(...parsedStatusBatch.markingStatuses);
-
-            const statusInfo = determineMarkingStatus(markingStatuses);
-            const latestStatus = getLatestMarkingStatus(markingStatuses);
-
-            console.log('ATOL fast marking poll:');
-            console.log(JSON.stringify({
-                attempt: attempt + 1,
-                maxAttempts: MARKING_FAST_STATUS_ATTEMPTS,
-                elapsedMs: Date.now() - startedAt,
-                ready: latestStatus?.ready === true,
-                sentImcRequest: latestStatus?.sentImcRequest === true,
-                markingStatus: statusInfo.markingStatus,
-                canSell: statusInfo.canSell,
-            }, null, 2));
-
-            if (statusInfo.markingStatus === 'M+' || statusInfo.markingStatus === 'M-') {
-                break;
-            }
-
-            if (latestStatus?.ready === true && latestStatus?.sentImcRequest === true) {
-                break;
-            }
+                }
+            );
         }
 
-        const statusInfo = determineMarkingStatus(markingStatuses);
-
-        if (statusInfo.canSell && statusInfo.markingStatus === 'M+') {
-            acceptBatch = await runAtolCommandsRawUnlocked([
-                {
-                    type: 'acceptMarkingCode',
-                },
-            ]);
-
-            batches.push(acceptBatch);
-
-            const acceptError = getFirstAtolBatchErrorMessage(acceptBatch);
-
-            if (acceptError) {
-                throw new Error(acceptError);
+        commands.push(
+            {
+                type: '__assertMarkingPositive',
+            },
+            {
+                type: 'acceptMarkingCode',
+            },
+            {
+                type: '__sleep',
+                ms: 250,
             }
+        );
 
+        console.log('Driver fast marking single-batch command:');
+        console.log(JSON.stringify({
+            key: hashMarkingCodeForLog(normalizedMarkingCode),
+            attempts: MARKING_FAST_STATUS_ATTEMPTS,
+            intervalMs: MARKING_FAST_STATUS_INTERVAL_MS,
+            important: 'begin/status/assert/accept are kept in one ATOL JSON batch',
+        }, null, 2));
+
+        const batch = await runAtolCommandsRawUnlocked(commands);
+        const parsed = parseBatchResult(batch);
+        const statusInfo = determineMarkingStatus(parsed.markingStatuses);
+        const acceptError = parsed.markingAccepts.length > 0
+            ? null
+            : parsed.failed
+                ? getAtolResultErrorMessage(parsed.failed) || parsed.failed.errorDescription || parsed.failed.message || null
+                : null;
+
+        if (statusInfo.canSell && statusInfo.markingStatus === 'M+' && !acceptError) {
             rememberAcceptedMarkingCode(normalizedMarkingCode, {
                 packageMode: options.packageMode || options.markingPackageMode || 'single',
                 acceptedBy: 'precheck',
             });
+
+            console.log('Marking code accepted and cached for fast fiscal sell:');
+            console.log(JSON.stringify({
+                key: hashMarkingCodeForLog(normalizedMarkingCode),
+                cacheSize: acceptedMarkingCache.size,
+                elapsedMs: Date.now() - startedAt,
+            }, null, 2));
         }
 
-        const batch = makeSyntheticAtolBatch(batches);
-        const parsed = parseBatchResult(batch);
+        if (statusInfo.canSell && statusInfo.markingStatus === 'M+' && acceptError) {
+            statusInfo.canSell = false;
+            statusInfo.markingStatus = 'M';
+            statusInfo.message = `КМ прошёл проверку, но не был принят ККТ: ${acceptError}`;
+        }
 
         return {
             batch,
@@ -1174,7 +1159,8 @@ const runFastMarkingPrecheckAndAccept = async (markingCode, options = {}) => {
             statusInfo,
             elapsedMs: Date.now() - startedAt,
             optimized: true,
-            acceptBatch,
+            singleBatch: true,
+            acceptBatch: null,
         };
     });
 };
