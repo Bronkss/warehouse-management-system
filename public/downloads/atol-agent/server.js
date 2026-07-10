@@ -29,7 +29,11 @@ const MARKING_STATUS_INTERVAL_MS = Number(process.env.MARKING_STATUS_INTERVAL_MS
 const MARKING_FAST_STATUS_ATTEMPTS = Number(process.env.MARKING_FAST_STATUS_ATTEMPTS || 14);
 const MARKING_FAST_STATUS_INTERVAL_MS = Number(process.env.MARKING_FAST_STATUS_INTERVAL_MS || 450);
 const MARKING_ACCEPT_CACHE_TTL_MS = Number(process.env.MARKING_ACCEPT_CACHE_TTL_MS || 20 * 60 * 1000);
-const SKIP_ACCEPTED_MARKING_RECHECK = String(process.env.SKIP_ACCEPTED_MARKING_RECHECK || 'true').toLowerCase() !== 'false';
+// Важно: ККТ/драйвер АТОЛ должны получить begin/status/assert/accept в том же JSON-пакете,
+// где затем идёт sell. Если пропустить повторную проверку только по Node-cache,
+// драйвер может аннулировать документ. Поэтому по умолчанию НЕ пропускаем
+// проверку при sell, но делаем её быстрым single-batch циклом.
+const SKIP_ACCEPTED_MARKING_RECHECK = String(process.env.SKIP_ACCEPTED_MARKING_RECHECK || 'false').toLowerCase() === 'true';
 
 // Для пачек и блоков сигарет используем одинаковую строгую проверку [M+].
 // Блок определяется на фронте по отдельному штрихкоду товара, но КМ блока
@@ -833,6 +837,9 @@ const buildDriverJsonSellCommand = receipt => {
 
 const buildNativeMarkingStatusPollCommands = (markingCode, options = {}) => {
     const params = buildNativeDriverMarkingParams(markingCode, options);
+    const useFastPoll = options.fastPoll === true || options.fast === true;
+    const attempts = useFastPoll ? MARKING_FAST_STATUS_ATTEMPTS : MARKING_STATUS_ATTEMPTS;
+    const intervalMs = useFastPoll ? MARKING_FAST_STATUS_INTERVAL_MS : MARKING_STATUS_INTERVAL_MS;
 
     const commands = [
         {
@@ -841,11 +848,11 @@ const buildNativeMarkingStatusPollCommands = (markingCode, options = {}) => {
         },
     ];
 
-    for (let index = 0; index < MARKING_STATUS_ATTEMPTS; index += 1) {
+    for (let index = 0; index < attempts; index += 1) {
         commands.push(
             {
                 type: '__sleep',
-                ms: MARKING_STATUS_INTERVAL_MS,
+                ms: intervalMs,
             },
             {
                 type: 'getMarkingCodeValidationStatus',
@@ -911,7 +918,20 @@ const buildNativeMarkedReceiptBatchCommands = (receipt, options = {}) => {
             continue;
         }
 
-        const markingOptions = getMarkingOptionsForItem(item);
+        const markingOptions = {
+            ...getMarkingOptionsForItem(item),
+            fastPoll: true,
+        };
+
+        console.log('Fast strict marking validation before fiscal sell:');
+        console.log(JSON.stringify({
+            itemName: item.name || 'Товар',
+            markingKey: hashMarkingCodeForLog(markingCode),
+            attempts: MARKING_FAST_STATUS_ATTEMPTS,
+            intervalMs: MARKING_FAST_STATUS_INTERVAL_MS,
+            reason: 'validation must stay in the same ATOL batch as sell',
+        }, null, 2));
+
         commands.push(...buildNativeMarkingCheckCommands(markingCode, markingOptions));
     }
 
@@ -1262,7 +1282,10 @@ const runNativeMarkedReceiptWithRetry = async ({
                                                    logLabel = 'Driver native marked fiscal batch command:',
                                                }) => {
     let commands = buildNativeMarkedReceiptBatchCommands(receipt, {
-        skipAcceptedMarkingRecheck: true,
+        // Не пропускаем проверку КМ при sell: АТОЛ должен получить acceptMarkingCode
+        // в том же JSON-пакете перед командой sell. Иначе возможен 'Документ аннулирован'.
+        // Ускорение остаётся за счёт fastPoll внутри buildNativeMarkedReceiptBatchCommands.
+        skipAcceptedMarkingRecheck: false,
     });
 
     console.log(logLabel);
@@ -1930,6 +1953,7 @@ app.listen(PORT, '127.0.0.1', () => {
     console.log(`Fast marking attempts: ${MARKING_FAST_STATUS_ATTEMPTS}`);
     console.log(`Fast marking interval: ${MARKING_FAST_STATUS_INTERVAL_MS} ms`);
     console.log(`Skip accepted marking recheck: ${SKIP_ACCEPTED_MARKING_RECHECK ? 'enabled' : 'disabled'}`);
+    console.log('Safe fiscal sell: marking is revalidated in the same ATOL batch with fast polling.');
     console.log('Strict marking sell: enabled. Only [M+] can be fiscalized.');
-    console.log('Marking final fix: base64 auto, no itemQuantity for full piece sold, no double validation.');
+    console.log('Marking final fix: base64 auto, no itemQuantity for full piece sold, fast same-batch sell validation.');
 });
