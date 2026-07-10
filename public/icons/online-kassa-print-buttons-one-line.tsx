@@ -1311,35 +1311,17 @@ export default function PosPage() {
             return;
         }
 
-        const skipCommodityReceiptPrint = () => {
-            setPendingCommodityReceipt(null);
-            setCommodityReceiptPrintStep("ask");
-        };
-
         const focusFrame = requestAnimationFrame(() => {
             skipCommodityReceiptPrintButtonRef.current?.focus();
         });
 
-        const handleCommodityReceiptAskEnter = (event: globalThis.KeyboardEvent) => {
-            if (event.key !== "Enter") {
-                return;
-            }
-
-            event.preventDefault();
-            event.stopPropagation();
-            skipCommodityReceiptPrint();
-        };
-
-        window.addEventListener("keydown", handleCommodityReceiptAskEnter, true);
-
         return () => {
             cancelAnimationFrame(focusFrame);
-            window.removeEventListener("keydown", handleCommodityReceiptAskEnter, true);
         };
     }, [commodityReceiptPrintStep, pendingCommodityReceipt]);
 
     useEffect(() => {
-        if (!lastReceipt || pendingCommodityReceipt) {
+        if (!lastReceipt) {
             return;
         }
 
@@ -3960,17 +3942,17 @@ export default function PosPage() {
                                             type="button"
                                             autoFocus
                                             onClick={closeCommodityReceiptPrintModal}
-                                            className="rounded-xl bg-blue-600 px-5 py-3 font-bold text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-200"
+                                            className="rounded-xl border border-gray-300 px-5 py-3 font-bold text-gray-800 hover:bg-gray-50 focus:outline-none focus:ring-4 focus:ring-blue-200"
                                         >
-                                            Нет, чек не нужен
+                                            Нет, не печатать
                                         </button>
 
                                         <button
                                             type="button"
                                             onClick={() => setCommodityReceiptPrintStep("paper-warning")}
-                                            className="rounded-xl border border-gray-300 bg-white px-5 py-3 font-bold text-gray-800 hover:bg-gray-50"
+                                            className="rounded-xl bg-blue-600 px-5 py-3 font-bold text-white hover:bg-blue-700"
                                         >
-                                            Да, напечатать чек
+                                            Да, нужен чек
                                         </button>
                                     </div>
                                 </>

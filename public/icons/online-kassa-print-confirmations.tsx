@@ -204,7 +204,6 @@ const DEFAULT_FISCAL_AGENT_URL = "http://127.0.0.1:3108";
 const FISCAL_AGENT_URL_KEY = "pos_fiscal_agent_url";
 const FISCAL_AGENT_TOKEN_KEY = "pos_fiscal_agent_token";
 const SHIFT_STATUS_KEY = "pos_kkt_shift_status";
-const LAST_COMMODITY_RECEIPT_KEY = "pos_last_commodity_receipt";
 
 type ShiftStatus = "unknown" | "open" | "closed";
 
@@ -977,8 +976,6 @@ export default function PosPage() {
         useState<PendingPriceLabelPrint | null>(null);
     const [pendingCommodityReceipt, setPendingCommodityReceipt] =
         useState<Receipt | null>(null);
-    const [lastCommodityReceipt, setLastCommodityReceipt] =
-        useState<Receipt | null>(null);
     const [commodityReceiptPrintStep, setCommodityReceiptPrintStep] =
         useState<CommodityReceiptPrintStep>("ask");
 
@@ -1002,7 +999,6 @@ export default function PosPage() {
 
     const searchInputRef = useRef<HTMLInputElement>(null);
     const newSaleButtonRef = useRef<HTMLButtonElement>(null);
-    const skipCommodityReceiptPrintButtonRef = useRef<HTMLButtonElement>(null);
 
     const total = calculateTotal(checkoutItems);
     const cashReceivedNumber = safeParseNumber(cashReceived);
@@ -1110,29 +1106,6 @@ export default function PosPage() {
 
         setIsAuthChecked(true);
     }, [router]);
-
-    useEffect(() => {
-        if (typeof window === "undefined") {
-            return;
-        }
-
-        try {
-            const rawReceipt = localStorage.getItem(LAST_COMMODITY_RECEIPT_KEY);
-
-            if (!rawReceipt) {
-                return;
-            }
-
-            const parsedReceipt = JSON.parse(rawReceipt) as Receipt;
-
-            if (parsedReceipt && parsedReceipt.id && Array.isArray(parsedReceipt.items)) {
-                setLastCommodityReceipt(parsedReceipt);
-            }
-        } catch (err) {
-            console.warn("Last commodity receipt restore error:", err);
-            localStorage.removeItem(LAST_COMMODITY_RECEIPT_KEY);
-        }
-    }, []);
 
     useEffect(() => {
         const storedItems = usePosCheckoutStore.getState().currentItems;
@@ -1307,39 +1280,7 @@ export default function PosPage() {
     }, []);
 
     useEffect(() => {
-        if (!pendingCommodityReceipt || commodityReceiptPrintStep !== "ask") {
-            return;
-        }
-
-        const skipCommodityReceiptPrint = () => {
-            setPendingCommodityReceipt(null);
-            setCommodityReceiptPrintStep("ask");
-        };
-
-        const focusFrame = requestAnimationFrame(() => {
-            skipCommodityReceiptPrintButtonRef.current?.focus();
-        });
-
-        const handleCommodityReceiptAskEnter = (event: globalThis.KeyboardEvent) => {
-            if (event.key !== "Enter") {
-                return;
-            }
-
-            event.preventDefault();
-            event.stopPropagation();
-            skipCommodityReceiptPrint();
-        };
-
-        window.addEventListener("keydown", handleCommodityReceiptAskEnter, true);
-
-        return () => {
-            cancelAnimationFrame(focusFrame);
-            window.removeEventListener("keydown", handleCommodityReceiptAskEnter, true);
-        };
-    }, [commodityReceiptPrintStep, pendingCommodityReceipt]);
-
-    useEffect(() => {
-        if (!lastReceipt || pendingCommodityReceipt) {
+        if (!lastReceipt) {
             return;
         }
 
@@ -2371,37 +2312,6 @@ export default function PosPage() {
         printWindow.document.close();
     };
 
-    const saveLastCommodityReceipt = (receipt: Receipt) => {
-        setLastCommodityReceipt(receipt);
-
-        if (typeof window === "undefined") {
-            return;
-        }
-
-        try {
-            localStorage.setItem(LAST_COMMODITY_RECEIPT_KEY, JSON.stringify(receipt));
-        } catch (err) {
-            console.warn("Last commodity receipt save error:", err);
-        }
-    };
-
-    const openCommodityReceiptPaperWarning = (receipt: Receipt) => {
-        setPendingCommodityReceipt(receipt);
-        setCommodityReceiptPrintStep("paper-warning");
-        setError(null);
-        setNotice(null);
-    };
-
-    const repeatLastCommodityReceipt = () => {
-        if (!lastCommodityReceipt) {
-            setError("Последний товарный чек не найден");
-            setNotice(null);
-            return;
-        }
-
-        openCommodityReceiptPaperWarning(lastCommodityReceipt);
-    };
-
     const completePayment = async (
         method: PaymentMethod,
         shouldFiscalize = false,
@@ -2570,7 +2480,6 @@ export default function PosPage() {
             };
 
             if (!shouldRunFiscalization) {
-                saveLastCommodityReceipt(finalReceipt);
                 setPendingCommodityReceipt(finalReceipt);
                 setCommodityReceiptPrintStep("ask");
             }
@@ -3369,8 +3278,8 @@ export default function PosPage() {
                 </div>
 
                 <div className="mb-6 rounded-2xl bg-white p-4 shadow-lg">
-                    <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                        <div className="flex shrink-0 flex-wrap items-center gap-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
                             <span className="text-sm text-gray-500">Смена ККТ:</span>
 
                             <span
@@ -3384,12 +3293,12 @@ export default function PosPage() {
               </span>
                         </div>
 
-                        <div className="flex w-full flex-nowrap items-center gap-2 overflow-x-auto pb-1 xl:w-auto xl:justify-end">
+                        <div className="flex flex-wrap gap-2">
                             <button
                                 type="button"
                                 onClick={openShift}
                                 disabled={isShiftActionLoading || isShiftOpen}
-                                className="shrink-0 whitespace-nowrap rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                                className="rounded-lg bg-emerald-600 px-4 py-2 text-white hover:bg-emerald-700 disabled:opacity-50"
                             >
                                 Открыть смену
                             </button>
@@ -3398,7 +3307,7 @@ export default function PosPage() {
                                 type="button"
                                 onClick={closeShift}
                                 disabled={isShiftActionLoading || !isShiftOpen}
-                                className="shrink-0 whitespace-nowrap rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                                className="rounded-lg bg-red-600 px-4 py-2 text-white hover:bg-red-700 disabled:opacity-50"
                             >
                                 Закрыть смену
                             </button>
@@ -3407,7 +3316,7 @@ export default function PosPage() {
                                 type="button"
                                 onClick={checkFiscalAgent}
                                 disabled={isShiftActionLoading}
-                                className="shrink-0 whitespace-nowrap rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold hover:bg-gray-50 disabled:opacity-50"
+                                className="rounded-lg border border-gray-300 px-4 py-2 hover:bg-gray-50 disabled:opacity-50"
                             >
                                 Проверить ККТ
                             </button>
@@ -3416,24 +3325,15 @@ export default function PosPage() {
                                 type="button"
                                 onClick={repeatLastFiscalReceipt}
                                 disabled={isShiftActionLoading}
-                                className="shrink-0 whitespace-nowrap rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold hover:bg-gray-50 disabled:opacity-50"
+                                className="rounded-lg border border-gray-300 px-4 py-2 hover:bg-gray-50 disabled:opacity-50"
                             >
-                                Копия чека ККТ
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={repeatLastCommodityReceipt}
-                                disabled={isShiftActionLoading || !lastCommodityReceipt}
-                                className="shrink-0 whitespace-nowrap rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                                Товарный чек
+                                Копия последнего чека ККТ
                             </button>
 
                             <button
                                 type="button"
                                 onClick={handleLogout}
-                                className="shrink-0 whitespace-nowrap rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+                                className="rounded-lg border border-gray-300 px-4 py-2 hover:bg-gray-50"
                             >
                                 Выйти
                             </button>
@@ -3956,21 +3856,19 @@ export default function PosPage() {
 
                                     <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
                                         <button
-                                            ref={skipCommodityReceiptPrintButtonRef}
                                             type="button"
-                                            autoFocus
                                             onClick={closeCommodityReceiptPrintModal}
-                                            className="rounded-xl bg-blue-600 px-5 py-3 font-bold text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-200"
+                                            className="rounded-xl border border-gray-300 px-5 py-3 font-semibold text-gray-700 hover:bg-gray-50"
                                         >
-                                            Нет, чек не нужен
+                                            Нет, не печатать
                                         </button>
 
                                         <button
                                             type="button"
                                             onClick={() => setCommodityReceiptPrintStep("paper-warning")}
-                                            className="rounded-xl border border-gray-300 bg-white px-5 py-3 font-bold text-gray-800 hover:bg-gray-50"
+                                            className="rounded-xl bg-blue-600 px-5 py-3 font-bold text-white hover:bg-blue-700"
                                         >
-                                            Да, напечатать чек
+                                            Да, нужен чек
                                         </button>
                                     </div>
                                 </>
@@ -5244,17 +5142,6 @@ export default function PosPage() {
                                         className="px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
                                     >
                                         Копия чека ККТ
-                                    </button>
-                                )}
-
-                                {lastReceipt.fiscalStatus === "skipped" && (
-                                    <button
-                                        type="button"
-                                        onClick={() => openCommodityReceiptPaperWarning(lastReceipt)}
-                                        disabled={isShiftActionLoading}
-                                        className="px-6 py-2 rounded-lg border border-amber-300 bg-amber-50 font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
-                                    >
-                                        Печать товарного чека
                                     </button>
                                 )}
 
