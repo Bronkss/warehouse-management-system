@@ -185,6 +185,7 @@ type CommodityReceiptPrintStep = "ask" | "paper-warning";
 
 const PRODUCTS_PAGE_LIMIT = 100;
 const SEARCH_LIMIT = 30;
+const TOAST_AUTO_CLOSE_MS = 10_000;
 
 const AUTH_USER_KEY = "warehouse_auth_user";
 const AUTH_LOGIN_KEY = "warehouse_auth_login";
@@ -1014,6 +1015,34 @@ export default function PosPage() {
     const hasUnsafeMarkedCheckoutItems = checkoutItems.some(
         (item) => isMarkedProduct(item.product) && item.markingStatus !== "M+",
     );
+
+    useEffect(() => {
+        if (!error) {
+            return;
+        }
+
+        const timeoutId = window.setTimeout(() => {
+            setError(null);
+        }, TOAST_AUTO_CLOSE_MS);
+
+        return () => {
+            window.clearTimeout(timeoutId);
+        };
+    }, [error]);
+
+    useEffect(() => {
+        if (!notice) {
+            return;
+        }
+
+        const timeoutId = window.setTimeout(() => {
+            setNotice(null);
+        }, TOAST_AUTO_CLOSE_MS);
+
+        return () => {
+            window.clearTimeout(timeoutId);
+        };
+    }, [notice]);
 
     const priceLabelCategories = useMemo(() => {
         const categories = allProducts.map(getProductCategory);
@@ -3343,146 +3372,329 @@ export default function PosPage() {
                     </div>
                 </div>
             )}
-            <div className="max-w-5xl mx-auto">
-                <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <button
-                        type="button"
-                        onClick={() => router.push("/system")}
-                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-white px-5 py-3 text-sm font-bold text-indigo-700 shadow-sm transition-colors hover:bg-indigo-50"
-                    >
-                        <span aria-hidden="true">←</span>
-                        Вернуться в склад
-                    </button>
-
-                    <div className="text-center sm:flex-1">
-                        <h1 className="text-3xl font-bold text-indigo-800">
-                            {warehouseLocationName} онлайн-касса
-                        </h1>
-
-                        <div className="mt-2 inline-flex rounded-full bg-white px-3 py-1 text-xs font-bold text-indigo-700 shadow-sm">
-                            Текущая зона: {warehouseLocationName} · {warehouseLocationSlug} ·
-                            Кассир: {warehouseUserName}
-                        </div>
-                    </div>
-
-                    <div className="hidden min-w-[168px] sm:block" />
-                </div>
-
-                <div className="mb-6 rounded-2xl bg-white p-4 shadow-lg">
-                    <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                        <div className="flex shrink-0 flex-wrap items-center gap-3">
-                            <span className="text-sm text-gray-500">Смена ККТ:</span>
-
-                            <span
-                                className={`rounded-full px-3 py-1 text-sm font-semibold ${
-                                    isShiftOpen
-                                        ? "bg-emerald-100 text-emerald-700"
-                                        : "bg-red-100 text-red-700"
-                                }`}
-                            >
-                {isShiftOpen ? "Открыта" : "Закрыта"}
-              </span>
-                        </div>
-
-                        <div className="flex w-full flex-nowrap items-center gap-2 overflow-x-auto pb-1 xl:w-auto xl:justify-end">
-                            <button
-                                type="button"
-                                onClick={openShift}
-                                disabled={isShiftActionLoading || isShiftOpen}
-                                className="shrink-0 whitespace-nowrap rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-                            >
-                                Открыть смену
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={closeShift}
-                                disabled={isShiftActionLoading || !isShiftOpen}
-                                className="shrink-0 whitespace-nowrap rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
-                            >
-                                Закрыть смену
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={checkFiscalAgent}
-                                disabled={isShiftActionLoading}
-                                className="shrink-0 whitespace-nowrap rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold hover:bg-gray-50 disabled:opacity-50"
-                            >
-                                Проверить ККТ
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={repeatLastFiscalReceipt}
-                                disabled={isShiftActionLoading}
-                                className="shrink-0 whitespace-nowrap rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold hover:bg-gray-50 disabled:opacity-50"
-                            >
-                                Копия чека ККТ
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={repeatLastCommodityReceipt}
-                                disabled={isShiftActionLoading || !lastCommodityReceipt}
-                                className="shrink-0 whitespace-nowrap rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                                Товарный чек
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={handleLogout}
-                                className="shrink-0 whitespace-nowrap rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold hover:bg-gray-50"
-                            >
-                                Выйти
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="mt-3 text-xs text-gray-500">
-                        Продажа доступна только при открытой смене. Обычный чек по карте
-                        фискализируется после подтверждения кассира; маркированные товары
-                        всегда отправляются на ККТ.
-                    </div>
-
-                    <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                            <div className="text-sm font-bold text-indigo-900">
-                                Настройки ККТ и файлы для установки
-                            </div>
-
-                            <div className="mt-1 text-xs leading-5 text-indigo-700">
-                                Открывай только при настройке рабочего места кассира: агент
-                                127.0.0.1:3108, драйвер АТОЛ 10.10.8 и файлы загрузки.
-                            </div>
-                        </div>
-
-                        <button
-                            type="button"
-                            onClick={() => setIsAtolSetupOpen(true)}
-                            className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700"
+            {(error || notice) && (
+                <div className="fixed right-4 top-4 z-[9999] flex w-[calc(100vw-32px)] max-w-md flex-col gap-3 pointer-events-none">
+                    {error && (
+                        <motion.div
+                            initial={{ opacity: 0, x: 24, y: -8 }}
+                            animate={{ opacity: 1, x: 0, y: 0 }}
+                            exit={{ opacity: 0, x: 24 }}
+                            className="pointer-events-auto rounded-3xl border border-red-200 bg-white p-4 shadow-2xl ring-4 ring-red-50"
+                            role="alert"
                         >
-                            Открыть настройки ККТ
-                        </button>
-                    </div>
+                            <div className="flex items-start gap-3">
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-red-100 text-xl font-black text-red-700">
+                                    !
+                                </div>
+
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-xs font-black uppercase tracking-[0.16em] text-red-600">
+                                        Ошибка
+                                    </div>
+
+                                    <div className="mt-1 text-sm font-bold leading-5 text-gray-900">
+                                        {error}
+                                    </div>
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setError(null)}
+                                    className="rounded-full px-2 text-xl leading-none text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                    aria-label="Закрыть ошибку"
+                                >
+                                    ×
+                                </button>
+                            </div>
+
+                            <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-red-100">
+                                <div
+                                    key={error}
+                                    className="h-full origin-left rounded-full bg-red-500"
+                                    style={{ animation: `toast-progress ${TOAST_AUTO_CLOSE_MS}ms linear forwards` }}
+                                />
+                            </div>
+                        </motion.div>
+                    )}
+
+                    {notice && (
+                        <motion.div
+                            initial={{ opacity: 0, x: 24, y: -8 }}
+                            animate={{ opacity: 1, x: 0, y: 0 }}
+                            exit={{ opacity: 0, x: 24 }}
+                            className="pointer-events-auto rounded-3xl border border-emerald-200 bg-white p-4 shadow-2xl ring-4 ring-emerald-50"
+                            role="status"
+                        >
+                            <div className="flex items-start gap-3">
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-xl font-black text-emerald-700">
+                                    ✓
+                                </div>
+
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-xs font-black uppercase tracking-[0.16em] text-emerald-600">
+                                        Уведомление
+                                    </div>
+
+                                    <div className="mt-1 text-sm font-bold leading-5 text-gray-900">
+                                        {notice}
+                                    </div>
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setNotice(null)}
+                                    className="rounded-full px-2 text-xl leading-none text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                    aria-label="Закрыть уведомление"
+                                >
+                                    ×
+                                </button>
+                            </div>
+
+                            <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-emerald-100">
+                                <div
+                                    key={notice}
+                                    className="h-full origin-left rounded-full bg-emerald-500"
+                                    style={{ animation: `toast-progress ${TOAST_AUTO_CLOSE_MS}ms linear forwards` }}
+                                />
+                            </div>
+                        </motion.div>
+                    )}
                 </div>
+            )}
 
-                {error && (
-                    <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-red-700">
-                        {error}
-                    </div>
-                )}
+            <div className="mx-auto max-w-[1560px]">
+                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[360px_minmax(0,1fr)] xl:items-start">
+                    <aside className="space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-32px)] xl:overflow-y-auto xl:pr-1">
+                        <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl">
+                            <button
+                                type="button"
+                                onClick={() => router.push("/system")}
+                                className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-white px-5 py-3 text-sm font-black text-indigo-700 shadow-sm transition-colors hover:bg-indigo-50"
+                            >
+                                <span aria-hidden="true">←</span>
+                                Вернуться в склад
+                            </button>
 
-                {notice && (
-                    <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-emerald-700">
-                        {notice}
-                    </div>
-                )}
+                            <div className="mt-3 rounded-2xl bg-indigo-50 px-4 py-3 text-xs font-black leading-5 text-indigo-700">
+                                <div>Текущая зона: {warehouseLocationName}</div>
+                                <div className="mt-0.5 text-indigo-500">{warehouseLocationSlug} · Кассир: {warehouseUserName}</div>
+                            </div>
+                        </div>
+                        <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl">
+                            <div className="text-sm font-bold text-gray-500">Итого к оплате</div>
+                            <div className="mt-1 text-4xl font-black tracking-tight text-indigo-700">
+                                {formatCurrency(total)}
+                            </div>
 
-                <div className="bg-white rounded-2xl shadow-xl overflow-hidden mb-8">
-                    <div className="p-6 border-b border-gray-200">
-                        <div className="grid grid-cols-1 gap-3 mb-4">
+                            <div className="mt-2 text-sm font-semibold text-gray-500">
+                                Позиций в чеке: {checkoutItems.length}
+                            </div>
+
+                            {hasUnsafeMarkedCheckoutItems && (
+                                <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
+                                    В чеке есть маркированный товар без подтверждения [M+]. Оплата заблокирована.
+                                </div>
+                            )}
+
+                            <div className="mt-5 grid grid-cols-3 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => openPayment("cash")}
+                                    disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems}
+                                    className="rounded-2xl bg-emerald-600 px-3 py-3 text-sm font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Наличные
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => openPayment("transfer")}
+                                    disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems}
+                                    className="rounded-2xl bg-blue-600 px-3 py-3 text-sm font-black text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Перевод
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => openPayment("card")}
+                                    disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems}
+                                    className="rounded-2xl bg-indigo-600 px-3 py-3 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Карта
+                                </button>
+                            </div>
+
+                            <div className="mt-4 grid grid-cols-2 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={holdCurrentCheckout}
+                                    disabled={checkoutItems.length === 0}
+                                    className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Отложить
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setCheckoutItems([]);
+                                        setError(null);
+                                    }}
+                                    disabled={checkoutItems.length === 0}
+                                    className="rounded-xl border border-gray-300 px-4 py-3 text-sm font-bold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Очистить
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl">
+                            <div className="mb-4 flex items-start justify-between gap-3">
+                                <div>
+                                    <div className="text-xs font-black uppercase tracking-[0.16em] text-indigo-500">
+                                        Управление ККТ
+                                    </div>
+
+                                    <h2 className="mt-1 text-2xl font-black text-gray-900">
+                                        Смена и касса
+                                    </h2>
+                                </div>
+
+                                <span
+                                    className={`shrink-0 rounded-full px-3 py-1 text-sm font-black ${
+                                        isShiftOpen
+                                            ? "bg-emerald-100 text-emerald-700"
+                                            : "bg-red-100 text-red-700"
+                                    }`}
+                                >
+                                    {isShiftOpen ? "Открыта" : "Закрыта"}
+                                </span>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={openShift}
+                                    disabled={isShiftActionLoading || isShiftOpen}
+                                    className="rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Открыть смену
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={closeShift}
+                                    disabled={isShiftActionLoading || !isShiftOpen}
+                                    className="rounded-2xl bg-red-600 px-4 py-3 text-sm font-black text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Закрыть смену
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={checkFiscalAgent}
+                                    disabled={isShiftActionLoading}
+                                    className="rounded-2xl border border-gray-300 bg-white px-4 py-3 text-sm font-black text-gray-800 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Проверить ККТ
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={repeatLastFiscalReceipt}
+                                    disabled={isShiftActionLoading}
+                                    className="rounded-2xl border border-gray-300 bg-white px-4 py-3 text-sm font-black text-gray-800 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Копия ККТ
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={repeatLastCommodityReceipt}
+                                    disabled={isShiftActionLoading || !lastCommodityReceipt}
+                                    className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Товарный чек
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={handleLogout}
+                                    className="rounded-2xl border border-gray-300 bg-white px-4 py-3 text-sm font-black text-gray-800 hover:bg-gray-50"
+                                >
+                                    Выйти
+                                </button>
+                            </div>
+
+                            <div className="mt-4 rounded-2xl border border-indigo-100 bg-indigo-50 p-3">
+                                <div className="text-sm font-black text-indigo-900">
+                                    Настройки ККТ
+                                </div>
+
+                                <div className="mt-1 text-xs leading-5 text-indigo-700">
+                                    Агент 127.0.0.1:3108, драйвер АТОЛ и файлы установки.
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setIsAtolSetupOpen(true)}
+                                    className="mt-3 w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-black text-white hover:bg-indigo-700"
+                                >
+                                    Открыть настройки ККТ
+                                </button>
+                            </div>
+
+                            <div className="mt-3 text-xs leading-5 text-gray-500">
+                                Продажа доступна только при открытой смене. Маркированные товары всегда уходят на ККТ.
+                            </div>
+                        </div>
+
+                        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-xl">
+                            <div className="text-sm font-black uppercase tracking-[0.16em] text-slate-500">
+                                Дополнительно
+                            </div>
+
+                            <div className="mt-4 grid grid-cols-1 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={openPriceLabelModal}
+                                    disabled={isRefreshingLabels}
+                                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+                                >
+                                    <AiOutlinePrinter size={20} />
+                                    {isRefreshingLabels
+                                        ? "Обновляю цены..."
+                                        : "Печать ценников"}
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setIsHeldReceiptsModalOpen(true)}
+                                    className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800 hover:bg-amber-100"
+                                >
+                                    Отложенные чеки ({heldCheckouts.length})
+                                </button>
+                            </div>
+
+                            <div className="mt-3 text-xs leading-5 text-gray-500">
+                                Цены и штрихкоды берутся из актуальной базы. Текущий чек сохраняется после обновления страницы.
+                            </div>
+                        </div>
+                    </aside>
+
+                    <section className="min-w-0 space-y-4">
+                        <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl">
+                            <div className="mb-4">
+                                <div className="text-xs font-black uppercase tracking-[0.16em] text-indigo-500">
+                                    Сканер товара
+                                </div>
+
+                                <h2 className="mt-1 text-2xl font-black text-gray-900">
+                                    Скан штрихкода или поиск
+                                </h2>
+                            </div>
+
                             <div className="relative">
                                 <div className="absolute left-3 top-3 text-gray-400">
                                     <AiOutlineScan size={25} />
@@ -3496,7 +3708,7 @@ export default function PosPage() {
                                     onChange={(e) => setSearchQuery(e.target.value)}
                                     onKeyDown={handleKeyDown}
                                     autoFocus
-                                    className="w-full pl-10 pr-10 py-3 rounded-full border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+                                    className="w-full rounded-2xl border border-gray-300 py-3 pl-10 pr-10 text-lg font-semibold outline-none transition-all focus:border-transparent focus:ring-2 focus:ring-indigo-500"
                                 />
 
                                 {searchQuery && (
@@ -3513,356 +3725,302 @@ export default function PosPage() {
                                     </button>
                                 )}
                             </div>
-                        </div>
 
-                        <div className="flex items-center gap-2 text-sm text-gray-500">
-                            <AiOutlineSearch />
-                            <span>
-                Enter добавляет товар. Для весового товара откроется окно ввода
-                веса.
-              </span>
-                        </div>
-
-                        {isSearchLoading && (
-                            <div className="mt-3 text-sm text-indigo-600">
-                                Идёт поиск товара...
-                            </div>
-                        )}
-
-                        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                            <div className="flex flex-wrap items-center gap-2">
-                                <button
-                                    type="button"
-                                    onClick={openPriceLabelModal}
-                                    disabled={isRefreshingLabels}
-                                    className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2.5 text-white hover:bg-slate-800 disabled:opacity-50"
-                                >
-                                    <AiOutlinePrinter size={20} />
-                                    {isRefreshingLabels
-                                        ? "Обновляю цены..."
-                                        : "Печать ценников / термоэтикеток 58×40"}
-                                </button>
-
-                                <button
-                                    type="button"
-                                    onClick={() => setIsHeldReceiptsModalOpen(true)}
-                                    className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-5 py-2.5 font-semibold text-amber-800 hover:bg-amber-100"
-                                >
-                                    Отложенные чеки ({heldCheckouts.length})
-                                </button>
+                            <div className="mt-3 flex items-start gap-2 text-xs font-semibold leading-5 text-gray-500">
+                                <AiOutlineSearch className="mt-0.5 shrink-0" />
+                                <span>Enter добавляет товар. Весовой товар откроет окно ввода веса.</span>
                             </div>
 
-                            <div className="text-xs text-gray-500">
-                                Цены и штрихкоды для печати берутся из актуальной базы товаров.
-                                Текущий чек сохраняется после обновления страницы.
-                            </div>
-                        </div>
-                    </div>
-
-                    <AnimatePresence>
-                        {searchQuery && !isSearchLoading && foundProducts.length === 0 && (
-                            <motion.div
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 1 }}
-                                exit={{ opacity: 0 }}
-                                className="py-3 bg-gray-50 text-center text-gray-500"
-                            >
-                                Товар не найден
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-
-                    <AnimatePresence>
-                        {foundProducts.length > 0 && searchQuery && (
-                            <motion.div
-                                initial={{ opacity: 0, height: 0 }}
-                                animate={{ opacity: 1, height: "auto" }}
-                                exit={{ opacity: 0, height: 0 }}
-                                className="overflow-hidden border-t border-gray-200"
-                            >
-                                <div className="p-4 space-y-2">
-                                    {foundProducts.map((product) => {
-                                        const stock = getStock(product);
-                                        const isEmpty = stock <= 0;
-                                        const canSellNegative = canSellIntoNegativeStock(product);
-                                        const isBlockedByStock = isEmpty && !canSellNegative;
-                                        const marked = isMarkedProduct(product);
-
-                                        return (
-                                            <motion.div
-                                                key={String(product.id)}
-                                                whileHover={{ scale: isBlockedByStock ? 1 : 1.01 }}
-                                                className={`flex justify-between items-center p-3 rounded-lg shadow-sm transition-shadow ${
-                                                    isBlockedByStock
-                                                        ? "bg-red-50 cursor-not-allowed opacity-70"
-                                                        : canSellNegative && isEmpty
-                                                            ? "bg-amber-50 hover:shadow-md cursor-pointer"
-                                                            : "bg-white hover:shadow-md cursor-pointer"
-                                                }`}
-                                                onClick={() => {
-                                                    if (!isBlockedByStock) {
-                                                        addToCheckout(product, searchQuery);
-                                                    }
-                                                }}
-                                            >
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="font-medium truncate">
-                                                        {product.name}
-                                                    </div>
-
-                                                    <div className="text-sm text-gray-500 truncate">
-                                                        {product.category || "Без категории"}
-                                                        {product.barcode
-                                                            ? ` · ШК: ${getBarcodeDisplay(product.barcode)}`
-                                                            : ""}
-                                                    </div>
-
-                                                    {marked && (
-                                                        <div className="mt-1 inline-flex rounded-full bg-purple-100 px-2 py-0.5 text-xs font-semibold text-purple-700">
-                                                            Маркированный товар · нужен DataMatrix
-                                                        </div>
-                                                    )}
-
-                                                    <div
-                                                        className={`text-sm ${
-                                                            isEmpty && !canSellNegative
-                                                                ? "text-red-600"
-                                                                : canSellNegative && isEmpty
-                                                                    ? "text-amber-700"
-                                                                    : "text-green-600"
-                                                        }`}
-                                                    >
-                                                        Остаток: {formatQuantity(stock, product.unit)}
-                                                        {canSellNegative && isEmpty
-                                                            ? " · можно продать в минус"
-                                                            : ""}
-                                                    </div>
-                                                </div>
-
-                                                <div className="font-bold min-w-[150px] text-right">
-                                                    {formatCurrency(getSellingPrice(product))}
-                                                    <div className="text-xs font-normal text-gray-500">
-                                                        {getUnitPriceLabel(product)}
-                                                    </div>
-                                                </div>
-
-                                                <button
-                                                    type="button"
-                                                    disabled={isBlockedByStock}
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-
-                                                        if (!isBlockedByStock) {
-                                                            addToCheckout(product, searchQuery);
-                                                        }
-                                                    }}
-                                                    className="ml-4 text-indigo-600 hover:text-indigo-800 text-lg disabled:text-gray-300"
-                                                >
-                                                    +
-                                                </button>
-                                            </motion.div>
-                                        );
-                                    })}
+                            {isSearchLoading && (
+                                <div className="mt-3 rounded-xl bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700">
+                                    Идёт поиск товара...
                                 </div>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
+                            )}
 
-                    {checkoutItems.length > 0 && (
-                        <div className="p-4 border-t border-gray-100">
-                            <div className="space-y-2">
-                                {checkoutItems.map((item) => {
-                                    const stock = getStock(item.product);
-                                    const marked = isMarkedProduct(item.product);
-
-                                    return (
-                                        <motion.div
-                                            key={item.id}
-                                            initial={{ opacity: 0, y: 10 }}
-                                            animate={{ opacity: 1, y: 0 }}
-                                            className="flex items-center justify-between p-3 bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow"
-                                        >
-                                            <div className="flex-1 min-w-0">
-                                                <div className="font-semibold truncate">
-                                                    {item.product.name}
-                                                </div>
-
-                                                <div className="text-sm text-gray-500">
-                                                    {formatCurrency(getSellingPrice(item.product))} ×{" "}
-                                                    {formatQuantity(item.quantity, item.product.unit)}
-                                                </div>
-
-                                                {marked && (
-                                                    <div
-                                                        className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold ${getMarkingStatusClassName(item.markingStatus)}`}
-                                                    >
-                                                        [{item.markingStatus || "M"}]{" "}
-                                                        {item.markingStatus === "M+"
-                                                            ? "Маркировка проверена"
-                                                            : "Маркировка не подтверждена"}
-                                                        {item.markingCode
-                                                            ? ` · КМ: ${formatMarkingCodePreview(item.markingCode)}`
-                                                            : " · DataMatrix не задан"}
-                                                    </div>
-                                                )}
-
-                                                {marked && item.markingMessage && (
-                                                    <div className="mt-1 text-xs text-gray-500">
-                                                        {item.markingMessage}
-                                                    </div>
-                                                )}
-
-                                                {item.product.barcode && (
-                                                    <div className="text-sm text-gray-500 truncate">
-                                                        ШК: {getBarcodeDisplay(item.product.barcode)}
-                                                    </div>
-                                                )}
-
-                                                <div className="text-sm text-gray-500">
-                                                    Остаток в БД:{" "}
-                                                    {formatQuantity(stock, item.product.unit)}
-                                                </div>
-                                            </div>
-
-                                            <div className="flex items-center space-x-4">
-                                                <div className="flex items-center space-x-1">
-                                                    {marked ? (
-                                                        <span className="rounded-lg bg-purple-50 px-3 py-1 text-sm font-bold text-purple-700">
-                              {formatQuantity(item.quantity, item.product.unit)}
-                            </span>
-                                                    ) : item.product.unit === "weight" ? (
-                                                        <input
-                                                            type="number"
-                                                            min="0.001"
-                                                            step="0.001"
-                                                            value={item.quantity}
-                                                            onChange={(e) =>
-                                                                setItemQuantity(item.id, e.target.value)
-                                                            }
-                                                            className="w-24 rounded-lg border border-gray-300 px-2 py-1 text-center outline-none focus:ring-2 focus:ring-indigo-500"
-                                                        />
-                                                    ) : (
-                                                        <>
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => changeQuantity(item.id, -1)}
-                                                                className="p-1 text-gray-500 hover:text-indigo-600 rounded disabled:opacity-30"
-                                                                disabled={item.quantity <= 1}
-                                                            >
-                                                                <AiOutlineMinus />
-                                                            </button>
-
-                                                            <span className="font-medium w-8 text-center">
-                                {item.quantity}
-                              </span>
-
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => changeQuantity(item.id, 1)}
-                                                                className="p-1 text-gray-500 hover:text-indigo-600 rounded disabled:opacity-30"
-                                                                disabled={item.quantity >= stock}
-                                                            >
-                                                                <AiOutlinePlus />
-                                                            </button>
-                                                        </>
-                                                    )}
-                                                </div>
-
-                                                <div className="font-bold text-lg min-w-[120px] text-right">
-                                                    {formatCurrency(
-                                                        getSellingPrice(item.product) * item.quantity,
-                                                    )}
-                                                </div>
-
-                                                <button
-                                                    type="button"
-                                                    onClick={() => removeFromCheckout(item.id)}
-                                                    className="text-red-500 hover:text-red-700 ml-2"
-                                                >
-                                                    <AiOutlineDelete size={20} />
-                                                </button>
-                                            </div>
-                                        </motion.div>
-                                    );
-                                })}
-                            </div>
-
-                            <div className="mt-6 pt-6 border-t border-gray-200">
-                                <div className="flex justify-between items-center">
-                                    <div className="text-lg text-gray-600">Итого к оплате:</div>
-
-                                    <div className="text-3xl font-bold text-indigo-700">
-                                        {formatCurrency(total)}
-                                    </div>
-                                </div>
-
-                                {hasUnsafeMarkedCheckoutItems && (
-                                    <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
-                                        В чеке есть маркированный товар без подтверждения [M+].
-                                        Оплата заблокирована.
-                                    </div>
+                            <AnimatePresence>
+                                {searchQuery && !isSearchLoading && foundProducts.length === 0 && (
+                                    <motion.div
+                                        initial={{ opacity: 0 }}
+                                        animate={{ opacity: 1 }}
+                                        exit={{ opacity: 0 }}
+                                        className="mt-3 rounded-xl bg-gray-50 px-3 py-3 text-center text-sm font-semibold text-gray-500"
+                                    >
+                                        Товар не найден
+                                    </motion.div>
                                 )}
+                            </AnimatePresence>
 
-                                <div className="flex flex-wrap justify-end gap-3 mt-5">
-                                    <button
-                                        type="button"
-                                        onClick={holdCurrentCheckout}
-                                        className="px-6 py-2 border border-amber-300 bg-amber-50 text-amber-800 rounded-lg hover:bg-amber-100 transition-colors"
+                            <AnimatePresence>
+                                {foundProducts.length > 0 && searchQuery && (
+                                    <motion.div
+                                        initial={{ opacity: 0, height: 0 }}
+                                        animate={{ opacity: 1, height: "auto" }}
+                                        exit={{ opacity: 0, height: 0 }}
+                                        className="mt-4 max-h-[34vh] overflow-y-auto rounded-2xl border border-gray-100 bg-gray-50 p-2"
                                     >
-                                        Отложить чек
-                                    </button>
+                                        <div className="space-y-2">
+                                            {foundProducts.map((product) => {
+                                                const stock = getStock(product);
+                                                const isEmpty = stock <= 0;
+                                                const canSellNegative = canSellIntoNegativeStock(product);
+                                                const isBlockedByStock = isEmpty && !canSellNegative;
+                                                const marked = isMarkedProduct(product);
 
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setCheckoutItems([]);
-                                            setError(null);
-                                        }}
-                                        className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-                                    >
-                                        Отмена
-                                    </button>
+                                                return (
+                                                    <motion.div
+                                                        key={String(product.id)}
+                                                        whileHover={{ scale: isBlockedByStock ? 1 : 1.01 }}
+                                                        className={`rounded-2xl border p-3 shadow-sm transition-shadow ${
+                                                            isBlockedByStock
+                                                                ? "border-red-100 bg-red-50 opacity-70 cursor-not-allowed"
+                                                                : canSellNegative && isEmpty
+                                                                    ? "border-amber-100 bg-amber-50 hover:shadow-md cursor-pointer"
+                                                                    : "border-white bg-white hover:shadow-md cursor-pointer"
+                                                        }`}
+                                                        onClick={() => {
+                                                            if (!isBlockedByStock) {
+                                                                addToCheckout(product, searchQuery);
+                                                            }
+                                                        }}
+                                                    >
+                                                        <div className="flex items-start justify-between gap-3">
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="truncate font-bold text-gray-900">
+                                                                    {product.name}
+                                                                </div>
 
-                                    <button
-                                        type="button"
-                                        onClick={() => openPayment("cash")}
-                                        disabled={hasUnsafeMarkedCheckoutItems}
-                                        className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                        Наличные
-                                    </button>
+                                                                <div className="mt-1 truncate text-xs text-gray-500">
+                                                                    {product.category || "Без категории"}
+                                                                    {product.barcode
+                                                                        ? ` · ШК: ${getBarcodeDisplay(product.barcode)}`
+                                                                        : ""}
+                                                                </div>
+                                                            </div>
 
-                                    <button
-                                        type="button"
-                                        onClick={() => openPayment("transfer")}
-                                        disabled={hasUnsafeMarkedCheckoutItems}
-                                        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                        Перевод
-                                    </button>
+                                                            <button
+                                                                type="button"
+                                                                disabled={isBlockedByStock}
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
 
-                                    <button
-                                        type="button"
-                                        onClick={() => openPayment("card")}
-                                        disabled={hasUnsafeMarkedCheckoutItems}
-                                        className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                        Карта
-                                    </button>
+                                                                    if (!isBlockedByStock) {
+                                                                        addToCheckout(product, searchQuery);
+                                                                    }
+                                                                }}
+                                                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-lg font-black text-white hover:bg-indigo-700 disabled:bg-gray-200 disabled:text-gray-400"
+                                                            >
+                                                                +
+                                                            </button>
+                                                        </div>
+
+                                                        <div className="mt-3 flex items-end justify-between gap-3">
+                                                            <div>
+                                                                {marked && (
+                                                                    <div className="mb-1 inline-flex rounded-full bg-purple-100 px-2 py-0.5 text-xs font-semibold text-purple-700">
+                                                                        Маркированный
+                                                                    </div>
+                                                                )}
+
+                                                                <div
+                                                                    className={`text-xs font-semibold ${
+                                                                        isEmpty && !canSellNegative
+                                                                            ? "text-red-600"
+                                                                            : canSellNegative && isEmpty
+                                                                                ? "text-amber-700"
+                                                                                : "text-green-600"
+                                                                    }`}
+                                                                >
+                                                                    Остаток: {formatQuantity(stock, product.unit)}
+                                                                    {canSellNegative && isEmpty
+                                                                        ? " · можно в минус"
+                                                                        : ""}
+                                                                </div>
+                                                            </div>
+
+                                                            <div className="text-right">
+                                                                <div className="text-lg font-black text-indigo-700">
+                                                                    {formatCurrency(getSellingPrice(product))}
+                                                                </div>
+
+                                                                <div className="text-xs text-gray-500">
+                                                                    {getUnitPriceLabel(product)}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </motion.div>
+                                                );
+                                            })}
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+                        </div>
+
+
+                        <div className="rounded-3xl border border-indigo-100 bg-white shadow-xl">
+                            <div className="sticky top-0 z-20 rounded-t-3xl border-b border-indigo-100 bg-white/95 px-5 py-4 backdrop-blur">
+                                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                    <div>
+                                        <div className="text-xs font-black uppercase tracking-[0.16em] text-indigo-500">
+                                            Отпиканные товары
+                                        </div>
+
+                                        <h2 className="mt-1 text-2xl font-black text-gray-900">
+                                            Чек сейчас
+                                        </h2>
+
+                                        <div className="mt-1 text-sm font-semibold text-gray-500">
+                                            Последний добавленный товар показывается сверху.
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-2xl bg-indigo-50 px-5 py-3 text-right">
+                                        <div className="text-xs font-bold uppercase tracking-wide text-indigo-500">
+                                            Итого
+                                        </div>
+                                        <div className="text-3xl font-black text-indigo-700">
+                                            {formatCurrency(total)}
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    )}
 
-                    {checkoutItems.length === 0 && !searchQuery && (
-                        <div className="p-8 text-center text-gray-400">
-                            <p className="mb-2">В чеке пусто</p>
+                            {checkoutItems.length === 0 ? (
+                                <div className="flex min-h-[420px] flex-col items-center justify-center px-6 py-12 text-center text-gray-400">
+                                    <div className="text-5xl">🧾</div>
+                                    <p className="mt-4 text-xl font-bold text-gray-500">В чеке пусто</p>
+                                    <p className="mt-2 text-sm">Сканируйте штрихкод или найдите товар слева.</p>
+                                </div>
+                            ) : (
+                                <div className="max-h-[calc(100vh-420px)] overflow-y-auto p-4">
+                                    <div className="space-y-3">
+                                        {checkoutItems.slice().reverse().map((item) => {
+                                            const stock = getStock(item.product);
+                                            const marked = isMarkedProduct(item.product);
+                                            const isLatestItem = item.id === checkoutItems[checkoutItems.length - 1]?.id;
 
-                            <p className="text-sm">
-                                Сканируйте штрихкод или найдите товар по названию
-                            </p>
+                                            return (
+                                                <motion.div
+                                                    key={item.id}
+                                                    initial={{ opacity: 0, y: -10 }}
+                                                    animate={{ opacity: 1, y: 0 }}
+                                                    className={`rounded-3xl border p-4 shadow-sm transition-shadow hover:shadow-md ${
+                                                        isLatestItem
+                                                            ? "border-indigo-300 bg-indigo-50/70 ring-4 ring-indigo-100"
+                                                            : "border-gray-100 bg-white"
+                                                    }`}
+                                                >
+                                                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                {isLatestItem && (
+                                                                    <span className="rounded-full bg-indigo-600 px-2.5 py-1 text-xs font-black uppercase tracking-wide text-white">
+                                                                    последний
+                                                                </span>
+                                                                )}
+
+                                                                {marked && (
+                                                                    <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getMarkingStatusClassName(item.markingStatus)}`}>
+                                                                    [{item.markingStatus || "M"}] Маркировка
+                                                                </span>
+                                                                )}
+                                                            </div>
+
+                                                            <div className="mt-2 truncate text-xl font-black text-gray-900">
+                                                                {item.product.name}
+                                                            </div>
+
+                                                            <div className="mt-1 text-sm font-semibold text-gray-500">
+                                                                {formatCurrency(getSellingPrice(item.product))} × {formatQuantity(item.quantity, item.product.unit)}
+                                                            </div>
+
+                                                            {marked && item.markingCode && (
+                                                                <div className="mt-2 truncate text-xs font-semibold text-emerald-700">
+                                                                    КМ: {formatMarkingCodePreview(item.markingCode)}
+                                                                </div>
+                                                            )}
+
+                                                            {marked && item.markingMessage && (
+                                                                <div className="mt-1 text-xs text-gray-500">
+                                                                    {item.markingMessage}
+                                                                </div>
+                                                            )}
+
+                                                            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+                                                                {item.product.barcode && (
+                                                                    <span>ШК: {getBarcodeDisplay(item.product.barcode)}</span>
+                                                                )}
+                                                                <span>Остаток: {formatQuantity(stock, item.product.unit)}</span>
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="flex shrink-0 items-center justify-between gap-4 lg:min-w-[360px] lg:justify-end">
+                                                            <div className="flex items-center gap-1 rounded-2xl bg-gray-50 px-2 py-1">
+                                                                {marked ? (
+                                                                    <span className="rounded-xl bg-purple-50 px-3 py-2 text-sm font-black text-purple-700">
+                                                                    {formatQuantity(item.quantity, item.product.unit)}
+                                                                </span>
+                                                                ) : item.product.unit === "weight" ? (
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0.001"
+                                                                        step="0.001"
+                                                                        value={item.quantity}
+                                                                        onChange={(e) =>
+                                                                            setItemQuantity(item.id, e.target.value)
+                                                                        }
+                                                                        className="w-24 rounded-xl border border-gray-300 px-2 py-2 text-center font-bold outline-none focus:ring-2 focus:ring-indigo-500"
+                                                                    />
+                                                                ) : (
+                                                                    <>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => changeQuantity(item.id, -1)}
+                                                                            className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-500 hover:bg-white hover:text-indigo-600 disabled:opacity-30"
+                                                                            disabled={item.quantity <= 1}
+                                                                        >
+                                                                            <AiOutlineMinus />
+                                                                        </button>
+
+                                                                        <span className="w-9 text-center text-lg font-black">
+                                                                        {item.quantity}
+                                                                    </span>
+
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => changeQuantity(item.id, 1)}
+                                                                            className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-500 hover:bg-white hover:text-indigo-600 disabled:opacity-30"
+                                                                            disabled={item.quantity >= stock}
+                                                                        >
+                                                                            <AiOutlinePlus />
+                                                                        </button>
+                                                                    </>
+                                                                )}
+                                                            </div>
+
+                                                            <div className="min-w-[145px] text-right text-2xl font-black text-gray-900">
+                                                                {formatCurrency(
+                                                                    getSellingPrice(item.product) * item.quantity,
+                                                                )}
+                                                            </div>
+
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => removeFromCheckout(item.id)}
+                                                                className="flex h-11 w-11 items-center justify-center rounded-2xl bg-red-50 text-red-500 hover:bg-red-100 hover:text-red-700"
+                                                            >
+                                                                <AiOutlineDelete size={20} />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </motion.div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
                         </div>
-                    )}
+                    </section>
                 </div>
 
                 {isLoading && (
@@ -5276,6 +5434,13 @@ export default function PosPage() {
             {isAtolSetupOpen && (
                 <AtolAgentSetup onClose={() => setIsAtolSetupOpen(false)} />
             )}
+
+            <style>{`
+                @keyframes toast-progress {
+                    from { transform: scaleX(1); }
+                    to { transform: scaleX(0); }
+                }
+            `}</style>
         </div>
     );
 }
