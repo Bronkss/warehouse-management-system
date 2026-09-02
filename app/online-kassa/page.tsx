@@ -94,6 +94,11 @@ type CheckoutItem = {
     markingPackageQuantity?: number;
 };
 
+type ReturnCheckoutItem = {
+    product: Product
+    quantity: number
+}
+
 type PaymentMethod = "card" | "cash" | "transfer";
 
 type ReceiptItem = {
@@ -987,6 +992,37 @@ export default function PosPage() {
     const [isHeldReceiptsModalOpen, setIsHeldReceiptsModalOpen] = useState(false);
     const [isCheckoutStoreReady, setIsCheckoutStoreReady] = useState(false);
 
+    const [
+        isReturnModalOpen,
+        setIsReturnModalOpen,
+    ] = useState(false)
+
+    const [
+        returnSearchQuery,
+        setReturnSearchQuery,
+    ] = useState('')
+
+    const [
+        returnFoundProducts,
+        setReturnFoundProducts,
+    ] = useState<Product[]>([])
+
+    const [
+        returnItems,
+        setReturnItems,
+    ] = useState<ReturnCheckoutItem[]>([])
+
+    const [
+        returnComment,
+        setReturnComment,
+    ] = useState('')
+
+    const [
+        isReturnSaving,
+        setIsReturnSaving,
+    ] = useState(false)
+
+
     const heldCheckouts = usePosCheckoutStore((state) => state.heldCheckouts);
     const setStoredCheckoutItems = usePosCheckoutStore(
         (state) => state.setCurrentItems,
@@ -1326,6 +1362,7 @@ export default function PosPage() {
             setIsHeldReceiptsModalOpen(false);
             setLastReceipt(null);
             setIsAtolSetupOpen(false);
+            setIsReturnModalOpen(false);
         };
 
         window.addEventListener("keydown", handleEscape);
@@ -1427,7 +1464,8 @@ export default function PosPage() {
                 pendingPriceLabelPrint ||
                 pendingCommodityReceipt ||
                 isHeldReceiptsModalOpen ||
-                isAtolSetupOpen
+                isAtolSetupOpen ||
+                isReturnModalOpen
             ) {
                 return;
             }
@@ -2309,6 +2347,315 @@ export default function PosPage() {
         setPaymentModal(method);
     };
 
+    const searchReturnProduct = async () => {
+        const query =
+            returnSearchQuery.trim()
+
+        if (!query) {
+            return
+        }
+
+        try {
+            setError(null)
+
+            const products =
+                await searchProducts(query)
+
+            const exactProduct =
+                products.find(product =>
+                    hasExactBarcode(
+                        product.barcode,
+                        query
+                    )
+                )
+
+            if (exactProduct) {
+                addProductToReturn(
+                    exactProduct
+                )
+
+                return
+            }
+
+            if (products.length === 1) {
+                addProductToReturn(
+                    products[0]
+                )
+
+                return
+            }
+
+            setReturnFoundProducts(
+                products
+            )
+
+            if (products.length === 0) {
+                setError(
+                    'Товар для возврата не найден'
+                )
+            }
+        } catch (error) {
+            console.error(error)
+
+            setError(
+                error instanceof Error
+                    ? error.message
+                    : 'Ошибка поиска товара'
+            )
+        }
+    }
+
+    const addProductToReturn = (
+        product: Product
+    ) => {
+        const safeProduct =
+            normalizeProduct(product)
+
+        setReturnItems(prev => {
+            const existing =
+                prev.find(
+                    item =>
+                        String(
+                            item.product.id
+                        ) ===
+                        String(
+                            safeProduct.id
+                        )
+                )
+
+            if (existing) {
+                return prev.map(item => {
+                    if (
+                        String(
+                            item.product.id
+                        ) !==
+                        String(
+                            safeProduct.id
+                        )
+                    ) {
+                        return item
+                    }
+
+                    return {
+                        ...item,
+
+                        quantity:
+                            safeProduct.unit ===
+                            'weight'
+                                ? roundQuantity(
+                                    item.quantity +
+                                    0.001
+                                )
+                                : item.quantity +
+                                1,
+                    }
+                })
+            }
+
+            return [
+                ...prev,
+                {
+                    product:
+                    safeProduct,
+
+                    quantity:
+                        safeProduct.unit ===
+                        'weight'
+                            ? 1
+                            : 1,
+                },
+            ]
+        })
+
+        setReturnSearchQuery('')
+        setReturnFoundProducts([])
+    }
+
+    const updateReturnQuantity = (
+        productId: ProductId,
+        rawValue: string
+    ) => {
+        const value =
+            safeParseNumber(rawValue)
+
+        setReturnItems(prev =>
+            prev.map(item => {
+                if (
+                    String(
+                        item.product.id
+                    ) !==
+                    String(productId)
+                ) {
+                    return item
+                }
+
+                const quantity =
+                    item.product.unit ===
+                    'weight'
+                        ? roundQuantity(value)
+                        : Math.floor(value)
+
+                return {
+                    ...item,
+                    quantity:
+                        Math.max(
+                            item.product.unit ===
+                            'weight'
+                                ? 0.001
+                                : 1,
+                            quantity
+                        ),
+                }
+            })
+        )
+    }
+
+    const removeReturnItem = (
+        productId: ProductId
+    ) => {
+        setReturnItems(prev =>
+            prev.filter(
+                item =>
+                    String(
+                        item.product.id
+                    ) !==
+                    String(productId)
+            )
+        )
+    }
+
+    const submitProductReturn =
+        async () => {
+            if (
+                returnItems.length === 0
+            ) {
+                setError(
+                    'Добавьте товар для возврата'
+                )
+
+                return
+            }
+
+            const invalidItem =
+                returnItems.find(
+                    item =>
+                        !Number.isFinite(
+                            item.quantity
+                        ) ||
+                        item.quantity <= 0
+                )
+
+            if (invalidItem) {
+                setError(
+                    `Некорректное количество: ${invalidItem.product.name}`
+                )
+
+                return
+            }
+
+            try {
+                setIsReturnSaving(true)
+
+                setError(null)
+                setNotice(null)
+
+                const response =
+                    await fetch(
+                        '/api/returns',
+                        {
+                            method: 'POST',
+
+                            headers: {
+                                'Content-Type':
+                                    'application/json',
+
+                                ...getLocationHeaders(),
+                            },
+
+                            body:
+                                JSON.stringify({
+                                    items:
+                                        returnItems.map(
+                                            item => ({
+                                                productId:
+                                                item
+                                                    .product
+                                                    .id,
+
+                                                quantity:
+                                                item
+                                                    .quantity,
+                                            })
+                                        ),
+
+                                    comment:
+                                    returnComment,
+                                }),
+                        }
+                    )
+
+                const data =
+                    await readJsonSafe<{
+                        ok?: boolean
+                        message?: string
+
+                        location?: {
+                            name?: string
+                        }
+                    } & ApiError>(
+                        response
+                    )
+
+                if (!response.ok) {
+                    throw new Error(
+                        data?.message ||
+                        'Не удалось провести возврат'
+                    )
+                }
+
+                /*
+                 * Получаем свежие остатки
+                 * текущей зоны.
+                 */
+                await refreshProducts()
+
+                setReturnItems([])
+                setReturnSearchQuery('')
+                setReturnFoundProducts([])
+                setReturnComment('')
+
+                setIsReturnModalOpen(false)
+
+                setNotice(
+                    `Возврат проведён. Товар возвращён на остаток зоны «${
+                        data?.location
+                            ?.name ||
+                        warehouseLocationName
+                    }»`
+                )
+
+                requestAnimationFrame(
+                    () => {
+                        searchInputRef.current
+                            ?.focus()
+                    }
+                )
+            } catch (error) {
+                console.error(
+                    'Return error:',
+                    error
+                )
+
+                setError(
+                    error instanceof Error
+                        ? error.message
+                        : 'Ошибка возврата товара'
+                )
+            } finally {
+                setIsReturnSaving(false)
+            }
+        }
+
     const buildCommodityReceiptHtml = (receipt: Receipt): string => {
         const organizationName = "ИП БАРАНОВА ЛЮДМИЛА ВЛАДИМИРОВНА";
         const organizationInn = "383802146665";
@@ -2739,7 +3086,7 @@ export default function PosPage() {
         };
 
         const formatPriceForLabel = (value: number): string => {
-            const rounded = Math.ceil(value);
+            const rounded = Math.round(value);
 
             return new Intl.NumberFormat("ru-RU", {
                 maximumFractionDigits: 0,
@@ -2941,7 +3288,7 @@ export default function PosPage() {
 
     const buildThermalPriceLabelsHtml = (products: Product[]): string => {
         const formatPriceForLabel = (value: number): string => {
-            const rounded = Math.ceil(value);
+            const rounded = Math.round(value);
 
             return new Intl.NumberFormat("ru-RU", {
                 maximumFractionDigits: 0,
@@ -3263,17 +3610,21 @@ export default function PosPage() {
     }
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
+        <div
+            className="min-h-dvh bg-gradient-to-br from-blue-50 to-indigo-50 p-4 xl:h-dvh xl:min-h-0 xl:overflow-hidden">
             {isCheckingMarking && backgroundMarkingCheck && (
                 <div
                     className="pointer-events-none fixed inset-x-0 top-4 z-[430] flex justify-center px-4"
                     role="status"
                     aria-live="polite"
                 >
-                    <div className="pointer-events-auto w-full max-w-2xl rounded-3xl border border-purple-200 bg-white p-4 shadow-2xl ring-4 ring-purple-100">
+                    <div
+                        className="pointer-events-auto w-full max-w-2xl rounded-3xl border border-purple-200 bg-white p-4 shadow-2xl ring-4 ring-purple-100">
                         <div className="flex items-center gap-4">
-                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-purple-50">
-                                <div className="h-7 w-7 animate-spin rounded-full border-4 border-purple-200 border-t-purple-600" />
+                            <div
+                                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-purple-50">
+                                <div
+                                    className="h-7 w-7 animate-spin rounded-full border-4 border-purple-200 border-t-purple-600"/>
                             </div>
 
                             <div className="min-w-0 flex-1">
@@ -3294,7 +3645,8 @@ export default function PosPage() {
                                 </div>
                             </div>
 
-                            <div className="hidden max-w-[180px] shrink-0 rounded-2xl bg-purple-50 px-3 py-2 text-right text-xs font-bold text-purple-700 sm:block">
+                            <div
+                                className="hidden max-w-[180px] shrink-0 rounded-2xl bg-purple-50 px-3 py-2 text-right text-xs font-bold text-purple-700 sm:block">
                                 КМ: {backgroundMarkingCheck.codePreview}
                             </div>
                         </div>
@@ -3303,11 +3655,14 @@ export default function PosPage() {
             )}
 
             {isDeliveryAlertOpen && deliveryAlerts.length > 0 && (
-                <div className="fixed inset-0 z-[400] flex items-start justify-center bg-black/25 px-4 py-4 pointer-events-none">
-                    <div className="mt-4 w-full max-w-xl rounded-3xl border border-blue-200 bg-white p-5 shadow-2xl pointer-events-auto">
+                <div
+                    className="fixed inset-0 z-[400] flex items-start justify-center bg-black/25 px-4 py-4 pointer-events-none">
+                    <div
+                        className="mt-4 w-full max-w-xl rounded-3xl border border-blue-200 bg-white p-5 shadow-2xl pointer-events-auto">
                         <div className="flex items-start justify-between gap-4">
                             <div>
-                                <div className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-bold uppercase tracking-wide text-blue-700">
+                                <div
+                                    className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-bold uppercase tracking-wide text-blue-700">
                                     Новая доставка
                                 </div>
 
@@ -3373,17 +3728,19 @@ export default function PosPage() {
                 </div>
             )}
             {(error || notice) && (
-                <div className="fixed right-4 top-4 z-[9999] flex w-[calc(100vw-32px)] max-w-md flex-col gap-3 pointer-events-none">
+                <div
+                    className="fixed right-4 top-4 z-[9999] flex w-[calc(100vw-32px)] max-w-md flex-col gap-3 pointer-events-none">
                     {error && (
                         <motion.div
-                            initial={{ opacity: 0, x: 24, y: -8 }}
-                            animate={{ opacity: 1, x: 0, y: 0 }}
-                            exit={{ opacity: 0, x: 24 }}
+                            initial={{opacity: 0, x: 24, y: -8}}
+                            animate={{opacity: 1, x: 0, y: 0}}
+                            exit={{opacity: 0, x: 24}}
                             className="pointer-events-auto rounded-3xl border border-red-200 bg-white p-4 shadow-2xl ring-4 ring-red-50"
                             role="alert"
                         >
                             <div className="flex items-start gap-3">
-                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-red-100 text-xl font-black text-red-700">
+                                <div
+                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-red-100 text-xl font-black text-red-700">
                                     !
                                 </div>
 
@@ -3411,7 +3768,7 @@ export default function PosPage() {
                                 <div
                                     key={error}
                                     className="h-full origin-left rounded-full bg-red-500"
-                                    style={{ animation: `toast-progress ${TOAST_AUTO_CLOSE_MS}ms linear forwards` }}
+                                    style={{animation: `toast-progress ${TOAST_AUTO_CLOSE_MS}ms linear forwards`}}
                                 />
                             </div>
                         </motion.div>
@@ -3419,14 +3776,15 @@ export default function PosPage() {
 
                     {notice && (
                         <motion.div
-                            initial={{ opacity: 0, x: 24, y: -8 }}
-                            animate={{ opacity: 1, x: 0, y: 0 }}
-                            exit={{ opacity: 0, x: 24 }}
+                            initial={{opacity: 0, x: 24, y: -8}}
+                            animate={{opacity: 1, x: 0, y: 0}}
+                            exit={{opacity: 0, x: 24}}
                             className="pointer-events-auto rounded-3xl border border-emerald-200 bg-white p-4 shadow-2xl ring-4 ring-emerald-50"
                             role="status"
                         >
                             <div className="flex items-start gap-3">
-                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-xl font-black text-emerald-700">
+                                <div
+                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-xl font-black text-emerald-700">
                                     ✓
                                 </div>
 
@@ -3454,7 +3812,7 @@ export default function PosPage() {
                                 <div
                                     key={notice}
                                     className="h-full origin-left rounded-full bg-emerald-500"
-                                    style={{ animation: `toast-progress ${TOAST_AUTO_CLOSE_MS}ms linear forwards` }}
+                                    style={{animation: `toast-progress ${TOAST_AUTO_CLOSE_MS}ms linear forwards`}}
                                 />
                             </div>
                         </motion.div>
@@ -3462,9 +3820,10 @@ export default function PosPage() {
                 </div>
             )}
 
-            <div className="mx-auto max-w-[1560px]">
-                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[360px_minmax(0,1fr)] xl:items-start">
-                    <aside className="space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-32px)] xl:overflow-y-auto xl:pr-1">
+            <div className="mx-auto max-w-[1560px] xl:h-full xl:min-h-0">
+                <div
+                    className="grid grid-cols-1 gap-4 xl:h-full xl:min-h-0 xl:grid-cols-[360px_minmax(0,1fr)] xl:items-stretch">
+                    <aside className="space-y-4 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:pr-2">
                         <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl">
                             <button
                                 type="button"
@@ -3475,9 +3834,11 @@ export default function PosPage() {
                                 Вернуться в склад
                             </button>
 
-                            <div className="mt-3 rounded-2xl bg-indigo-50 px-4 py-3 text-xs font-black leading-5 text-indigo-700">
+                            <div
+                                className="mt-3 rounded-2xl bg-indigo-50 px-4 py-3 text-xs font-black leading-5 text-indigo-700">
                                 <div>Текущая зона: {warehouseLocationName}</div>
-                                <div className="mt-0.5 text-indigo-500">{warehouseLocationSlug} · Кассир: {warehouseUserName}</div>
+                                <div className="mt-0.5 text-indigo-500">{warehouseLocationSlug} ·
+                                    Кассир: {warehouseUserName}</div>
                             </div>
                         </div>
                         <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl">
@@ -3491,7 +3852,8 @@ export default function PosPage() {
                             </div>
 
                             {hasUnsafeMarkedCheckoutItems && (
-                                <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
+                                <div
+                                    className="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
                                     В чеке есть маркированный товар без подтверждения [M+]. Оплата заблокирована.
                                 </div>
                             )}
@@ -3606,7 +3968,7 @@ export default function PosPage() {
                                     disabled={isShiftActionLoading}
                                     className="rounded-2xl border border-gray-300 bg-white px-4 py-3 text-sm font-black text-gray-800 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
                                 >
-                                    Копия ККТ
+                                    Последний чек
                                 </button>
 
                                 <button
@@ -3658,11 +4020,27 @@ export default function PosPage() {
                             <div className="mt-4 grid grid-cols-1 gap-2">
                                 <button
                                     type="button"
+                                    onClick={() => {
+                                        setReturnItems([])
+                                        setReturnSearchQuery('')
+                                        setReturnFoundProducts([])
+                                        setReturnComment('')
+                                        setError(null)
+
+                                        setIsReturnModalOpen(true)
+                                    }}
+                                    className="rounded-xl border border-orange-300 bg-orange-50 px-4 py-3 text-sm font-bold text-orange-800 hover:bg-orange-100"
+                                >
+                                    Возврат товара
+                                </button>
+
+                                <button
+                                    type="button"
                                     onClick={openPriceLabelModal}
                                     disabled={isRefreshingLabels}
                                     className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
                                 >
-                                    <AiOutlinePrinter size={20} />
+                                    <AiOutlinePrinter size={20}/>
                                     {isRefreshingLabels
                                         ? "Обновляю цены..."
                                         : "Печать ценников"}
@@ -3678,13 +4056,15 @@ export default function PosPage() {
                             </div>
 
                             <div className="mt-3 text-xs leading-5 text-gray-500">
-                                Цены и штрихкоды берутся из актуальной базы. Текущий чек сохраняется после обновления страницы.
+                                Цены и штрихкоды берутся из актуальной базы. Текущий чек сохраняется после обновления
+                                страницы.
                             </div>
                         </div>
                     </aside>
 
-                    <section className="min-w-0 space-y-4">
-                        <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl">
+                    <section
+                        className="min-w-0 space-y-4 xl:flex xl:h-full xl:min-h-0 xl:flex-col xl:space-y-0 xl:gap-4">
+                        <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl xl:shrink-0">
                             <div className="mb-4">
                                 <div className="text-xs font-black uppercase tracking-[0.16em] text-indigo-500">
                                     Сканер товара
@@ -3697,7 +4077,7 @@ export default function PosPage() {
 
                             <div className="relative">
                                 <div className="absolute left-3 top-3 text-gray-400">
-                                    <AiOutlineScan size={25} />
+                                    <AiOutlineScan size={25}/>
                                 </div>
 
                                 <input
@@ -3727,12 +4107,13 @@ export default function PosPage() {
                             </div>
 
                             <div className="mt-3 flex items-start gap-2 text-xs font-semibold leading-5 text-gray-500">
-                                <AiOutlineSearch className="mt-0.5 shrink-0" />
+                                <AiOutlineSearch className="mt-0.5 shrink-0"/>
                                 <span>Enter добавляет товар. Весовой товар откроет окно ввода веса.</span>
                             </div>
 
                             {isSearchLoading && (
-                                <div className="mt-3 rounded-xl bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700">
+                                <div
+                                    className="mt-3 rounded-xl bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700">
                                     Идёт поиск товара...
                                 </div>
                             )}
@@ -3740,9 +4121,9 @@ export default function PosPage() {
                             <AnimatePresence>
                                 {searchQuery && !isSearchLoading && foundProducts.length === 0 && (
                                     <motion.div
-                                        initial={{ opacity: 0 }}
-                                        animate={{ opacity: 1 }}
-                                        exit={{ opacity: 0 }}
+                                        initial={{opacity: 0}}
+                                        animate={{opacity: 1}}
+                                        exit={{opacity: 0}}
                                         className="mt-3 rounded-xl bg-gray-50 px-3 py-3 text-center text-sm font-semibold text-gray-500"
                                     >
                                         Товар не найден
@@ -3753,9 +4134,9 @@ export default function PosPage() {
                             <AnimatePresence>
                                 {foundProducts.length > 0 && searchQuery && (
                                     <motion.div
-                                        initial={{ opacity: 0, height: 0 }}
-                                        animate={{ opacity: 1, height: "auto" }}
-                                        exit={{ opacity: 0, height: 0 }}
+                                        initial={{opacity: 0, height: 0}}
+                                        animate={{opacity: 1, height: "auto"}}
+                                        exit={{opacity: 0, height: 0}}
                                         className="mt-4 max-h-[34vh] overflow-y-auto rounded-2xl border border-gray-100 bg-gray-50 p-2"
                                     >
                                         <div className="space-y-2">
@@ -3769,7 +4150,7 @@ export default function PosPage() {
                                                 return (
                                                     <motion.div
                                                         key={String(product.id)}
-                                                        whileHover={{ scale: isBlockedByStock ? 1 : 1.01 }}
+                                                        whileHover={{scale: isBlockedByStock ? 1 : 1.01}}
                                                         className={`rounded-2xl border p-3 shadow-sm transition-shadow ${
                                                             isBlockedByStock
                                                                 ? "border-red-100 bg-red-50 opacity-70 cursor-not-allowed"
@@ -3816,7 +4197,8 @@ export default function PosPage() {
                                                         <div className="mt-3 flex items-end justify-between gap-3">
                                                             <div>
                                                                 {marked && (
-                                                                    <div className="mb-1 inline-flex rounded-full bg-purple-100 px-2 py-0.5 text-xs font-semibold text-purple-700">
+                                                                    <div
+                                                                        className="mb-1 inline-flex rounded-full bg-purple-100 px-2 py-0.5 text-xs font-semibold text-purple-700">
                                                                         Маркированный
                                                                     </div>
                                                                 )}
@@ -3857,12 +4239,13 @@ export default function PosPage() {
                         </div>
 
 
-                        <div className="rounded-3xl border border-indigo-100 bg-white shadow-xl">
-                            <div className="sticky top-0 z-20 rounded-t-3xl border-b border-indigo-100 bg-white/95 px-5 py-4 backdrop-blur">
+                        <div className="rounded-3xl border border-indigo-100 bg-white shadow-xl xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:overflow-hidden">
+                            <div
+                                className="sticky top-0 z-20 rounded-t-3xl border-b border-indigo-100 bg-white/95 px-5 py-4 backdrop-blur">
                                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                     <div>
                                         <div className="text-xs font-black uppercase tracking-[0.16em] text-indigo-500">
-                                            Отпиканные товары
+                                            Отпиканые товары
                                         </div>
 
                                         <h2 className="mt-1 text-2xl font-black text-gray-900">
@@ -3886,13 +4269,14 @@ export default function PosPage() {
                             </div>
 
                             {checkoutItems.length === 0 ? (
-                                <div className="flex min-h-[420px] flex-col items-center justify-center px-6 py-12 text-center text-gray-400">
+                                <div
+                                    className="flex min-h-[420px] flex-col items-center justify-center px-6 py-12 text-center text-gray-400">
                                     <div className="text-5xl">🧾</div>
                                     <p className="mt-4 text-xl font-bold text-gray-500">В чеке пусто</p>
                                     <p className="mt-2 text-sm">Сканируйте штрихкод или найдите товар слева.</p>
                                 </div>
                             ) : (
-                                <div className="max-h-[calc(100vh-420px)] overflow-y-auto p-4">
+                                <div className="max-h-[calc(100vh-360px)] overflow-y-auto p-4">
                                     <div className="space-y-3">
                                         {checkoutItems.slice().reverse().map((item) => {
                                             const stock = getStock(item.product);
@@ -3902,31 +4286,35 @@ export default function PosPage() {
                                             return (
                                                 <motion.div
                                                     key={item.id}
-                                                    initial={{ opacity: 0, y: -10 }}
-                                                    animate={{ opacity: 1, y: 0 }}
+                                                    initial={{opacity: 0, y: -10}}
+                                                    animate={{opacity: 1, y: 0}}
                                                     className={`rounded-3xl border p-4 shadow-sm transition-shadow hover:shadow-md ${
                                                         isLatestItem
                                                             ? "border-indigo-300 bg-indigo-50/70 ring-4 ring-indigo-100"
                                                             : "border-gray-100 bg-white"
                                                     }`}
                                                 >
-                                                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                                                    <div
+                                                        className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                                                         <div className="min-w-0 flex-1">
                                                             <div className="flex flex-wrap items-center gap-2">
                                                                 {isLatestItem && (
-                                                                    <span className="rounded-full bg-indigo-600 px-2.5 py-1 text-xs font-black uppercase tracking-wide text-white">
+                                                                    <span
+                                                                        className="rounded-full bg-indigo-600 px-2.5 py-1 text-xs font-black uppercase tracking-wide text-white">
                                                                     последний
                                                                 </span>
                                                                 )}
 
                                                                 {marked && (
-                                                                    <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getMarkingStatusClassName(item.markingStatus)}`}>
+                                                                    <span
+                                                                        className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getMarkingStatusClassName(item.markingStatus)}`}>
                                                                     [{item.markingStatus || "M"}] Маркировка
                                                                 </span>
                                                                 )}
                                                             </div>
 
-                                                            <div className="mt-2 truncate text-xl font-black text-gray-900">
+                                                            <div
+                                                                className="mt-2 truncate text-xl font-black text-gray-900">
                                                                 {item.product.name}
                                                             </div>
 
@@ -3935,7 +4323,8 @@ export default function PosPage() {
                                                             </div>
 
                                                             {marked && item.markingCode && (
-                                                                <div className="mt-2 truncate text-xs font-semibold text-emerald-700">
+                                                                <div
+                                                                    className="mt-2 truncate text-xs font-semibold text-emerald-700">
                                                                     КМ: {formatMarkingCodePreview(item.markingCode)}
                                                                 </div>
                                                             )}
@@ -3946,7 +4335,8 @@ export default function PosPage() {
                                                                 </div>
                                                             )}
 
-                                                            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+                                                            <div
+                                                                className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
                                                                 {item.product.barcode && (
                                                                     <span>ШК: {getBarcodeDisplay(item.product.barcode)}</span>
                                                                 )}
@@ -3954,10 +4344,13 @@ export default function PosPage() {
                                                             </div>
                                                         </div>
 
-                                                        <div className="flex shrink-0 items-center justify-between gap-4 lg:min-w-[360px] lg:justify-end">
-                                                            <div className="flex items-center gap-1 rounded-2xl bg-gray-50 px-2 py-1">
+                                                        <div
+                                                            className="flex shrink-0 items-center justify-between gap-4 lg:min-w-[360px] lg:justify-end">
+                                                            <div
+                                                                className="flex items-center gap-1 rounded-2xl bg-gray-50 px-2 py-1">
                                                                 {marked ? (
-                                                                    <span className="rounded-xl bg-purple-50 px-3 py-2 text-sm font-black text-purple-700">
+                                                                    <span
+                                                                        className="rounded-xl bg-purple-50 px-3 py-2 text-sm font-black text-purple-700">
                                                                     {formatQuantity(item.quantity, item.product.unit)}
                                                                 </span>
                                                                 ) : item.product.unit === "weight" ? (
@@ -3979,10 +4372,11 @@ export default function PosPage() {
                                                                             className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-500 hover:bg-white hover:text-indigo-600 disabled:opacity-30"
                                                                             disabled={item.quantity <= 1}
                                                                         >
-                                                                            <AiOutlineMinus />
+                                                                            <AiOutlineMinus/>
                                                                         </button>
 
-                                                                        <span className="w-9 text-center text-lg font-black">
+                                                                        <span
+                                                                            className="w-9 text-center text-lg font-black">
                                                                         {item.quantity}
                                                                     </span>
 
@@ -3992,13 +4386,14 @@ export default function PosPage() {
                                                                             className="flex h-9 w-9 items-center justify-center rounded-xl text-gray-500 hover:bg-white hover:text-indigo-600 disabled:opacity-30"
                                                                             disabled={item.quantity >= stock}
                                                                         >
-                                                                            <AiOutlinePlus />
+                                                                            <AiOutlinePlus/>
                                                                         </button>
                                                                     </>
                                                                 )}
                                                             </div>
 
-                                                            <div className="min-w-[145px] text-right text-2xl font-black text-gray-900">
+                                                            <div
+                                                                className="min-w-[145px] text-right text-2xl font-black text-gray-900">
                                                                 {formatCurrency(
                                                                     getSellingPrice(item.product) * item.quantity,
                                                                 )}
@@ -4009,7 +4404,7 @@ export default function PosPage() {
                                                                 onClick={() => removeFromCheckout(item.id)}
                                                                 className="flex h-11 w-11 items-center justify-center rounded-2xl bg-red-50 text-red-500 hover:bg-red-100 hover:text-red-700"
                                                             >
-                                                                <AiOutlineDelete size={20} />
+                                                                <AiOutlineDelete size={20}/>
                                                             </button>
                                                         </div>
                                                     </div>
@@ -4036,13 +4431,14 @@ export default function PosPage() {
                         onClick={() => setPendingPriceLabelPrint(null)}
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-lg rounded-3xl border-4 border-amber-400 bg-white p-6 shadow-2xl"
                         >
-                            <div className="mb-4 inline-flex rounded-full bg-amber-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-amber-800">
+                            <div
+                                className="mb-4 inline-flex rounded-full bg-amber-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-amber-800">
                                 XPrinter · проверка ленты
                             </div>
 
@@ -4050,7 +4446,8 @@ export default function PosPage() {
                                 Перед печатью ценников
                             </h2>
 
-                            <div className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-center text-xl font-black leading-8 text-amber-900">
+                            <div
+                                className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-center text-xl font-black leading-8 text-amber-900">
                                 ПРОВЕРЬ ЧТО В xPRINTER СТОИТ ЛЕНТА ДЛЯ ЦЕННИКОВ С КЛЕЙКОЙ ОСНОВОЙ!!
                             </div>
 
@@ -4086,15 +4483,16 @@ export default function PosPage() {
                         onClick={closeCommodityReceiptPrintModal}
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"
                         >
                             {commodityReceiptPrintStep === "ask" ? (
                                 <>
-                                    <div className="mb-4 inline-flex rounded-full bg-blue-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-blue-800">
+                                    <div
+                                        className="mb-4 inline-flex rounded-full bg-blue-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-blue-800">
                                         Нефискальный чек
                                     </div>
 
@@ -4108,7 +4506,8 @@ export default function PosPage() {
                                             {formatCurrency(pendingCommodityReceipt.total)}
                                         </div>
                                         <div className="mt-2 text-sm text-gray-500">
-                                            Продажа уже сохранена без фискализации. Печать товарного чека можно пропустить.
+                                            Продажа уже сохранена без фискализации. Печать товарного чека можно
+                                            пропустить.
                                         </div>
                                     </div>
 
@@ -4134,7 +4533,8 @@ export default function PosPage() {
                                 </>
                             ) : (
                                 <>
-                                    <div className="mb-4 inline-flex rounded-full bg-amber-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-amber-800">
+                                    <div
+                                        className="mb-4 inline-flex rounded-full bg-amber-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-amber-800">
                                         XPrinter · проверка ленты
                                     </div>
 
@@ -4142,12 +4542,14 @@ export default function PosPage() {
                                         Перед печатью товарного чека
                                     </h2>
 
-                                    <div className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-center text-xl font-black leading-8 text-amber-900">
+                                    <div
+                                        className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-center text-xl font-black leading-8 text-amber-900">
                                         ПРОВЕРЬ ЧТО В xPRINTER СТОИТ ЛЕНТА ДЛЯ ЧЕКОВ!!
                                     </div>
 
                                     <p className="mt-4 text-sm leading-6 text-gray-600">
-                                        Если в принтере стоит клейкая лента для ценников, товарный чек напечатается на этикетках.
+                                        Если в принтере стоит клейкая лента для ценников, товарный чек напечатается на
+                                        этикетках.
                                     </p>
 
                                     <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
@@ -4185,9 +4587,9 @@ export default function PosPage() {
                         }}
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
                         >
@@ -4214,7 +4616,8 @@ export default function PosPage() {
 
                                 <div className="mt-1 leading-5">
                                     Режим определяется автоматически по отсканированному штрихкоду товара.
-                                    Сейчас нужно отсканировать DataMatrix с {markingPackageMode === "block" ? "блока" : "пачки"}.
+                                    Сейчас нужно отсканировать DataMatrix
+                                    с {markingPackageMode === "block" ? "блока" : "пачки"}.
                                     Проверка Честного ЗНАКа будет выполнена строго в фоне, как для обычной пачки.
                                 </div>
                             </div>
@@ -4247,7 +4650,8 @@ export default function PosPage() {
                             />
 
                             {isCheckingMarking && (
-                                <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700">
+                                <div
+                                    className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700">
                                     Проверяю код маркировки в ККТ / Честном ЗНАКе...
                                 </div>
                             )}
@@ -4284,8 +4688,10 @@ export default function PosPage() {
                                 </div>
 
                                 {markingPackageMode === "block" && (
-                                    <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">
-                                        {formatCurrency(getSellingPrice(markingModalProduct))} × {CIGARETTE_BLOCK_QUANTITY} шт. = {formatCurrency(getMarkingPackageTotalPrice(markingModalProduct, "block"))}
+                                    <div
+                                        className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">
+                                        {formatCurrency(getSellingPrice(markingModalProduct))} × {CIGARETTE_BLOCK_QUANTITY} шт.
+                                        = {formatCurrency(getMarkingPackageTotalPrice(markingModalProduct, "block"))}
                                     </div>
                                 )}
 
@@ -4345,9 +4751,9 @@ export default function PosPage() {
                         }}
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                         >
@@ -4371,7 +4777,8 @@ export default function PosPage() {
                                     {formatQuantity(getStock(weightModalProduct), "weight")}
                                 </div>
 
-                                <div className="mt-2 rounded-lg bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-800">
+                                <div
+                                    className="mt-2 rounded-lg bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-800">
                                     Для весового товара разрешён минусовой остаток из-за
                                     погрешности веса.
                                 </div>
@@ -4465,9 +4872,9 @@ export default function PosPage() {
                         onClick={() => setIsPriceLabelModalOpen(false)}
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             onClick={(e) => e.stopPropagation()}
                             className="flex max-h-[92vh] w-full max-w-6xl flex-col rounded-2xl bg-white shadow-2xl overflow-hidden"
                         >
@@ -4494,7 +4901,8 @@ export default function PosPage() {
                                     </button>
                                 </div>
 
-                                <div className="mt-5 grid grid-cols-1 gap-3 xl:grid-cols-[minmax(280px,1fr)_260px_auto_auto_auto]">
+                                <div
+                                    className="mt-5 grid grid-cols-1 gap-3 xl:grid-cols-[minmax(280px,1fr)_260px_auto_auto_auto]">
                                     <input
                                         type="text"
                                         value={priceLabelSearch}
@@ -4691,7 +5099,7 @@ export default function PosPage() {
                                     <div className="rounded-2xl border border-indigo-100 bg-white p-4 shadow-sm">
                                         <div className="flex items-start gap-3">
                                             <div className="rounded-xl bg-indigo-50 p-2 text-indigo-600">
-                                                <AiOutlinePrinter size={22} />
+                                                <AiOutlinePrinter size={22}/>
                                             </div>
 
                                             <div>
@@ -4744,7 +5152,7 @@ export default function PosPage() {
                                     <div className="rounded-2xl border border-emerald-100 bg-white p-4 shadow-sm">
                                         <div className="flex items-start gap-3">
                                             <div className="rounded-xl bg-emerald-50 p-2 text-emerald-600">
-                                                <AiOutlinePrinter size={22} />
+                                                <AiOutlinePrinter size={22}/>
                                             </div>
 
                                             <div>
@@ -4808,9 +5216,9 @@ export default function PosPage() {
                         onClick={() => setIsHeldReceiptsModalOpen(false)}
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             onClick={(e) => e.stopPropagation()}
                             className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
                         >
@@ -4864,7 +5272,8 @@ export default function PosPage() {
                                                     key={held.id}
                                                     className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm"
                                                 >
-                                                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                                    <div
+                                                        className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                                                         <div className="min-w-0">
                                                             <div className="font-bold text-gray-900">
                                                                 {title}
@@ -4908,7 +5317,8 @@ export default function PosPage() {
                                                                 {formatCurrency(heldTotal)}
                                                             </div>
 
-                                                            <div className="mt-3 flex flex-wrap justify-start gap-2 sm:justify-end">
+                                                            <div
+                                                                className="mt-3 flex flex-wrap justify-start gap-2 sm:justify-end">
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => restoreHeldCheckout(held)}
@@ -4943,9 +5353,9 @@ export default function PosPage() {
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                         >
                             <h2 className="text-2xl font-bold text-gray-800 mb-4">
@@ -4997,9 +5407,9 @@ export default function PosPage() {
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                         >
                             <h2 className="mb-4 text-2xl font-bold text-gray-800">
@@ -5016,7 +5426,8 @@ export default function PosPage() {
                                 </div>
 
                                 {hasMarkedCheckoutItems && (
-                                    <div className="mt-3 rounded-lg bg-white/70 px-3 py-2 text-sm font-semibold text-emerald-800">
+                                    <div
+                                        className="mt-3 rounded-lg bg-white/70 px-3 py-2 text-sm font-semibold text-emerald-800">
                                         В чеке есть маркированный товар — чек будет пробит на ККТ.
                                     </div>
                                 )}
@@ -5136,9 +5547,9 @@ export default function PosPage() {
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                         >
                             <h2 className="text-2xl font-bold text-gray-800 mb-4">
@@ -5193,9 +5604,9 @@ export default function PosPage() {
                             className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-4"
                         >
                             <motion.div
-                                initial={{ opacity: 0, scale: 0.96 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                exit={{ opacity: 0, scale: 0.96 }}
+                                initial={{opacity: 0, scale: 0.96}}
+                                animate={{opacity: 1, scale: 1}}
+                                exit={{opacity: 0, scale: 0.96}}
                                 className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
                             >
                                 <h2 className="text-2xl font-bold text-gray-800 mb-4">
@@ -5219,7 +5630,8 @@ export default function PosPage() {
                                     </div>
 
                                     {paymentModal === "cash" && (
-                                        <div className="mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                                        <div
+                                            className="mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
                                             <div className="flex justify-between">
                                                 <span>Получено:</span>
                                                 <span className="font-bold">
@@ -5294,9 +5706,9 @@ export default function PosPage() {
                         onClick={clearReceipt}
                     >
                         <motion.div
-                            initial={{ opacity: 0, scale: 0.96 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.96 }}
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
                             onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
                         >
@@ -5310,7 +5722,8 @@ export default function PosPage() {
                             </div>
 
                             {lastReceipt.fiscalStatus === "success" && (
-                                <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                                <div
+                                    className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
                                     Чек успешно пробит на ККТ
                                     {lastReceipt.fiscalUuid && (
                                         <div className="mt-1 text-xs text-emerald-600">
@@ -5321,7 +5734,8 @@ export default function PosPage() {
                             )}
 
                             {lastReceipt.fiscalStatus === "skipped" && (
-                                <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                                <div
+                                    className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
                                     Продажа сохранена без фискализации на ККТ
                                 </div>
                             )}
@@ -5429,10 +5843,342 @@ export default function PosPage() {
                         </motion.div>
                     </div>
                 )}
+
+                {isReturnModalOpen && (
+                    <div
+                        key="return-product-modal"
+                        className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 px-4"
+                        onClick={() => {
+                            if (!isReturnSaving) {
+                                setIsReturnModalOpen(false)
+                            }
+                        }}
+                    >
+                        <motion.div
+                            initial={{
+                                opacity: 0,
+                                scale: 0.96,
+                            }}
+                            animate={{
+                                opacity: 1,
+                                scale: 1,
+                            }}
+                            exit={{
+                                opacity: 0,
+                                scale: 0.96,
+                            }}
+                            onClick={event =>
+                                event.stopPropagation()
+                            }
+                            className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl"
+                        >
+                            <div className="border-b border-gray-100 p-6">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <div
+                                            className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-black uppercase tracking-[0.15em] text-orange-800">
+                                            Возврат
+                                        </div>
+
+                                        <h2 className="mt-2 text-2xl font-black text-gray-900">
+                                            Возврат товара
+                                        </h2>
+
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Возвращаемый товар поступит на остаток текущей зоны.
+                                        </p>
+
+                                        <div
+                                            className="mt-3 inline-flex rounded-xl bg-indigo-50 px-3 py-2 text-sm font-bold text-indigo-700">
+                                            Зона: {warehouseLocationName}
+                                        </div>
+                                    </div>
+
+                                    <button
+                                        type="button"
+                                        disabled={
+                                            isReturnSaving
+                                        }
+                                        onClick={() =>
+                                            setIsReturnModalOpen(
+                                                false
+                                            )
+                                        }
+                                        className="text-2xl text-gray-400 hover:text-gray-700 disabled:opacity-40"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+
+                                <div className="mt-5">
+                                    <input
+                                        type="text"
+                                        autoFocus
+                                        value={
+                                            returnSearchQuery
+                                        }
+                                        onChange={event => {
+                                            setReturnSearchQuery(
+                                                event.target
+                                                    .value
+                                            )
+
+                                            setReturnFoundProducts(
+                                                []
+                                            )
+                                        }}
+                                        onKeyDown={event => {
+                                            if (
+                                                event.key ===
+                                                'Enter'
+                                            ) {
+                                                event.preventDefault()
+
+                                                void searchReturnProduct()
+                                            }
+                                        }}
+                                        placeholder="Сканируйте штрихкод или введите название товара..."
+                                        className="w-full rounded-2xl border border-gray-300 px-4 py-3 text-lg font-semibold outline-none focus:ring-2 focus:ring-orange-500"
+                                    />
+                                </div>
+
+                                {returnFoundProducts.length >
+                                    0 && (
+                                        <div
+                                            className="mt-3 max-h-48 overflow-y-auto rounded-2xl border border-gray-200 bg-gray-50 p-2">
+                                            {returnFoundProducts.map(
+                                                product => (
+                                                    <button
+                                                        key={String(
+                                                            product.id
+                                                        )}
+                                                        type="button"
+                                                        onClick={() =>
+                                                            addProductToReturn(
+                                                                product
+                                                            )
+                                                        }
+                                                        className="mb-1 flex w-full items-center justify-between rounded-xl bg-white px-4 py-3 text-left hover:bg-orange-50"
+                                                    >
+                                                        <div>
+                                                            <div className="font-bold text-gray-900">
+                                                                {
+                                                                    product.name
+                                                                }
+                                                            </div>
+
+                                                            <div className="text-xs text-gray-500">
+                                                                {product.barcode
+                                                                    ? getBarcodeDisplay(
+                                                                        product.barcode
+                                                                    )
+                                                                    : 'Без штрихкода'}
+                                                            </div>
+                                                        </div>
+
+                                                        <span className="font-bold text-orange-700">
+                                        +
+                                    </span>
+                                                    </button>
+                                                )
+                                            )}
+                                        </div>
+                                    )}
+                            </div>
+
+                            <div className="min-h-0 flex-1 overflow-y-auto p-6">
+                                {returnItems.length ===
+                                0 ? (
+                                    <div className="rounded-2xl bg-gray-50 p-10 text-center text-gray-500">
+                                        Сканируйте товар, который покупатель возвращает.
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {returnItems.map(
+                                            item => (
+                                                <div
+                                                    key={String(
+                                                        item.product
+                                                            .id
+                                                    )}
+                                                    className="rounded-2xl border border-orange-100 bg-orange-50/40 p-4"
+                                                >
+                                                    <div
+                                                        className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="font-black text-gray-900">
+                                                                {
+                                                                    item
+                                                                        .product
+                                                                        .name
+                                                                }
+                                                            </div>
+
+                                                            <div className="mt-1 text-xs text-gray-500">
+                                                                {item
+                                                                    .product
+                                                                    .unit ===
+                                                                'weight'
+                                                                    ? 'Весовой товар'
+                                                                    : 'Штучный товар'}
+                                                            </div>
+
+                                                            <div className="mt-1 text-xs font-semibold text-indigo-600">
+                                                                Текущий остаток:{' '}
+                                                                {formatQuantity(
+                                                                    getStock(
+                                                                        item.product
+                                                                    ),
+                                                                    item
+                                                                        .product
+                                                                        .unit
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="flex items-center gap-3">
+                                                            <input
+                                                                type="number"
+                                                                min={
+                                                                    item
+                                                                        .product
+                                                                        .unit ===
+                                                                    'weight'
+                                                                        ? '0.001'
+                                                                        : '1'
+                                                                }
+                                                                step={
+                                                                    item
+                                                                        .product
+                                                                        .unit ===
+                                                                    'weight'
+                                                                        ? '0.001'
+                                                                        : '1'
+                                                                }
+                                                                value={
+                                                                    item.quantity
+                                                                }
+                                                                onChange={event =>
+                                                                    updateReturnQuantity(
+                                                                        item
+                                                                            .product
+                                                                            .id,
+                                                                        event
+                                                                            .target
+                                                                            .value
+                                                                    )
+                                                                }
+                                                                className="w-28 rounded-xl border border-gray-300 px-3 py-2 text-center text-lg font-black"
+                                                            />
+
+                                                            <span className="w-8 text-sm font-bold text-gray-500">
+                                                {item
+                                                    .product
+                                                    .unit ===
+                                                'weight'
+                                                    ? 'кг'
+                                                    : 'шт.'}
+                                            </span>
+
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    removeReturnItem(
+                                                                        item
+                                                                            .product
+                                                                            .id
+                                                                    )
+                                                                }
+                                                                className="flex h-10 w-10 items-center justify-center rounded-xl bg-red-50 text-red-600 hover:bg-red-100"
+                                                            >
+                                                                <AiOutlineDelete/>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )
+                                        )}
+                                    </div>
+                                )}
+
+                                <div className="mt-5">
+                                    <label className="mb-2 block text-sm font-bold text-gray-700">
+                                        Комментарий
+                                    </label>
+
+                                    <textarea
+                                        value={returnComment}
+                                        onChange={event =>
+                                            setReturnComment(
+                                                event.target
+                                                    .value
+                                            )
+                                        }
+                                        placeholder="Например: возврат от покупателя, товар не подошёл"
+                                        className="h-24 w-full resize-none rounded-2xl border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-orange-500"
+                                    />
+                                </div>
+                            </div>
+
+                            <div
+                                className="flex flex-col gap-3 border-t border-gray-100 bg-gray-50 p-5 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="text-sm text-gray-500">
+                                    Позиций:{' '}
+
+                                    <strong className="text-gray-900">
+                                        {returnItems.length}
+                                    </strong>
+
+                                    {' · '}
+
+                                    Возврат в:{' '}
+
+                                    <strong className="text-indigo-700">
+                                        {warehouseLocationName}
+                                    </strong>
+                                </div>
+
+                                <div className="flex gap-2">
+                                    <button
+                                        type="button"
+                                        disabled={
+                                            isReturnSaving
+                                        }
+                                        onClick={() =>
+                                            setIsReturnModalOpen(
+                                                false
+                                            )
+                                        }
+                                        className="rounded-xl border border-gray-300 bg-white px-5 py-3 font-bold text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                                    >
+                                        Отмена
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        disabled={
+                                            isReturnSaving ||
+                                            returnItems.length ===
+                                            0
+                                        }
+                                        onClick={() =>
+                                            void submitProductReturn()
+                                        }
+                                        className="rounded-xl bg-orange-600 px-5 py-3 font-black text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        {isReturnSaving
+                                            ? 'Возвращаю...'
+                                            : 'Оформить возврат'}
+                                    </button>
+                                </div>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
             </AnimatePresence>
 
             {isAtolSetupOpen && (
-                <AtolAgentSetup onClose={() => setIsAtolSetupOpen(false)} />
+                <AtolAgentSetup onClose={() => setIsAtolSetupOpen(false)}/>
             )}
 
             <style>{`

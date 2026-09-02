@@ -59,13 +59,16 @@ type MovementItem = {
 };
 
 type Props = {
-    mode: MovementMode;
-    supplier?: string;
-    invoiceNumber?: string;
-    comment?: string;
-    onAcceptanceSaved?: (result: AcceptanceCommitResult) => void | Promise<void>;
-    onShipmentSaved?: (result: OperationApiResult) => void | Promise<void>;
-};
+    mode: MovementMode
+    supplier?: string
+    invoiceNumber?: string
+    comment?: string
+    onAcceptanceSaved?: (
+        result: AcceptanceCommitResult,
+        rows: MovementItem[]
+    ) => void | Promise<void>
+    onShipmentSaved?: (result: OperationApiResult) => void | Promise<void>
+}
 
 type AddOverrides = {
     quantity?: string;
@@ -1730,7 +1733,7 @@ export default function ProductMovementForm({
             }),
         );
 
-        await onAcceptanceSaved?.(data);
+        await onAcceptanceSaved?.(data, snapshot);
 
         printAcceptanceDocument(documentNumber, snapshot);
 

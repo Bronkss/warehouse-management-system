@@ -136,7 +136,7 @@ const roundUpPriceString = (value: string): string => {
         return ''
     }
 
-    return String(Math.ceil(parsed))
+    return String(Math.round(parsed))
 }
 
 const calculateMarkup = (price: string, cat: string): string => {
@@ -148,7 +148,7 @@ const calculateMarkup = (price: string, cat: string): string => {
 
     const multiplier = cat.toLowerCase().includes('пиво') ? 1.35 : 1.30
 
-    return String(Math.ceil(cost * multiplier))
+    return String(Math.round(cost * multiplier))
 }
 
 const getInitialState = (data?: ProductFormData): ProductFormState => {
@@ -162,7 +162,7 @@ const getInitialState = (data?: ProductFormData): ProductFormState => {
         sellingPrice: data?.sellingPrice || '',
         unit: data?.unit || 'piece',
         stock: data?.stock || '0',
-        minStock: data?.minStock || '10',
+        minStock: data?.minStock ?? '0',
         image: data?.image || '',
         marked: Boolean(data?.marked),
         imagePreview: data?.image || '',
@@ -460,16 +460,16 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                 newErrors.stock = 'Введите остаток до 3 знаков после запятой, например 1.001'
             }
 
-            if (!weightPattern.test(normalizeQuantityString(formState.minStock)) || minStockValue <= 0) {
-                newErrors.minStock = 'Введите минимальный остаток до 3 знаков после запятой'
+            if (!weightPattern.test(normalizeQuantityString(formState.minStock)) || minStockValue < 0) {
+                newErrors.minStock = 'Введите минимальный остаток от 0, до 3 знаков после запятой'
             }
         } else {
             if (!/^\d+$/.test(formState.stock) || stockValue < 0) {
                 newErrors.stock = 'Введите целое количество'
             }
 
-            if (!/^\d+$/.test(formState.minStock) || minStockValue <= 0) {
-                newErrors.minStock = 'Введите целый минимальный остаток'
+            if (!/^\d+$/.test(formState.minStock) || minStockValue < 0) {
+                newErrors.minStock = 'Введите целый минимальный остаток от 0'
             }
         }
 
@@ -726,7 +726,7 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
 
                     {formState.purchasePrice && (
                         <span className="text-xs text-lime-600 ml-1">
-                            Минимальная наценка {getMarkupLabel()}, округление вверх
+                            Минимальная наценка {getMarkupLabel()}, округление по правилам арифметики
                         </span>
                     )}
                 </div>
@@ -762,13 +762,17 @@ export default function AddProductForm({ onSave, onCancel, initialData }: AddPro
                         inputMode={formState.unit === 'weight' ? 'decimal' : 'numeric'}
                         value={formState.minStock}
                         onChange={event => updateQuantityField('minStock', event.target.value)}
-                        placeholder={formState.unit === 'weight' ? '0.001' : '10'}
+                        placeholder={formState.unit === 'weight' ? '0.001' : '5'}
                         className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                             errors.minStock ? 'border-red-500' : 'border-gray-300'
                         }`}
                     />
 
                     {errors.minStock && <p className="mt-1 text-sm text-red-500">{errors.minStock}</p>}
+
+                    <p className="mt-1 text-xs text-gray-500">
+                        0 — не учитывать товар при формировании листа закупок
+                    </p>
 
                     <p className="mt-1 text-xs text-gray-500">
                         При достижении появится уведомление
