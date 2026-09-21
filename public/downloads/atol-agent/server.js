@@ -1379,6 +1379,8 @@ app.get('/health', requireToken, async (req, res) => {
         blockImcType: ATOL_MARKING_BLOCK_IMC_TYPE,
         blockItemEstimatedStatus: ATOL_MARKING_BLOCK_ITEM_ESTIMATED_STATUS,
         fiscalQueueFile: FISCAL_QUEUE_FILE,
+        fiscalQueueReady,
+        fiscalQueueLoadError,
         fiscalQueue: getFiscalQueueSnapshot().counts,
         fiscalQueueWorkerRunning,
     });
@@ -1529,6 +1531,9 @@ class FiscalizationError extends Error {
 const fiscalQueueJobs = new Map();
 let fiscalQueueWorkerRunning = false;
 let fiscalQueuePersistChain = Promise.resolve();
+let fiscalQueueReady = false;
+let fiscalQueueLoadError = null;
+let fiscalQueueInitPromise = null;
 
 const normalizeReceiptId = value => {
     return String(value || '').trim();
@@ -1656,10 +1661,8 @@ const loadFiscalQueue = async () => {
 
             const now = new Date().toISOString();
 
-            // Важная защита от двойного чека:
-            // если агент был убит во время fiscal sell, мы НЕ знаем,
-            // успела ли ККТ физически зарегистрировать документ.
-            // Поэтому processing после перезапуска не отправляется повторно автоматически.
+            // Если агент был остановлен во время fiscal sell,
+            // автоматический повтор запрещён: ККТ могла успеть зарегистрировать чек.
             const recoveredJob =
                       sourceJob.status === 'processing'
                           ? {
@@ -1683,26 +1686,98 @@ const loadFiscalQueue = async () => {
         compactFiscalQueue();
 
         console.log('Fiscal queue restored:');
-        console.log(JSON.stringify(getFiscalQueueSnapshot().counts, null, 2));
+        console.log(JSON.stringify(
+            getFiscalQueueSnapshot().counts,
+            null,
+            2
+        ));
 
         await persistFiscalQueue();
+
+        fiscalQueueLoadError = null;
+        fiscalQueueReady = true;
     } catch (error) {
         if (error?.code === 'ENOENT') {
-            await mkdir(
-                FISCAL_QUEUE_DIR,
-                {
-                    recursive: true,
-                }
-            );
+            try {
+                await mkdir(
+                    FISCAL_QUEUE_DIR,
+                    {
+                        recursive: true,
+                    }
+                );
 
-            await persistFiscalQueue();
-            return;
+                fiscalQueueJobs.clear();
+
+                await persistFiscalQueue();
+
+                fiscalQueueLoadError = null;
+                fiscalQueueReady = true;
+
+                console.log('Fiscal queue file created.');
+                return;
+            } catch (createError) {
+                fiscalQueueLoadError =
+                    createError instanceof Error
+                        ? createError.message
+                        : String(createError || '');
+
+                fiscalQueueReady = true;
+
+                console.error(
+                    'Fiscal queue storage is unavailable. ' +
+                    'Agent will continue working without persistent queue storage.'
+                );
+                console.error(createError);
+
+                return;
+            }
         }
 
-        console.error('Failed to restore fiscal queue:');
+        // Очередь не должна блокировать сам локальный агент.
+        fiscalQueueJobs.clear();
+
+        fiscalQueueLoadError =
+            error instanceof Error
+                ? error.message
+                : String(error || '');
+
+        fiscalQueueReady = true;
+
+        console.error(
+            'Failed to restore fiscal queue. ' +
+            'ATOL agent stays online; empty in-memory queue will be used.'
+        );
         console.error(error);
-        throw error;
     }
+};
+
+const initializeFiscalQueue = () => {
+    if (fiscalQueueInitPromise) {
+        return fiscalQueueInitPromise;
+    }
+
+    fiscalQueueInitPromise = loadFiscalQueue()
+        .then(() => {
+            setImmediate(() => {
+                processFiscalQueue().catch(error => {
+                    console.error('Fiscal queue worker fatal error:');
+                    console.error(error);
+                });
+            });
+        })
+        .catch(error => {
+            fiscalQueueLoadError =
+                error instanceof Error
+                    ? error.message
+                    : String(error || '');
+
+            fiscalQueueReady = true;
+
+            console.error('Fiscal queue initialization error:');
+            console.error(error);
+        });
+
+    return fiscalQueueInitPromise;
 };
 
 const findFiscalJobByReceiptId = receiptId => {
@@ -2525,38 +2600,24 @@ app.post('/marking/native-sell-test', requireToken, async (req, res) => {
     }
 });
 
-const startServer = async () => {
-    await loadFiscalQueue();
+app.listen(PORT, '127.0.0.1', () => {
+    console.log(`ATOL driver local agent started: http://127.0.0.1:${PORT}`);
+    console.log('Mode: driver COM / PowerShell bridge');
+    console.log(`Taxation type: ${ATOL_TAXATION_TYPE}`);
+    console.log(`VAT type: ${ATOL_VAT_TYPE}`);
+    console.log(`Marking status attempts: ${MARKING_STATUS_ATTEMPTS}`);
+    console.log(`Marking status interval: ${MARKING_STATUS_INTERVAL_MS} ms`);
+    console.log(`Fast marking attempts: ${MARKING_FAST_STATUS_ATTEMPTS}`);
+    console.log(`Fast marking interval: ${MARKING_FAST_STATUS_INTERVAL_MS} ms`);
+    console.log(`Skip accepted marking recheck: ${SKIP_ACCEPTED_MARKING_RECHECK ? 'enabled' : 'disabled'}`);
+    console.log('Safe fiscal sell: marking is revalidated in the same ATOL batch with fast polling.');
+    console.log('Strict marking sell: enabled. Only [M+] can be fiscalized.');
+    console.log('Marking final fix: base64 auto, no itemQuantity for full piece sold, fast same-batch sell validation.');
+    console.log(`Fiscal background queue file: ${FISCAL_QUEUE_FILE}`);
+    console.log('Fiscal background queue: enabled.');
+    console.log('HTTP agent is online. Fiscal queue initialization starts in background.');
 
-    setImmediate(() => {
-        processFiscalQueue().catch(error => {
-            console.error('Fiscal queue worker fatal error:');
-            console.error(error);
-        });
-    });
-
-    app.listen(PORT, '127.0.0.1', () => {
-        console.log(`ATOL driver local agent started: http://127.0.0.1:${PORT}`);
-        console.log('Mode: driver COM / PowerShell bridge');
-        console.log(`Taxation type: ${ATOL_TAXATION_TYPE}`);
-        console.log(`VAT type: ${ATOL_VAT_TYPE}`);
-        console.log(`Marking status attempts: ${MARKING_STATUS_ATTEMPTS}`);
-        console.log(`Marking status interval: ${MARKING_STATUS_INTERVAL_MS} ms`);
-        console.log(`Fast marking attempts: ${MARKING_FAST_STATUS_ATTEMPTS}`);
-        console.log(`Fast marking interval: ${MARKING_FAST_STATUS_INTERVAL_MS} ms`);
-        console.log(`Skip accepted marking recheck: ${SKIP_ACCEPTED_MARKING_RECHECK ? 'enabled' : 'disabled'}`);
-        console.log('Safe fiscal sell: marking is revalidated in the same ATOL batch with fast polling.');
-        console.log('Strict marking sell: enabled. Only [M+] can be fiscalized.');
-        console.log('Marking final fix: base64 auto, no itemQuantity for full piece sold, fast same-batch sell validation.');
-        console.log(`Fiscal background queue file: ${FISCAL_QUEUE_FILE}`);
-        console.log('Fiscal background queue: enabled.');
-    });
-};
-
-startServer().catch(error => {
-    console.error('Failed to start ATOL local agent:');
-    console.error(error);
-    process.exit(1);
+    void initializeFiscalQueue();
 });
 
 
