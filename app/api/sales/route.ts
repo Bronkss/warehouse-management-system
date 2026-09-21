@@ -356,6 +356,9 @@ export async function GET(
                     SELECT
                         r.id,
 
+                        r.client_receipt_id
+                            AS "clientReceiptId",
+
                         r.receipt_number
                             AS "receiptNumber",
 
@@ -454,10 +457,26 @@ export async function POST(
     const client =
         await pool.connect()
 
+    let locationIdForIdempotency:
+        number |
+        null = null
+
+    let clientReceiptIdForIdempotency:
+        string |
+        null = null
+
     try {
         const body =
             await request.json() as
                 Record<string, unknown>
+
+        const clientReceiptId =
+            String(
+                body.id ||
+                body.clientReceiptId ||
+                ''
+            ).trim() ||
+            null
 
         const items =
             (
@@ -599,6 +618,107 @@ export async function POST(
             user,
         } =
             access.context
+
+        locationIdForIdempotency =
+            location.id
+
+        clientReceiptIdForIdempotency =
+            clientReceiptId
+
+        if (clientReceiptId) {
+            const existingReceipt =
+                await client.query(
+                    `
+                        SELECT
+                            r.id,
+
+                            r.client_receipt_id
+                                AS "clientReceiptId",
+
+                            r.receipt_number
+                                AS "receiptNumber",
+
+                            r.created_at
+                                AS "createdAt",
+
+                            r.payment_method
+                                AS "paymentMethod",
+
+                            r.payment_label
+                                AS "paymentLabel",
+
+                            r.total::float
+                                AS total,
+
+                            r.received_amount::float
+                                AS "receivedAmount",
+
+                            r.change_amount::float
+                                AS change,
+
+                            r.cash_amount::float
+                                AS "cashAmount",
+
+                            r.card_amount::float
+                                AS "cardAmount",
+
+                            r.transfer_amount::float
+                                AS "transferAmount",
+
+                            r.items,
+
+                            COALESCE(
+                                r.cashier_name,
+                                ''
+                            ) AS "cashierName",
+
+                            COALESCE(
+                                r.cashier_login,
+                                ''
+                            ) AS "cashierLogin"
+
+                        FROM receipts r
+
+                        WHERE
+                            r.location_id = $1
+                            AND r.client_receipt_id = $2
+
+                        LIMIT 1
+                    `,
+                    [
+                        location.id,
+                        clientReceiptId,
+                    ]
+                )
+
+            if (
+                existingReceipt.rows.length >
+                0
+            ) {
+                await client.query(
+                    'COMMIT'
+                )
+
+                return NextResponse.json(
+                    {
+                        ...existingReceipt.rows[0],
+
+                        locationName:
+                        location.name,
+
+                        locationSlug:
+                        location.slug,
+
+                        idempotent:
+                            true,
+                    },
+                    {
+                        status:
+                            200,
+                    }
+                )
+            }
+        }
 
         const stockMovements:
             StockMovementDraft[] = []
@@ -776,6 +896,7 @@ export async function POST(
                     INSERT INTO receipts (
                         receipt_number,
                         location_id,
+                        client_receipt_id,
 
                         payment_method,
                         payment_label,
@@ -796,25 +917,29 @@ export async function POST(
                     VALUES (
                         $1,
                         $2,
-
                         $3,
-                        $4,
 
+                        $4,
                         $5,
+
                         $6,
                         $7,
-
                         $8,
+
                         $9,
                         $10,
-
                         $11,
 
                         $12,
-                        $13
+
+                        $13,
+                        $14
                     )
                     RETURNING
                         id,
+
+                        client_receipt_id
+                            AS "clientReceiptId",
 
                         receipt_number
                             AS "receiptNumber",
@@ -861,6 +986,7 @@ export async function POST(
                 [
                     receiptNumber,
                     location.id,
+                    clientReceiptId,
 
                     paymentMethod,
                     paymentLabel,
@@ -963,6 +1089,117 @@ export async function POST(
             .catch(
                 () => undefined
             )
+
+        if (
+            error &&
+            typeof error ===
+            'object' &&
+            'code' in error &&
+            String(
+                (
+                    error as {
+                        code?: unknown
+                    }
+                ).code ||
+                ''
+            ) ===
+            '23505' &&
+            locationIdForIdempotency !==
+            null &&
+            clientReceiptIdForIdempotency
+        ) {
+            const duplicate =
+                await pool.query(
+                    `
+                        SELECT
+                            r.id,
+
+                            r.client_receipt_id
+                                AS "clientReceiptId",
+
+                            r.receipt_number
+                                AS "receiptNumber",
+
+                            r.created_at
+                                AS "createdAt",
+
+                            r.payment_method
+                                AS "paymentMethod",
+
+                            r.payment_label
+                                AS "paymentLabel",
+
+                            r.total::float
+                                AS total,
+
+                            r.received_amount::float
+                                AS "receivedAmount",
+
+                            r.change_amount::float
+                                AS change,
+
+                            r.cash_amount::float
+                                AS "cashAmount",
+
+                            r.card_amount::float
+                                AS "cardAmount",
+
+                            r.transfer_amount::float
+                                AS "transferAmount",
+
+                            r.items,
+
+                            COALESCE(
+                                r.cashier_name,
+                                ''
+                            ) AS "cashierName",
+
+                            COALESCE(
+                                r.cashier_login,
+                                ''
+                            ) AS "cashierLogin",
+
+                            l.name
+                                AS "locationName",
+
+                            l.slug
+                                AS "locationSlug"
+
+                        FROM receipts r
+
+                        JOIN locations l
+                            ON l.id =
+                                r.location_id
+
+                        WHERE
+                            r.location_id = $1
+                            AND r.client_receipt_id = $2
+
+                        LIMIT 1
+                    `,
+                    [
+                        locationIdForIdempotency,
+                        clientReceiptIdForIdempotency,
+                    ]
+                )
+
+            if (
+                duplicate.rows.length >
+                0
+            ) {
+                return NextResponse.json(
+                    {
+                        ...duplicate.rows[0],
+                        idempotent:
+                            true,
+                    },
+                    {
+                        status:
+                            200,
+                    }
+                )
+            }
+        }
 
         console.error(
             'POST /api/sales error:',
