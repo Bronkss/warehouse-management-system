@@ -11,6 +11,7 @@ export type WarehouseSection =
     | 'online-kassa'
     | 'statistics'
     | 'purchase'
+    | 'debts'
 
 export type WarehouseSectionRule = {
     label: string
@@ -19,56 +20,17 @@ export type WarehouseSectionRule = {
 }
 
 export const WAREHOUSE_SECTION_RULES: Record<WarehouseSection, WarehouseSectionRule> = {
-    products: {
-        label: 'Товары',
-        access: 'all',
-        defaultRoute: '/products',
-    },
-    sales: {
-        label: 'Продажи',
-        access: 'stores',
-        defaultRoute: '/sales',
-    },
-    priemka: {
-        label: 'Приёмки',
-        access: 'all',
-        defaultRoute: '/priemka',
-    },
-    otgruzki: {
-        label: 'Отгрузки',
-        access: 'all',
-        defaultRoute: '/otgruzki',
-    },
-    deliveries: {
-        label: 'Доставки',
-        access: 'tochka-only',
-        defaultRoute: '/deliveries',
-    },
-    writeoff: {
-        label: 'Списания',
-        access: 'all',
-        defaultRoute: '/writeoff',
-    },
-    inventory: {
-        label: 'Инвентаризация',
-        access: 'all',
-        defaultRoute: '/inventory',
-    },
-    'online-kassa': {
-        label: 'Касса',
-        access: 'stores',
-        defaultRoute: '/online-kassa',
-    },
-    statistics: {
-        label: 'Статистика',
-        access: 'main-warehouse',
-        defaultRoute: '/statistics',
-    },
-    purchase: {
-        label: 'Закупка',
-        access: 'main-warehouse',
-        defaultRoute: '/purchase',
-    },
+    products: { label: 'Товары', access: 'all', defaultRoute: '/products' },
+    sales: { label: 'Продажи', access: 'stores', defaultRoute: '/sales' },
+    priemka: { label: 'Приёмки', access: 'all', defaultRoute: '/priemka' },
+    otgruzki: { label: 'Отгрузки', access: 'all', defaultRoute: '/otgruzki' },
+    deliveries: { label: 'Доставки', access: 'tochka-only', defaultRoute: '/deliveries' },
+    writeoff: { label: 'Списания', access: 'all', defaultRoute: '/writeoff' },
+    inventory: { label: 'Инвентаризация', access: 'all', defaultRoute: '/inventory' },
+    'online-kassa': { label: 'Касса', access: 'stores', defaultRoute: '/online-kassa' },
+    statistics: { label: 'Статистика', access: 'main-warehouse', defaultRoute: '/statistics' },
+    purchase: { label: 'Закупка', access: 'main-warehouse', defaultRoute: '/purchase' },
+    debts: { label: 'Долги', access: 'main-warehouse', defaultRoute: '/debts' },
 }
 
 export const WAREHOUSE_MENU_ORDER: WarehouseSection[] = [
@@ -81,6 +43,7 @@ export const WAREHOUSE_MENU_ORDER: WarehouseSection[] = [
     'inventory',
     'statistics',
     'purchase',
+    'debts',
 ]
 
 export function isMainWarehouseLocation(locationSlug: string, locationType?: WarehouseLocationType): boolean {
@@ -93,27 +56,11 @@ export function canUseWarehouseSection(
     section: WarehouseSection
 ): boolean {
     const rule = WAREHOUSE_SECTION_RULES[section]
-
-    if (!rule) {
-        return false
-    }
-
-    if (rule.access === 'all') {
-        return true
-    }
-
-    if (rule.access === 'stores') {
-        return !isMainWarehouseLocation(locationSlug, locationType)
-    }
-
-    if (rule.access === 'main-warehouse') {
-        return isMainWarehouseLocation(locationSlug, locationType)
-    }
-
-    if (rule.access === 'tochka-only') {
-        return locationSlug === 'tochka'
-    }
-
+    if (!rule) return false
+    if (rule.access === 'all') return true
+    if (rule.access === 'stores') return !isMainWarehouseLocation(locationSlug, locationType)
+    if (rule.access === 'main-warehouse') return isMainWarehouseLocation(locationSlug, locationType)
+    if (rule.access === 'tochka-only') return locationSlug === 'tochka'
     return false
 }
 
@@ -128,20 +75,15 @@ export function getFirstAllowedRouteForLocation(
     locationSlug: string,
     locationType?: WarehouseLocationType
 ): string {
-    if (isMainWarehouseLocation(locationSlug, locationType)) {
-        return '/system'
-    }
-
+    if (isMainWarehouseLocation(locationSlug, locationType)) return '/system'
     return '/system'
 }
 
-export function getWarehouseSectionFromPathname(pathname: string | null | undefined): WarehouseSection | null {
+export function getWarehouseSectionFromPathname(
+    pathname: string | null | undefined
+): WarehouseSection | null {
     const path = String(pathname || '').split('?')[0]
-
-    if (!path || path === '/' || path === '/system' || path === '/auth') {
-        return null
-    }
-
+    if (!path || path === '/' || path === '/system' || path === '/auth') return null
     if (path === '/online-kassa' || path.startsWith('/online-kassa/')) return 'online-kassa'
     if (path === '/products' || path.startsWith('/products/')) return 'products'
     if (path === '/sales' || path.startsWith('/sales/')) return 'sales'
@@ -152,7 +94,7 @@ export function getWarehouseSectionFromPathname(pathname: string | null | undefi
     if (path === '/inventory' || path.startsWith('/inventory/')) return 'inventory'
     if (path === '/statistics' || path.startsWith('/statistics/')) return 'statistics'
     if (path === '/purchase' || path.startsWith('/purchase/')) return 'purchase'
-
+    if (path === '/debts' || path.startsWith('/debts/')) return 'debts'
     return null
 }
 
@@ -161,6 +103,5 @@ export function getForbiddenSectionMessage(
     section: WarehouseSection
 ): string {
     const label = WAREHOUSE_SECTION_RULES[section]?.label || 'Раздел'
-
     return `Раздел «${label}» недоступен в зоне «${locationName}»`
 }
