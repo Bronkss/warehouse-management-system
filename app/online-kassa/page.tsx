@@ -9038,4 +9038,3 @@ export default function PosPage() {
         </div>
     );
 }
-git
