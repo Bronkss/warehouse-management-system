@@ -301,6 +301,7 @@ const LAST_COMMODITY_RECEIPT_KEY = "pos_last_commodity_receipt";
 const HELD_CHECKOUT_NAMES_KEY = "pos_held_checkout_names_v1";
 const POS_NOTIFICATION_LOG_KEY = "pos_shift_notification_log_v1";
 const POS_NOTIFICATION_READ_AT_KEY = "pos_shift_notification_read_at_v1";
+const POS_CLOCK_CORRECTION_MS_KEY = "pos_clock_correction_ms_v1";
 const USED_MARKING_CODES_KEY = "pos_used_marking_codes_v1";
 const CLOSING_REMINDER_ACK_PREFIX = "pos_closing_reminder_ack_v1:";
 const MAX_POS_NOTIFICATION_LOG = 250;
@@ -682,20 +683,65 @@ const rememberReceiptMarkingCodesLocally = (
     }
 };
 
-const getUtc7ShiftedDate = (
-    date = new Date(),
-): Date => {
-    return new Date(
-        date.getTime() +
-        UTC7_OFFSET_MS,
+const readPosClockCorrectionMs = (): number => {
+    if (typeof window === "undefined") {
+        return 0;
+    }
+
+    const raw =
+        localStorage.getItem(
+            POS_CLOCK_CORRECTION_MS_KEY,
+        );
+
+    const parsed =
+        Number(
+            raw ||
+            0,
+        );
+
+    return Number.isFinite(parsed)
+        ? parsed
+        : 0;
+};
+
+const savePosClockCorrectionMs = (
+    value: number,
+) => {
+    if (typeof window === "undefined") {
+        return;
+    }
+
+    const safeValue =
+        Number.isFinite(value)
+            ? Math.round(value)
+            : 0;
+
+    localStorage.setItem(
+        POS_CLOCK_CORRECTION_MS_KEY,
+        String(safeValue),
     );
 };
 
-const formatUtc7Clock = (
+const getPosClockShiftedDate = (
     date = new Date(),
+    correctionMs = 0,
+): Date => {
+    return new Date(
+        date.getTime() +
+        UTC7_OFFSET_MS +
+        correctionMs,
+    );
+};
+
+const formatPosClockTime = (
+    date = new Date(),
+    correctionMs = 0,
 ): string => {
     const shifted =
-        getUtc7ShiftedDate(date);
+        getPosClockShiftedDate(
+            date,
+            correctionMs,
+        );
 
     return shifted.toLocaleTimeString(
         "ru-RU",
@@ -709,8 +755,31 @@ const formatUtc7Clock = (
     );
 };
 
-const formatUtc7DateTime = (
+const formatPosClockDate = (
+    date = new Date(),
+    correctionMs = 0,
+): string => {
+    const shifted =
+        getPosClockShiftedDate(
+            date,
+            correctionMs,
+        );
+
+    return shifted.toLocaleDateString(
+        "ru-RU",
+        {
+            timeZone: "UTC",
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+        },
+    );
+};
+
+const formatPosDateTime = (
     value: string | Date,
+    correctionMs = 0,
 ): string => {
     const date =
         value instanceof Date
@@ -718,7 +787,10 @@ const formatUtc7DateTime = (
             : new Date(value);
 
     const shifted =
-        getUtc7ShiftedDate(date);
+        getPosClockShiftedDate(
+            date,
+            correctionMs,
+        );
 
     return shifted.toLocaleString(
         "ru-RU",
@@ -734,11 +806,15 @@ const formatUtc7DateTime = (
     );
 };
 
-const getUtc7DateKey = (
+const getPosClockDateKey = (
     date = new Date(),
+    correctionMs = 0,
 ): string => {
     const shifted =
-        getUtc7ShiftedDate(date);
+        getPosClockShiftedDate(
+            date,
+            correctionMs,
+        );
 
     const year =
         shifted.getUTCFullYear();
@@ -762,12 +838,106 @@ const getUtc7DateKey = (
     return `${year}-${month}-${day}`;
 };
 
-const getUtc7Hour = (
+const getPosClockHour = (
     date = new Date(),
+    correctionMs = 0,
 ): number => {
-    return getUtc7ShiftedDate(
+    return getPosClockShiftedDate(
         date,
+        correctionMs,
     ).getUTCHours();
+};
+
+const toPosDatetimeLocalValue = (
+    date = new Date(),
+    correctionMs = 0,
+): string => {
+    const shifted =
+        getPosClockShiftedDate(
+            date,
+            correctionMs,
+        );
+
+    const year =
+        shifted.getUTCFullYear();
+
+    const month =
+        String(
+            shifted.getUTCMonth() + 1,
+        ).padStart(
+            2,
+            "0",
+        );
+
+    const day =
+        String(
+            shifted.getUTCDate(),
+        ).padStart(
+            2,
+            "0",
+        );
+
+    const hours =
+        String(
+            shifted.getUTCHours(),
+        ).padStart(
+            2,
+            "0",
+        );
+
+    const minutes =
+        String(
+            shifted.getUTCMinutes(),
+        ).padStart(
+            2,
+            "0",
+        );
+
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
+};
+
+const getClockCorrectionFromDatetimeLocal = (
+    rawValue: string,
+): number | null => {
+    const match =
+        /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(
+            rawValue,
+        );
+
+    if (!match) {
+        return null;
+    }
+
+    const [
+        ,
+        yearRaw,
+        monthRaw,
+        dayRaw,
+        hourRaw,
+        minuteRaw,
+    ] = match;
+
+    const desiredUtcLike =
+        Date.UTC(
+            Number(yearRaw),
+            Number(monthRaw) - 1,
+            Number(dayRaw),
+            Number(hourRaw),
+            Number(minuteRaw),
+            0,
+            0,
+        );
+
+    if (!Number.isFinite(desiredUtcLike)) {
+        return null;
+    }
+
+    const automaticUtc7 =
+        Date.now() +
+        UTC7_OFFSET_MS;
+
+    return desiredUtcLike -
+        automaticUtc7;
 };
 
 const isBrowserF11Fullscreen = (): boolean => {
@@ -1617,6 +1787,12 @@ export default function PosPage() {
     const [utc7Now, setUtc7Now] = useState(
         new Date(),
     );
+    const [clockCorrectionMs, setClockCorrectionMs] =
+        useState(0);
+    const [isClockSettingsOpen, setIsClockSettingsOpen] =
+        useState(false);
+    const [clockEditValue, setClockEditValue] =
+        useState("");
     const [isFullscreen, setIsFullscreen] =
         useState(false);
     const [isNativeF11Fullscreen, setIsNativeF11Fullscreen] =
@@ -1874,6 +2050,94 @@ export default function PosPage() {
             ],
         );
 
+    const openClockSettings =
+        useCallback(
+            () => {
+                setClockEditValue(
+                    toPosDatetimeLocalValue(
+                        new Date(),
+                        clockCorrectionMs,
+                    ),
+                );
+
+                setIsClockSettingsOpen(
+                    true,
+                );
+            },
+            [
+                clockCorrectionMs,
+            ],
+        );
+
+    const saveClockSettings =
+        useCallback(
+            () => {
+                const correction =
+                    getClockCorrectionFromDatetimeLocal(
+                        clockEditValue,
+                    );
+
+                if (
+                    correction ===
+                    null
+                ) {
+                    setError(
+                        "Введите корректные дату и время",
+                    );
+
+                    return;
+                }
+
+                setClockCorrectionMs(
+                    correction,
+                );
+
+                savePosClockCorrectionMs(
+                    correction,
+                );
+
+                setIsClockSettingsOpen(
+                    false,
+                );
+
+                setNotice(
+                    "Время POS обновлено",
+                );
+            },
+            [
+                clockEditValue,
+            ],
+        );
+
+    const resetClockSettings =
+        useCallback(
+            () => {
+                setClockCorrectionMs(
+                    0,
+                );
+
+                savePosClockCorrectionMs(
+                    0,
+                );
+
+                setClockEditValue(
+                    toPosDatetimeLocalValue(
+                        new Date(),
+                        0,
+                    ),
+                );
+
+                setIsClockSettingsOpen(
+                    false,
+                );
+
+                setNotice(
+                    "Время POS возвращено к автоматическому UTC+7",
+                );
+            },
+            [],
+        );
+
     const refreshFullscreenState =
         useCallback(
             () => {
@@ -1952,7 +2216,7 @@ export default function PosPage() {
                     "undefined"
                 ) {
                     localStorage.setItem(
-                        `${CLOSING_REMINDER_ACK_PREFIX}${getUtc7DateKey()}`,
+                        `${CLOSING_REMINDER_ACK_PREFIX}${getPosClockDateKey(new Date(), clockCorrectionMs)}`,
                         "1",
                     );
                 }
@@ -1968,6 +2232,7 @@ export default function PosPage() {
             },
             [
                 appendNotificationLog,
+                clockCorrectionMs,
             ],
         );
 
@@ -1995,6 +2260,22 @@ export default function PosPage() {
 
         setUnreadNotificationCount(
             unreadCount,
+        );
+    }, []);
+
+    useEffect(() => {
+        const savedCorrection =
+            readPosClockCorrectionMs();
+
+        setClockCorrectionMs(
+            savedCorrection,
+        );
+
+        setClockEditValue(
+            toPosDatetimeLocalValue(
+                new Date(),
+                savedCorrection,
+            ),
         );
     }, []);
 
@@ -2121,14 +2402,14 @@ export default function PosPage() {
                     new Date();
 
                 if (
-                    getUtc7Hour(now) !==
+                    getPosClockHour(now, clockCorrectionMs) !==
                     1
                 ) {
                     return;
                 }
 
                 const acknowledgementKey =
-                    `${CLOSING_REMINDER_ACK_PREFIX}${getUtc7DateKey(now)}`;
+                    `${CLOSING_REMINDER_ACK_PREFIX}${getPosClockDateKey(now, clockCorrectionMs)}`;
 
                 const acknowledged =
                     localStorage.getItem(
@@ -2159,6 +2440,7 @@ export default function PosPage() {
             );
         };
     }, [
+        clockCorrectionMs,
         isAuthChecked,
         isShiftOpen,
     ]);
@@ -2473,6 +2755,7 @@ export default function PosPage() {
             setIsHeldReceiptsModalOpen(false);
             setIsHoldCheckoutNameModalOpen(false);
             setIsNotificationLogOpen(false);
+            setIsClockSettingsOpen(false);
             setHoldCheckoutName("");
             setTransferCustomerName("");
             setLastReceipt(null);
@@ -2580,6 +2863,7 @@ export default function PosPage() {
                 pendingCommodityReceipt ||
                 isHeldReceiptsModalOpen ||
                 isHoldCheckoutNameModalOpen ||
+                isClockSettingsOpen ||
                 isAtolSetupOpen ||
                 isReturnModalOpen
             ) {
@@ -2613,6 +2897,7 @@ export default function PosPage() {
         isAtolSetupOpen,
         isHeldReceiptsModalOpen,
         isHoldCheckoutNameModalOpen,
+        isClockSettingsOpen,
         isPriceLabelModalOpen,
         lastReceipt,
         pendingCommodityReceipt,
@@ -6087,21 +6372,40 @@ export default function PosPage() {
                                 </div>
 
                                 <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-                                    <div
-                                        className="inline-flex h-10 items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 text-sm font-black tabular-nums text-gray-700"
-                                        title="Время UTC+7"
+                                    <button
+                                        type="button"
+                                        onClick={openClockSettings}
+                                        className="group inline-flex h-[50px] items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-4 text-left transition-colors hover:border-indigo-200 hover:bg-indigo-50"
+                                        title="Нажмите, чтобы настроить время POS"
                                     >
-                                        <span aria-hidden="true">◷</span>
-                                        <span>{formatUtc7Clock(utc7Now)}</span>
-                                        <span className="text-[10px] font-bold text-gray-400">
-                                            UTC+7
+                                        <span
+                                            aria-hidden="true"
+                                            className="text-lg text-gray-500 transition-colors group-hover:text-indigo-600"
+                                        >
+                                            ◷
                                         </span>
-                                    </div>
+
+                                        <span className="whitespace-nowrap text-sm font-black tabular-nums text-gray-700">
+                                            {formatPosClockDate(
+                                                utc7Now,
+                                                clockCorrectionMs,
+                                            )}
+                                            <span className="mx-2 text-gray-300">·</span>
+                                            {formatPosClockTime(
+                                                utc7Now,
+                                                clockCorrectionMs,
+                                            )}
+                                        </span>
+
+                                        <span className="ml-0.5 text-xs font-black text-gray-300 transition-colors group-hover:text-indigo-500">
+                                            ✎
+                                        </span>
+                                    </button>
 
                                     <button
                                         type="button"
                                         onClick={() => void toggleFullscreen()}
-                                        className={`inline-flex h-10 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-black transition-colors ${
+                                        className={`inline-flex h-[50px] items-center justify-center gap-2 rounded-xl border px-4 text-sm font-black transition-colors ${
                                             isFullscreen
                                                 ? "border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
                                                 : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
@@ -6136,7 +6440,7 @@ export default function PosPage() {
                                     <button
                                         type="button"
                                         onClick={toggleNotificationLog}
-                                        className={`relative flex h-10 w-10 items-center justify-center rounded-xl border text-lg transition-colors ${
+                                        className={`relative flex h-[50px] w-[50px] items-center justify-center rounded-xl border text-xl transition-colors ${
                                             unreadNotificationCount > 0
                                                 ? "border-red-300 bg-red-50 text-red-700 shadow-sm hover:bg-red-100"
                                                 : isNotificationLogOpen
@@ -6233,7 +6537,7 @@ export default function PosPage() {
                                                                     </div>
 
                                                                     <div className="mt-1 text-[10px] font-semibold text-gray-400">
-                                                                        {formatUtc7DateTime(entry.createdAt)} · UTC+7
+                                                                        {formatPosDateTime(entry.createdAt, clockCorrectionMs)} · UTC+7
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -6619,6 +6923,110 @@ export default function PosPage() {
             </div>
 
             <AnimatePresence>
+                {isClockSettingsOpen && (
+                    <div
+                        key="pos-clock-settings-modal"
+                        className="fixed inset-0 z-[10020] flex items-center justify-center bg-black/45 px-4"
+                        onClick={() =>
+                            setIsClockSettingsOpen(
+                                false,
+                            )
+                        }
+                    >
+                        <motion.div
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
+                            onClick={(event) =>
+                                event.stopPropagation()
+                            }
+                            className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl"
+                        >
+                            <div className="inline-flex rounded-full bg-indigo-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-indigo-700">
+                                Часы POS
+                            </div>
+
+                            <h2 className="mt-4 text-2xl font-black text-gray-900">
+                                Настройка даты и времени
+                            </h2>
+
+                            <p className="mt-2 text-sm leading-6 text-gray-500">
+                                Изменяется только время внутри POS. Системные часы Windows не меняются.
+                            </p>
+
+                            <div className="mt-5 rounded-2xl border border-indigo-100 bg-indigo-50 p-4">
+                                <div className="text-xs font-black uppercase tracking-wide text-indigo-500">
+                                    Сейчас в POS
+                                </div>
+
+                                <div className="mt-1 text-4xl font-black tabular-nums tracking-tight text-indigo-900">
+                                    {formatPosClockTime(
+                                        utc7Now,
+                                        clockCorrectionMs,
+                                    )}
+                                </div>
+
+                                <div className="mt-1 text-sm font-bold capitalize text-indigo-700">
+                                    {formatPosClockDate(
+                                        utc7Now,
+                                        clockCorrectionMs,
+                                    )} · UTC+7
+                                </div>
+                            </div>
+
+                            <label className="mt-5 mb-2 block text-sm font-black text-gray-700">
+                                Установить дату и время POS
+                            </label>
+
+                            <input
+                                type="datetime-local"
+                                value={clockEditValue}
+                                onChange={(event) => {
+                                    setClockEditValue(
+                                        event.target.value,
+                                    );
+                                    setError(null);
+                                }}
+                                className="w-full rounded-2xl border border-gray-300 px-4 py-3 text-lg font-black outline-none focus:border-transparent focus:ring-2 focus:ring-indigo-500"
+                            />
+
+                            <div className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-xs font-semibold leading-5 text-amber-800">
+                                Ночное напоминание в 01:00 ориентируется на это же время POS.
+                            </div>
+
+                            <div className="mt-6 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setIsClockSettingsOpen(
+                                            false,
+                                        )
+                                    }
+                                    className="rounded-xl border border-gray-300 px-4 py-3 font-bold text-gray-700 hover:bg-gray-50"
+                                >
+                                    Отмена
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={resetClockSettings}
+                                    className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 font-black text-amber-800 hover:bg-amber-100"
+                                >
+                                    Сбросить
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={saveClockSettings}
+                                    className="rounded-xl bg-indigo-600 px-4 py-3 font-black text-white hover:bg-indigo-700"
+                                >
+                                    Сохранить
+                                </button>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+
                 {isClosingReminderOpen && (
                     <div
                         key="closing-reminder-modal"
@@ -6665,7 +7073,7 @@ export default function PosPage() {
                             </div>
 
                             <div className="mt-6 rounded-2xl bg-indigo-50 px-4 py-3 text-sm font-semibold text-indigo-700">
-                                Текущее время: {formatUtc7Clock(utc7Now)} · UTC+7
+                                Текущее время: {formatPosClockTime(utc7Now, clockCorrectionMs)} · UTC+7
                             </div>
 
                             <button
@@ -8630,3 +9038,4 @@ export default function PosPage() {
         </div>
     );
 }
+git
