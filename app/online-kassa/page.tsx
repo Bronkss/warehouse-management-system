@@ -300,11 +300,12 @@ const SHIFT_STATUS_KEY = "pos_kkt_shift_status";
 const LAST_COMMODITY_RECEIPT_KEY = "pos_last_commodity_receipt";
 const HELD_CHECKOUT_NAMES_KEY = "pos_held_checkout_names_v1";
 const POS_NOTIFICATION_LOG_KEY = "pos_shift_notification_log_v1";
+const POS_NOTIFICATION_READ_AT_KEY = "pos_shift_notification_read_at_v1";
 const USED_MARKING_CODES_KEY = "pos_used_marking_codes_v1";
 const CLOSING_REMINDER_ACK_PREFIX = "pos_closing_reminder_ack_v1:";
 const MAX_POS_NOTIFICATION_LOG = 250;
 const MAX_USED_MARKING_CODES = 10_000;
-const UTC8_OFFSET_MS = 8 * 60 * 60 * 1000;
+const UTC7_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 type ShiftStatus = "unknown" | "open" | "closed";
 
@@ -681,20 +682,20 @@ const rememberReceiptMarkingCodesLocally = (
     }
 };
 
-const getUtc8ShiftedDate = (
+const getUtc7ShiftedDate = (
     date = new Date(),
 ): Date => {
     return new Date(
         date.getTime() +
-        UTC8_OFFSET_MS,
+        UTC7_OFFSET_MS,
     );
 };
 
-const formatUtc8Clock = (
+const formatUtc7Clock = (
     date = new Date(),
 ): string => {
     const shifted =
-        getUtc8ShiftedDate(date);
+        getUtc7ShiftedDate(date);
 
     return shifted.toLocaleTimeString(
         "ru-RU",
@@ -708,7 +709,7 @@ const formatUtc8Clock = (
     );
 };
 
-const formatUtc8DateTime = (
+const formatUtc7DateTime = (
     value: string | Date,
 ): string => {
     const date =
@@ -717,7 +718,7 @@ const formatUtc8DateTime = (
             : new Date(value);
 
     const shifted =
-        getUtc8ShiftedDate(date);
+        getUtc7ShiftedDate(date);
 
     return shifted.toLocaleString(
         "ru-RU",
@@ -733,11 +734,11 @@ const formatUtc8DateTime = (
     );
 };
 
-const getUtc8DateKey = (
+const getUtc7DateKey = (
     date = new Date(),
 ): string => {
     const shifted =
-        getUtc8ShiftedDate(date);
+        getUtc7ShiftedDate(date);
 
     const year =
         shifted.getUTCFullYear();
@@ -761,12 +762,52 @@ const getUtc8DateKey = (
     return `${year}-${month}-${day}`;
 };
 
-const getUtc8Hour = (
+const getUtc7Hour = (
     date = new Date(),
 ): number => {
-    return getUtc8ShiftedDate(
+    return getUtc7ShiftedDate(
         date,
     ).getUTCHours();
+};
+
+const isBrowserF11Fullscreen = (): boolean => {
+    if (typeof window === "undefined") {
+        return false;
+    }
+
+    const screenWidth =
+        window.screen?.width ||
+        0;
+
+    const screenHeight =
+        window.screen?.height ||
+        0;
+
+    if (
+        screenWidth <= 0 ||
+        screenHeight <= 0
+    ) {
+        return false;
+    }
+
+    const widthDifference =
+        Math.abs(
+            window.innerWidth -
+            screenWidth,
+        );
+
+    const heightDifference =
+        Math.abs(
+            window.innerHeight -
+            screenHeight,
+        );
+
+    // В F11 браузер практически полностью занимает физический экран.
+    // Небольшой допуск нужен из-за масштабирования Windows / DPR.
+    return (
+        widthDifference <= 8 &&
+        heightDifference <= 8
+    );
 };
 
 const normalizeProduct = (product: Product): Product => {
@@ -1569,12 +1610,16 @@ export default function PosPage() {
     const [notice, setNotice] = useState<string | null>(null);
     const [notificationLog, setNotificationLog] =
         useState<PosNotificationEntry[]>([]);
+    const [unreadNotificationCount, setUnreadNotificationCount] =
+        useState(0);
     const [isNotificationLogOpen, setIsNotificationLogOpen] =
         useState(false);
-    const [utc8Now, setUtc8Now] = useState(
+    const [utc7Now, setUtc7Now] = useState(
         new Date(),
     );
     const [isFullscreen, setIsFullscreen] =
+        useState(false);
+    const [isNativeF11Fullscreen, setIsNativeF11Fullscreen] =
         useState(false);
     const [isClosingReminderOpen, setIsClosingReminderOpen] =
         useState(false);
@@ -1742,6 +1787,14 @@ export default function PosPage() {
                         return next;
                     },
                 );
+
+                setUnreadNotificationCount(
+                    previous =>
+                        Math.min(
+                            999,
+                            previous + 1,
+                        ),
+                );
             },
             [],
         );
@@ -1760,10 +1813,82 @@ export default function PosPage() {
                     localStorage.removeItem(
                         POS_NOTIFICATION_LOG_KEY,
                     );
+
+                    localStorage.removeItem(
+                        POS_NOTIFICATION_READ_AT_KEY,
+                    );
                 }
+
+                setUnreadNotificationCount(
+                    0,
+                );
 
                 setIsNotificationLogOpen(
                     false,
+                );
+            },
+            [],
+        );
+
+    const markNotificationLogRead =
+        useCallback(
+            () => {
+                const readAt =
+                    new Date().toISOString();
+
+                setUnreadNotificationCount(
+                    0,
+                );
+
+                if (
+                    typeof window !==
+                    "undefined"
+                ) {
+                    localStorage.setItem(
+                        POS_NOTIFICATION_READ_AT_KEY,
+                        readAt,
+                    );
+                }
+            },
+            [],
+        );
+
+    const toggleNotificationLog =
+        useCallback(
+            () => {
+                setIsNotificationLogOpen(
+                    current => {
+                        const next =
+                            !current;
+
+                        if (next) {
+                            markNotificationLogRead();
+                        }
+
+                        return next;
+                    },
+                );
+            },
+            [
+                markNotificationLogRead,
+            ],
+        );
+
+    const refreshFullscreenState =
+        useCallback(
+            () => {
+                const nativeF11 =
+                    isBrowserF11Fullscreen();
+
+                setIsNativeF11Fullscreen(
+                    nativeF11,
+                );
+
+                setIsFullscreen(
+                    Boolean(
+                        document.fullscreenElement,
+                    ) ||
+                    nativeF11,
                 );
             },
             [],
@@ -1777,9 +1902,35 @@ export default function PosPage() {
                         document.fullscreenElement
                     ) {
                         await document.exitFullscreen();
-                    } else {
-                        await document.documentElement.requestFullscreen();
+
+                        window.setTimeout(
+                            refreshFullscreenState,
+                            60,
+                        );
+
+                        return;
                     }
+
+                    if (
+                        isBrowserF11Fullscreen()
+                    ) {
+                        // Браузеры не разрешают JavaScript программно
+                        // выключить системный F11-режим.
+                        setNotice(
+                            "Полноэкранный режим включён через F11. Для выхода нажмите F11.",
+                        );
+
+                        refreshFullscreenState();
+
+                        return;
+                    }
+
+                    await document.documentElement.requestFullscreen();
+
+                    window.setTimeout(
+                        refreshFullscreenState,
+                        60,
+                    );
                 } catch (fullscreenError) {
                     setError(
                         fullscreenError instanceof Error
@@ -1788,7 +1939,9 @@ export default function PosPage() {
                     );
                 }
             },
-            [],
+            [
+                refreshFullscreenState,
+            ],
         );
 
     const acknowledgeClosingReminder =
@@ -1799,7 +1952,7 @@ export default function PosPage() {
                     "undefined"
                 ) {
                     localStorage.setItem(
-                        `${CLOSING_REMINDER_ACK_PREFIX}${getUtc8DateKey()}`,
+                        `${CLOSING_REMINDER_ACK_PREFIX}${getUtc7DateKey()}`,
                         "1",
                     );
                 }
@@ -1819,8 +1972,29 @@ export default function PosPage() {
         );
 
     useEffect(() => {
+        const entries =
+            readPosNotificationLog();
+
         setNotificationLog(
-            readPosNotificationLog(),
+            entries,
+        );
+
+        const lastReadAt =
+            localStorage.getItem(
+                POS_NOTIFICATION_READ_AT_KEY,
+            );
+
+        const unreadCount =
+            lastReadAt
+                ? entries.filter(
+                    entry =>
+                        entry.createdAt >
+                        lastReadAt,
+                ).length
+                : entries.length;
+
+        setUnreadNotificationCount(
+            unreadCount,
         );
     }, []);
 
@@ -1828,7 +2002,7 @@ export default function PosPage() {
         const intervalId =
             window.setInterval(
                 () => {
-                    setUtc8Now(
+                    setUtc7Now(
                         new Date(),
                     );
                 },
@@ -1845,18 +2019,29 @@ export default function PosPage() {
     useEffect(() => {
         const handleFullscreenChange =
             () => {
-                setIsFullscreen(
-                    Boolean(
-                        document.fullscreenElement,
-                    ),
+                refreshFullscreenState();
+            };
+
+        const handleWindowResize =
+            () => {
+                // F11 не вызывает fullscreenchange, но меняет размеры viewport.
+                // Поэтому отслеживаем resize и сравниваем viewport с screen.
+                window.setTimeout(
+                    refreshFullscreenState,
+                    40,
                 );
             };
 
-        handleFullscreenChange();
+        refreshFullscreenState();
 
         document.addEventListener(
             "fullscreenchange",
             handleFullscreenChange,
+        );
+
+        window.addEventListener(
+            "resize",
+            handleWindowResize,
         );
 
         return () => {
@@ -1864,8 +2049,15 @@ export default function PosPage() {
                 "fullscreenchange",
                 handleFullscreenChange,
             );
+
+            window.removeEventListener(
+                "resize",
+                handleWindowResize,
+            );
         };
-    }, []);
+    }, [
+        refreshFullscreenState,
+    ]);
 
     useEffect(() => {
         if (!error) {
@@ -1929,14 +2121,14 @@ export default function PosPage() {
                     new Date();
 
                 if (
-                    getUtc8Hour(now) !==
+                    getUtc7Hour(now) !==
                     1
                 ) {
                     return;
                 }
 
                 const acknowledgementKey =
-                    `${CLOSING_REMINDER_ACK_PREFIX}${getUtc8DateKey(now)}`;
+                    `${CLOSING_REMINDER_ACK_PREFIX}${getUtc7DateKey(now)}`;
 
                 const acknowledged =
                     localStorage.getItem(
@@ -5897,51 +6089,78 @@ export default function PosPage() {
                                 <div className="flex flex-wrap items-center gap-2 lg:justify-end">
                                     <div
                                         className="inline-flex h-10 items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 text-sm font-black tabular-nums text-gray-700"
-                                        title="Время UTC+8"
+                                        title="Время UTC+7"
                                     >
                                         <span aria-hidden="true">◷</span>
-                                        <span>{formatUtc8Clock(utc8Now)}</span>
+                                        <span>{formatUtc7Clock(utc7Now)}</span>
                                         <span className="text-[10px] font-bold text-gray-400">
-                                            UTC+8
+                                            UTC+7
                                         </span>
                                     </div>
 
                                     <button
                                         type="button"
                                         onClick={() => void toggleFullscreen()}
-                                        className="flex h-10 w-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-xl font-black text-gray-700 hover:bg-gray-50"
-                                        title={isFullscreen
-                                            ? "Выйти из полноэкранного режима"
-                                            : "На весь экран"}
-                                        aria-label={isFullscreen
-                                            ? "Выйти из полноэкранного режима"
-                                            : "На весь экран"}
+                                        className={`inline-flex h-10 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-black transition-colors ${
+                                            isFullscreen
+                                                ? "border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                                        }`}
+                                        title={
+                                            isNativeF11Fullscreen
+                                                ? "Полный экран включён через F11. Для выхода нажмите F11."
+                                                : isFullscreen
+                                                    ? "Свернуть экран"
+                                                    : "Во весь экран"
+                                        }
+                                        aria-label={
+                                            isFullscreen
+                                                ? "Свернуть экран"
+                                                : "Во весь экран"
+                                        }
                                     >
-                                        {isFullscreen ? "↙" : "⛶"}
+                                        <span
+                                            aria-hidden="true"
+                                            className="text-lg leading-none"
+                                        >
+                                            {isFullscreen ? "↙" : "⛶"}
+                                        </span>
+
+                                        <span>
+                                            {isFullscreen
+                                                ? "Свернуть экран"
+                                                : "Во весь экран"}
+                                        </span>
                                     </button>
 
                                     <button
                                         type="button"
-                                        onClick={() =>
-                                            setIsNotificationLogOpen(
-                                                value => !value,
-                                            )
-                                        }
+                                        onClick={toggleNotificationLog}
                                         className={`relative flex h-10 w-10 items-center justify-center rounded-xl border text-lg transition-colors ${
-                                            isNotificationLogOpen
-                                                ? "border-indigo-300 bg-indigo-50 text-indigo-700"
-                                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                                            unreadNotificationCount > 0
+                                                ? "border-red-300 bg-red-50 text-red-700 shadow-sm hover:bg-red-100"
+                                                : isNotificationLogOpen
+                                                    ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+                                                    : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
                                         }`}
-                                        title="Журнал уведомлений"
-                                        aria-label="Журнал уведомлений"
+                                        title={
+                                            unreadNotificationCount > 0
+                                                ? `Непрочитанных уведомлений: ${unreadNotificationCount}`
+                                                : "Журнал уведомлений"
+                                        }
+                                        aria-label={
+                                            unreadNotificationCount > 0
+                                                ? `Непрочитанных уведомлений: ${unreadNotificationCount}`
+                                                : "Журнал уведомлений"
+                                        }
                                     >
                                         <span aria-hidden="true">🔔</span>
 
-                                        {notificationLog.length > 0 && (
-                                            <span className="absolute -right-1.5 -top-1.5 flex min-w-5 items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-black leading-4 text-white">
-                                                {notificationLog.length > 99
+                                        {unreadNotificationCount > 0 && (
+                                            <span className="absolute -right-1.5 -top-1.5 flex min-w-5 items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-black leading-4 text-white ring-2 ring-white">
+                                                {unreadNotificationCount > 99
                                                     ? "99+"
-                                                    : notificationLog.length}
+                                                    : unreadNotificationCount}
                                             </span>
                                         )}
                                     </button>
@@ -5957,7 +6176,7 @@ export default function PosPage() {
                                             </div>
 
                                             <div className="text-[11px] text-gray-500">
-                                                Очищается после закрытия смены
+                                                Прочитано · журнал очистится после закрытия смены
                                             </div>
                                         </div>
 
@@ -6014,7 +6233,7 @@ export default function PosPage() {
                                                                     </div>
 
                                                                     <div className="mt-1 text-[10px] font-semibold text-gray-400">
-                                                                        {formatUtc8DateTime(entry.createdAt)} · UTC+8
+                                                                        {formatUtc7DateTime(entry.createdAt)} · UTC+7
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -6412,7 +6631,7 @@ export default function PosPage() {
                             className="w-full max-w-lg rounded-3xl border border-indigo-200 bg-white p-6 shadow-2xl"
                         >
                             <div className="inline-flex rounded-full bg-indigo-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-indigo-700">
-                                01:00 · UTC+8
+                                01:00 · UTC+7
                             </div>
 
                             <h2 className="mt-4 text-2xl font-black text-gray-900">
@@ -6446,7 +6665,7 @@ export default function PosPage() {
                             </div>
 
                             <div className="mt-6 rounded-2xl bg-indigo-50 px-4 py-3 text-sm font-semibold text-indigo-700">
-                                Текущее время: {formatUtc8Clock(utc8Now)} · UTC+8
+                                Текущее время: {formatUtc7Clock(utc7Now)} · UTC+7
                             </div>
 
                             <button
