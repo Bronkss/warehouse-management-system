@@ -40,6 +40,7 @@ type Receipt = {
     cashAmount?: number
     cardAmount?: number
     transferAmount?: number
+    customerName?: string
 
     cashierName?: string
     cashierLogin?: string
@@ -591,6 +592,15 @@ export default function Page() {
                                             query
                                         ) ||
 
+                                    String(
+                                        receipt.customerName ||
+                                        ''
+                                    )
+                                        .toLowerCase()
+                                        .includes(
+                                            query
+                                        ) ||
+
                                     receipt.items.some(
                                         item =>
                                             item.name
@@ -999,6 +1009,17 @@ export default function Page() {
                                                     {receipt.paymentLabel}
                                                 </span>
                                             </div>
+
+                                            {receipt.paymentMethod ===
+                                                'transfer' &&
+                                                receipt.customerName && (
+                                                    <div className="mt-1 text-sm text-blue-700">
+                                                        Кто перевёл:{' '}
+                                                        <span className="font-black">
+                                                            {receipt.customerName}
+                                                        </span>
+                                                    </div>
+                                                )}
 
                                             <div className="mt-1 text-sm text-gray-500">
                                                 Кассир:{' '}

@@ -371,6 +371,16 @@ export async function GET(
                         r.payment_label
                             AS "paymentLabel",
 
+COALESCE(
+    customer_name,
+    ''
+) AS "customerName",
+
+                        COALESCE(
+                            r.customer_name,
+                            ''
+                        ) AS "customerName",
+
                         r.total::float
                             AS total,
 
@@ -478,6 +488,17 @@ export async function POST(
             ).trim() ||
             null
 
+        const customerName =
+            String(
+                body.customerName ||
+                ''
+            )
+                .trim()
+                .slice(
+                    0,
+                    160
+                )
+
         const items =
             (
                 Array.isArray(
@@ -539,6 +560,22 @@ export async function POST(
                 {
                     message:
                         'Некорректный способ оплаты',
+                },
+                {
+                    status: 400,
+                }
+            )
+        }
+
+        if (
+            paymentMethod ===
+            'transfer' &&
+            !customerName
+        ) {
+            return NextResponse.json(
+                {
+                    message:
+                        'Для оплаты переводом укажите имя клиента',
                 },
                 {
                     status: 400,
@@ -646,6 +683,11 @@ export async function POST(
 
                             r.payment_label
                                 AS "paymentLabel",
+
+                            COALESCE(
+                                r.customer_name,
+                                ''
+                            ) AS "customerName",
 
                             r.total::float
                                 AS total,
@@ -900,6 +942,7 @@ export async function POST(
 
                         payment_method,
                         payment_label,
+                        customer_name,
 
                         total,
                         received_amount,
@@ -921,19 +964,20 @@ export async function POST(
 
                         $4,
                         $5,
-
                         $6,
+
                         $7,
                         $8,
-
                         $9,
+
                         $10,
                         $11,
-
                         $12,
 
                         $13,
-                        $14
+
+                        $14,
+                        $15
                     )
                     RETURNING
                         id,
@@ -990,6 +1034,7 @@ export async function POST(
 
                     paymentMethod,
                     paymentLabel,
+                    customerName || null,
 
                     total,
                     storedReceivedAmount,
@@ -1128,6 +1173,11 @@ export async function POST(
 
                             r.payment_label
                                 AS "paymentLabel",
+
+                            COALESCE(
+                                r.customer_name,
+                                ''
+                            ) AS "customerName",
 
                             r.total::float
                                 AS total,

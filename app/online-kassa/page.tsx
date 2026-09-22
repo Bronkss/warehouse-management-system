@@ -227,6 +227,7 @@ type Receipt = {
     cashAmount?: number;
     cardAmount?: number;
     transferAmount?: number;
+    customerName?: string;
     fiscalizationRequested?: boolean;
     fiscalStatus?: "queued" | "processing" | "success" | "skipped" | "failed";
     fiscalUuid?: string;
@@ -254,6 +255,26 @@ type PendingPriceLabelPrint = {
 
 type CommodityReceiptPrintStep = "ask" | "paper-warning";
 
+type PosNotificationKind =
+    | "notice"
+    | "error"
+    | "system";
+
+type PosNotificationEntry = {
+    id: string;
+    kind: PosNotificationKind;
+    message: string;
+    createdAt: string;
+};
+
+type UsedMarkingCodeEntry = {
+    code: string;
+    fingerprint: string;
+    productName: string;
+    receiptId: string;
+    usedAt: string;
+};
+
 const PRODUCTS_PAGE_LIMIT = 100;
 const SEARCH_LIMIT = 30;
 const TOAST_AUTO_CLOSE_MS = 10_000;
@@ -277,6 +298,13 @@ const FISCAL_AGENT_URL_KEY = "pos_fiscal_agent_url";
 const FISCAL_AGENT_TOKEN_KEY = "pos_fiscal_agent_token";
 const SHIFT_STATUS_KEY = "pos_kkt_shift_status";
 const LAST_COMMODITY_RECEIPT_KEY = "pos_last_commodity_receipt";
+const HELD_CHECKOUT_NAMES_KEY = "pos_held_checkout_names_v1";
+const POS_NOTIFICATION_LOG_KEY = "pos_shift_notification_log_v1";
+const USED_MARKING_CODES_KEY = "pos_used_marking_codes_v1";
+const CLOSING_REMINDER_ACK_PREFIX = "pos_closing_reminder_ack_v1:";
+const MAX_POS_NOTIFICATION_LOG = 250;
+const MAX_USED_MARKING_CODES = 10_000;
+const UTC8_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 type ShiftStatus = "unknown" | "open" | "closed";
 
@@ -444,6 +472,301 @@ const formatMarkingCodePreview = (value: unknown): string => {
     }
 
     return `${code.slice(0, 14)}…${code.slice(-6)}`;
+};
+
+const getMarkingCodeFingerprint = (value: unknown): string => {
+    return normalizeMarkingCode(value)
+        .replaceAll("\u001d", "")
+        .trim();
+};
+
+const readPosNotificationLog = (): PosNotificationEntry[] => {
+    if (typeof window === "undefined") {
+        return [];
+    }
+
+    try {
+        const raw = localStorage.getItem(POS_NOTIFICATION_LOG_KEY);
+
+        if (!raw) {
+            return [];
+        }
+
+        const parsed = JSON.parse(raw);
+
+        return Array.isArray(parsed)
+            ? parsed.filter(
+                (item): item is PosNotificationEntry =>
+                    Boolean(
+                        item &&
+                        typeof item.id === "string" &&
+                        typeof item.message === "string" &&
+                        typeof item.createdAt === "string",
+                    ),
+            )
+            : [];
+    } catch {
+        return [];
+    }
+};
+
+const savePosNotificationLog = (
+    entries: PosNotificationEntry[],
+) => {
+    if (typeof window === "undefined") {
+        return;
+    }
+
+    try {
+        localStorage.setItem(
+            POS_NOTIFICATION_LOG_KEY,
+            JSON.stringify(
+                entries.slice(-MAX_POS_NOTIFICATION_LOG),
+            ),
+        );
+    } catch (error) {
+        console.warn(
+            "POS notification log save error:",
+            error,
+        );
+    }
+};
+
+const readUsedMarkingCodes = (): UsedMarkingCodeEntry[] => {
+    if (typeof window === "undefined") {
+        return [];
+    }
+
+    try {
+        const raw = localStorage.getItem(USED_MARKING_CODES_KEY);
+
+        if (!raw) {
+            return [];
+        }
+
+        const parsed = JSON.parse(raw);
+
+        return Array.isArray(parsed)
+            ? parsed.filter(
+                (item): item is UsedMarkingCodeEntry =>
+                    Boolean(
+                        item &&
+                        typeof item.code === "string" &&
+                        typeof item.fingerprint === "string" &&
+                        typeof item.receiptId === "string" &&
+                        typeof item.usedAt === "string",
+                    ),
+            )
+            : [];
+    } catch {
+        return [];
+    }
+};
+
+const hasUsedMarkingCodeLocally = (
+    markingCode: unknown,
+): boolean => {
+    const fingerprint =
+        getMarkingCodeFingerprint(markingCode);
+
+    if (!fingerprint) {
+        return false;
+    }
+
+    return readUsedMarkingCodes().some(
+        entry =>
+            entry.fingerprint ===
+            fingerprint,
+    );
+};
+
+const rememberReceiptMarkingCodesLocally = (
+    receipt: Receipt,
+) => {
+    if (typeof window === "undefined") {
+        return;
+    }
+
+    const markingItems =
+        receipt.items.filter(
+            item =>
+                item.marked &&
+                Boolean(
+                    normalizeMarkingCode(
+                        item.markingCode,
+                    ),
+                ),
+        );
+
+    if (markingItems.length === 0) {
+        return;
+    }
+
+    try {
+        const existing =
+            readUsedMarkingCodes();
+
+        const byFingerprint =
+            new Map<
+                string,
+                UsedMarkingCodeEntry
+            >();
+
+        for (const entry of existing) {
+            byFingerprint.set(
+                entry.fingerprint,
+                entry,
+            );
+        }
+
+        const usedAt =
+            new Date().toISOString();
+
+        for (const item of markingItems) {
+            const code =
+                normalizeMarkingCode(
+                    item.markingCode,
+                );
+
+            const fingerprint =
+                getMarkingCodeFingerprint(
+                    code,
+                );
+
+            if (!fingerprint) {
+                continue;
+            }
+
+            byFingerprint.set(
+                fingerprint,
+                {
+                    code,
+                    fingerprint,
+                    productName:
+                    item.name,
+                    receiptId:
+                        String(
+                            receipt.id ||
+                            receipt.receiptNumber ||
+                            "",
+                        ),
+                    usedAt,
+                },
+            );
+        }
+
+        const next =
+            Array.from(
+                byFingerprint.values(),
+            )
+                .sort(
+                    (a, b) =>
+                        a.usedAt.localeCompare(
+                            b.usedAt,
+                        ),
+                )
+                .slice(
+                    -MAX_USED_MARKING_CODES,
+                );
+
+        localStorage.setItem(
+            USED_MARKING_CODES_KEY,
+            JSON.stringify(next),
+        );
+    } catch (error) {
+        console.error(
+            "Used marking codes save error:",
+            error,
+        );
+    }
+};
+
+const getUtc8ShiftedDate = (
+    date = new Date(),
+): Date => {
+    return new Date(
+        date.getTime() +
+        UTC8_OFFSET_MS,
+    );
+};
+
+const formatUtc8Clock = (
+    date = new Date(),
+): string => {
+    const shifted =
+        getUtc8ShiftedDate(date);
+
+    return shifted.toLocaleTimeString(
+        "ru-RU",
+        {
+            timeZone: "UTC",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        },
+    );
+};
+
+const formatUtc8DateTime = (
+    value: string | Date,
+): string => {
+    const date =
+        value instanceof Date
+            ? value
+            : new Date(value);
+
+    const shifted =
+        getUtc8ShiftedDate(date);
+
+    return shifted.toLocaleString(
+        "ru-RU",
+        {
+            timeZone: "UTC",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        },
+    );
+};
+
+const getUtc8DateKey = (
+    date = new Date(),
+): string => {
+    const shifted =
+        getUtc8ShiftedDate(date);
+
+    const year =
+        shifted.getUTCFullYear();
+
+    const month =
+        String(
+            shifted.getUTCMonth() + 1,
+        ).padStart(
+            2,
+            "0",
+        );
+
+    const day =
+        String(
+            shifted.getUTCDate(),
+        ).padStart(
+            2,
+            "0",
+        );
+
+    return `${year}-${month}-${day}`;
+};
+
+const getUtc8Hour = (
+    date = new Date(),
+): number => {
+    return getUtc8ShiftedDate(
+        date,
+    ).getUTCHours();
 };
 
 const normalizeProduct = (product: Product): Product => {
@@ -842,7 +1165,66 @@ const normalizeStoredCheckoutItems = (
         .filter((item): item is CheckoutItem => Boolean(item));
 };
 
+const readHeldCheckoutNames = (): Record<string, string> => {
+    if (typeof window === "undefined") {
+        return {};
+    }
+
+    try {
+        const raw = localStorage.getItem(HELD_CHECKOUT_NAMES_KEY);
+
+        if (!raw) {
+            return {};
+        }
+
+        const parsed = JSON.parse(raw);
+
+        return parsed && typeof parsed === "object"
+            ? parsed as Record<string, string>
+            : {};
+    } catch {
+        return {};
+    }
+};
+
+const saveHeldCheckoutName = (
+    heldId: string,
+    customerName: string,
+) => {
+    if (typeof window === "undefined") {
+        return;
+    }
+
+    const names = readHeldCheckoutNames();
+    names[String(heldId)] = customerName.trim();
+
+    localStorage.setItem(
+        HELD_CHECKOUT_NAMES_KEY,
+        JSON.stringify(names),
+    );
+};
+
+const removeHeldCheckoutName = (heldId: string) => {
+    if (typeof window === "undefined") {
+        return;
+    }
+
+    const names = readHeldCheckoutNames();
+    delete names[String(heldId)];
+
+    localStorage.setItem(
+        HELD_CHECKOUT_NAMES_KEY,
+        JSON.stringify(names),
+    );
+};
+
 const getHeldCheckoutTitle = (held: HeldCheckout): string => {
+    const savedName = readHeldCheckoutNames()[String(held.id)];
+
+    if (savedName) {
+        return savedName;
+    }
+
     if (held.title) {
         return held.title;
     }
@@ -1185,11 +1567,25 @@ export default function PosPage() {
     const [isPaying, setIsPaying] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
+    const [notificationLog, setNotificationLog] =
+        useState<PosNotificationEntry[]>([]);
+    const [isNotificationLogOpen, setIsNotificationLogOpen] =
+        useState(false);
+    const [utc8Now, setUtc8Now] = useState(
+        new Date(),
+    );
+    const [isFullscreen, setIsFullscreen] =
+        useState(false);
+    const [isClosingReminderOpen, setIsClosingReminderOpen] =
+        useState(false);
+    const skipNextNotificationLogRef =
+        useRef<string | null>(null);
 
     const [paymentModal, setPaymentModal] = useState<PaymentMethod | null>(null);
     const [cashReceived, setCashReceived] = useState("");
     const [mixedCashAmount, setMixedCashAmount] = useState(0);
     const [mixedCardAmount, setMixedCardAmount] = useState(0);
+    const [transferCustomerName, setTransferCustomerName] = useState("");
     const [lastReceipt, setLastReceipt] = useState<Receipt | null>(null);
 
     const [weightModalProduct, setWeightModalProduct] = useState<Product | null>(
@@ -1232,6 +1628,9 @@ export default function PosPage() {
 
     const [isAtolSetupOpen, setIsAtolSetupOpen] = useState(false);
     const [isHeldReceiptsModalOpen, setIsHeldReceiptsModalOpen] = useState(false);
+    const [isHoldCheckoutNameModalOpen, setIsHoldCheckoutNameModalOpen] =
+        useState(false);
+    const [holdCheckoutName, setHoldCheckoutName] = useState("");
     const [isCheckoutStoreReady, setIsCheckoutStoreReady] = useState(false);
 
     const [
@@ -1298,6 +1697,279 @@ export default function PosPage() {
     const hasUnsafeMarkedCheckoutItems = checkoutItems.some(
         (item) => isMarkedProduct(item.product) && item.markingStatus !== "M+",
     );
+
+    const appendNotificationLog =
+        useCallback(
+            (
+                kind: PosNotificationKind,
+                message: string,
+            ) => {
+                const safeMessage =
+                    String(
+                        message ||
+                        "",
+                    ).trim();
+
+                if (!safeMessage) {
+                    return;
+                }
+
+                setNotificationLog(
+                    previous => {
+                        const entry: PosNotificationEntry = {
+                            id:
+                                `${Date.now()}-${Math.random()
+                                    .toString(16)
+                                    .slice(2)}`,
+                            kind,
+                            message:
+                            safeMessage,
+                            createdAt:
+                                new Date().toISOString(),
+                        };
+
+                        const next = [
+                            ...previous,
+                            entry,
+                        ].slice(
+                            -MAX_POS_NOTIFICATION_LOG,
+                        );
+
+                        savePosNotificationLog(
+                            next,
+                        );
+
+                        return next;
+                    },
+                );
+            },
+            [],
+        );
+
+    const clearNotificationLog =
+        useCallback(
+            () => {
+                setNotificationLog(
+                    [],
+                );
+
+                if (
+                    typeof window !==
+                    "undefined"
+                ) {
+                    localStorage.removeItem(
+                        POS_NOTIFICATION_LOG_KEY,
+                    );
+                }
+
+                setIsNotificationLogOpen(
+                    false,
+                );
+            },
+            [],
+        );
+
+    const toggleFullscreen =
+        useCallback(
+            async () => {
+                try {
+                    if (
+                        document.fullscreenElement
+                    ) {
+                        await document.exitFullscreen();
+                    } else {
+                        await document.documentElement.requestFullscreen();
+                    }
+                } catch (fullscreenError) {
+                    setError(
+                        fullscreenError instanceof Error
+                            ? `Не удалось изменить полноэкранный режим: ${fullscreenError.message}`
+                            : "Не удалось изменить полноэкранный режим",
+                    );
+                }
+            },
+            [],
+        );
+
+    const acknowledgeClosingReminder =
+        useCallback(
+            () => {
+                if (
+                    typeof window !==
+                    "undefined"
+                ) {
+                    localStorage.setItem(
+                        `${CLOSING_REMINDER_ACK_PREFIX}${getUtc8DateKey()}`,
+                        "1",
+                    );
+                }
+
+                setIsClosingReminderOpen(
+                    false,
+                );
+
+                appendNotificationLog(
+                    "system",
+                    "Ночной чек-лист закрытия магазина подтверждён",
+                );
+            },
+            [
+                appendNotificationLog,
+            ],
+        );
+
+    useEffect(() => {
+        setNotificationLog(
+            readPosNotificationLog(),
+        );
+    }, []);
+
+    useEffect(() => {
+        const intervalId =
+            window.setInterval(
+                () => {
+                    setUtc8Now(
+                        new Date(),
+                    );
+                },
+                1000,
+            );
+
+        return () => {
+            window.clearInterval(
+                intervalId,
+            );
+        };
+    }, []);
+
+    useEffect(() => {
+        const handleFullscreenChange =
+            () => {
+                setIsFullscreen(
+                    Boolean(
+                        document.fullscreenElement,
+                    ),
+                );
+            };
+
+        handleFullscreenChange();
+
+        document.addEventListener(
+            "fullscreenchange",
+            handleFullscreenChange,
+        );
+
+        return () => {
+            document.removeEventListener(
+                "fullscreenchange",
+                handleFullscreenChange,
+            );
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!error) {
+            return;
+        }
+
+        if (
+            skipNextNotificationLogRef.current ===
+            error
+        ) {
+            skipNextNotificationLogRef.current =
+                null;
+
+            return;
+        }
+
+        appendNotificationLog(
+            "error",
+            error,
+        );
+    }, [
+        error,
+        appendNotificationLog,
+    ]);
+
+    useEffect(() => {
+        if (!notice) {
+            return;
+        }
+
+        if (
+            skipNextNotificationLogRef.current ===
+            notice
+        ) {
+            skipNextNotificationLogRef.current =
+                null;
+
+            return;
+        }
+
+        appendNotificationLog(
+            "notice",
+            notice,
+        );
+    }, [
+        notice,
+        appendNotificationLog,
+    ]);
+
+    useEffect(() => {
+        if (
+            !isAuthChecked ||
+            !isShiftOpen
+        ) {
+            return;
+        }
+
+        const checkClosingReminder =
+            () => {
+                const now =
+                    new Date();
+
+                if (
+                    getUtc8Hour(now) !==
+                    1
+                ) {
+                    return;
+                }
+
+                const acknowledgementKey =
+                    `${CLOSING_REMINDER_ACK_PREFIX}${getUtc8DateKey(now)}`;
+
+                const acknowledged =
+                    localStorage.getItem(
+                        acknowledgementKey,
+                    ) ===
+                    "1";
+
+                if (
+                    !acknowledged
+                ) {
+                    setIsClosingReminderOpen(
+                        true,
+                    );
+                }
+            };
+
+        checkClosingReminder();
+
+        const intervalId =
+            window.setInterval(
+                checkClosingReminder,
+                30_000,
+            );
+
+        return () => {
+            window.clearInterval(
+                intervalId,
+            );
+        };
+    }, [
+        isAuthChecked,
+        isShiftOpen,
+    ]);
 
     useEffect(() => {
         if (!error) {
@@ -1607,6 +2279,10 @@ export default function PosPage() {
             setPendingCommodityReceipt(null);
             setCommodityReceiptPrintStep("ask");
             setIsHeldReceiptsModalOpen(false);
+            setIsHoldCheckoutNameModalOpen(false);
+            setIsNotificationLogOpen(false);
+            setHoldCheckoutName("");
+            setTransferCustomerName("");
             setLastReceipt(null);
             setIsAtolSetupOpen(false);
             setIsReturnModalOpen(false);
@@ -1711,6 +2387,7 @@ export default function PosPage() {
                 pendingPriceLabelPrint ||
                 pendingCommodityReceipt ||
                 isHeldReceiptsModalOpen ||
+                isHoldCheckoutNameModalOpen ||
                 isAtolSetupOpen ||
                 isReturnModalOpen
             ) {
@@ -1743,6 +2420,7 @@ export default function PosPage() {
         fiscalConfirmModal,
         isAtolSetupOpen,
         isHeldReceiptsModalOpen,
+        isHoldCheckoutNameModalOpen,
         isPriceLabelModalOpen,
         lastReceipt,
         pendingCommodityReceipt,
@@ -1911,6 +2589,10 @@ export default function PosPage() {
                                     processingJob.receipt,
                                     processingJob.locationSlug,
                                 );
+
+                            rememberReceiptMarkingCodesLocally(
+                                processingJob.receipt,
+                            );
 
                             const finalReceipt: Receipt = {
                                 ...processingJob.receipt,
@@ -2303,6 +2985,12 @@ export default function PosPage() {
 
             setShiftStatus("closed");
             localStorage.setItem(SHIFT_STATUS_KEY, "closed");
+
+            clearNotificationLog();
+
+            skipNextNotificationLogRef.current =
+                "Смена ККТ закрыта";
+
             setNotice("Смена ККТ закрыта");
         } catch (err) {
             console.error(err);
@@ -2407,9 +3095,19 @@ export default function PosPage() {
             return;
         }
 
-        const hasSameCode = checkoutItems.some(
-            (item) => normalizeMarkingCode(item.markingCode) === markingCode,
-        );
+        const markingFingerprint =
+            getMarkingCodeFingerprint(
+                markingCode,
+            );
+
+        const hasSameCode =
+            checkoutItems.some(
+                item =>
+                    getMarkingCodeFingerprint(
+                        item.markingCode,
+                    ) ===
+                    markingFingerprint,
+            );
 
         if (hasSameCode) {
             setMarkingCheckResult({
@@ -2419,6 +3117,76 @@ export default function PosPage() {
                 message: "Этот DataMatrix уже добавлен в текущий чек",
             });
             setError("Этот DataMatrix уже добавлен в текущий чек");
+            return;
+        }
+
+        const existsInHeldCheckout =
+            heldCheckouts.some(
+                held =>
+                    held.items.some(
+                        item =>
+                            getMarkingCodeFingerprint(
+                                item.markingCode,
+                            ) ===
+                            markingFingerprint,
+                    ),
+            );
+
+        if (existsInHeldCheckout) {
+            setMarkingCheckResult({
+                ok: false,
+                canSell: false,
+                markingStatus: "M-",
+                message:
+                    "Этот DataMatrix уже находится в отложенном чеке",
+            });
+            setError(
+                "Этот DataMatrix уже находится в отложенном чеке",
+            );
+            return;
+        }
+
+        const existsInPosBackgroundQueue =
+            posBackgroundJobs.some(
+                job =>
+                    job.receipt.items.some(
+                        item =>
+                            getMarkingCodeFingerprint(
+                                item.markingCode,
+                            ) ===
+                            markingFingerprint,
+                    ),
+            );
+
+        if (existsInPosBackgroundQueue) {
+            setMarkingCheckResult({
+                ok: false,
+                canSell: false,
+                markingStatus: "M-",
+                message:
+                    "Этот DataMatrix уже находится в фоновой очереди продажи",
+            });
+            setError(
+                "Этот DataMatrix уже находится в фоновой очереди продажи",
+            );
+            return;
+        }
+
+        if (
+            hasUsedMarkingCodeLocally(
+                markingCode,
+            )
+        ) {
+            setMarkingCheckResult({
+                ok: false,
+                canSell: false,
+                markingStatus: "M-",
+                message:
+                    "Этот DataMatrix уже был продан на этой кассе. Повторная продажа заблокирована.",
+            });
+            setError(
+                "Этот DataMatrix уже был продан на этой кассе. Повторная продажа заблокирована.",
+            );
             return;
         }
 
@@ -2442,11 +3210,7 @@ export default function PosPage() {
                 packageMode,
             });
             setError(null);
-            setNotice(
-                packageMode === "block"
-                    ? "Проверяю КМ блока сигарет в фоне. Поле поиска очищено — можно сканировать следующий обычный товар."
-                    : "Проверяю код маркировки в фоне. Поле поиска очищено — можно сканировать следующий обычный товар.",
-            );
+            setNotice(null);
             setMarkingCheckResult(null);
             setMarkingModalProduct(null);
             setMarkingCodeInput("");
@@ -2735,6 +3499,19 @@ export default function PosPage() {
             return;
         }
 
+        setHoldCheckoutName("");
+        setError(null);
+        setIsHoldCheckoutNameModalOpen(true);
+    };
+
+    const confirmHoldCurrentCheckout = () => {
+        const customerName = holdCheckoutName.trim();
+
+        if (!customerName) {
+            setError("Введите имя для отложенного чека");
+            return;
+        }
+
         const heldCheckout = holdCheckoutInStore(
             checkoutItems as unknown as StoredCheckoutItem[],
             total,
@@ -2745,12 +3522,22 @@ export default function PosPage() {
             return;
         }
 
+        saveHeldCheckoutName(
+            String(heldCheckout.id),
+            customerName,
+        );
+
         setCheckoutItems([]);
         setPaymentModal(null);
         setFiscalConfirmModal(false);
         setCashReceived("");
+        setMixedCashAmount(0);
+        setMixedCardAmount(0);
+        setTransferCustomerName("");
+        setHoldCheckoutName("");
+        setIsHoldCheckoutNameModalOpen(false);
         setError(null);
-        setNotice(`Чек отложен: ${getHeldCheckoutTitle(heldCheckout)}`);
+        setNotice(`Чек отложен: ${customerName}`);
 
         requestAnimationFrame(() => {
             searchInputRef.current?.focus();
@@ -2772,18 +3559,22 @@ export default function PosPage() {
 
         if (restoredItems.length === 0) {
             removeHeldCheckout(held.id);
+            removeHeldCheckoutName(String(held.id));
             setError("Отложенный чек пустой или повреждён, он удалён из списка");
             return;
         }
 
+        const heldTitle = getHeldCheckoutTitle(held);
+
         removeHeldCheckout(held.id);
+        removeHeldCheckoutName(String(held.id));
         setCheckoutItems(restoredItems);
         setPaymentModal(null);
         setFiscalConfirmModal(false);
         setCashReceived("");
         setIsHeldReceiptsModalOpen(false);
         setError(null);
-        setNotice(`Отложенный чек восстановлен: ${getHeldCheckoutTitle(held)}`);
+        setNotice(`Отложенный чек восстановлен: ${heldTitle}`);
 
         requestAnimationFrame(() => {
             searchInputRef.current?.focus();
@@ -2800,6 +3591,7 @@ export default function PosPage() {
         }
 
         removeHeldCheckout(held.id);
+        removeHeldCheckoutName(String(held.id));
         setNotice("Отложенный чек удалён");
     };
 
@@ -2903,6 +3695,11 @@ export default function PosPage() {
         setCashReceived("");
         setMixedCashAmount(0);
         setMixedCardAmount(0);
+
+        if (method === "transfer") {
+            setTransferCustomerName("");
+        }
+
         setPaymentModal(method);
     };
 
@@ -3273,6 +4070,9 @@ export default function PosPage() {
                         <div>Дата: ${createdAt}</div>
                         <div>Чек №: ${receipt.id}</div>
                         <div>Оплата: ${receipt.paymentLabel}</div>
+                        ${receipt.paymentMethod === "transfer" && receipt.customerName
+            ? `<div>Клиент: ${escapeHtml(receipt.customerName)}</div>`
+            : ""}
                     </div>
                     <div class="sep"></div>
                     ${rows}
@@ -3358,6 +4158,14 @@ export default function PosPage() {
 
         if (method === "mixed" && !isMixedPaymentValid) {
             setError("Сумма наличных и карты должна точно совпадать с суммой чека");
+            return;
+        }
+
+        if (
+            method === "transfer" &&
+            !transferCustomerName.trim()
+        ) {
+            setError("Введите имя клиента для перевода");
             return;
         }
 
@@ -3560,6 +4368,10 @@ export default function PosPage() {
                 cashAmount,
                 cardAmount,
                 transferAmount,
+                customerName:
+                    method === "transfer"
+                        ? transferCustomerName.trim()
+                        : undefined,
                 fiscalizationRequested: shouldRunFiscalization,
                 fiscalStatus: shouldRunFiscalization ? undefined : "skipped",
                 cashierName: warehouseUserName,
@@ -3603,6 +4415,7 @@ export default function PosPage() {
             setCashReceived("");
             setMixedCashAmount(0);
             setMixedCardAmount(0);
+            setTransferCustomerName("");
 
             if (!shouldRunFiscalization) {
                 saveLastCommodityReceipt(
@@ -4291,48 +5104,6 @@ export default function PosPage() {
     return (
         <div
             className="min-h-dvh bg-gradient-to-br from-blue-50 to-indigo-50 p-4 xl:h-dvh xl:min-h-0 xl:overflow-hidden">
-            {isCheckingMarking && backgroundMarkingCheck && (
-                <div
-                    className="pointer-events-none fixed inset-x-0 top-4 z-[430] flex justify-center px-4"
-                    role="status"
-                    aria-live="polite"
-                >
-                    <div
-                        className="pointer-events-auto w-full max-w-2xl rounded-3xl border border-purple-200 bg-white p-4 shadow-2xl ring-4 ring-purple-100">
-                        <div className="flex items-center gap-4">
-                            <div
-                                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-purple-50">
-                                <div
-                                    className="h-7 w-7 animate-spin rounded-full border-4 border-purple-200 border-t-purple-600"/>
-                            </div>
-
-                            <div className="min-w-0 flex-1">
-                                <div className="text-xs font-black uppercase tracking-[0.14em] text-purple-700">
-                                    Проверка Честного ЗНАКа
-                                </div>
-
-                                <div className="mt-1 truncate text-base font-extrabold text-gray-900">
-                                    {backgroundMarkingCheck.packageMode === "block"
-                                        ? "В фоне проверяется КМ блока: "
-                                        : "В фоне проверяется: "}
-                                    {backgroundMarkingCheck.productName}
-                                </div>
-
-                                <div className="mt-1 text-sm font-semibold text-purple-700">
-                                    Поле поиска очищено. Можно сканировать следующий обычный
-                                    товар.
-                                </div>
-                            </div>
-
-                            <div
-                                className="hidden max-w-[180px] shrink-0 rounded-2xl bg-purple-50 px-3 py-2 text-right text-xs font-bold text-purple-700 sm:block">
-                                КМ: {backgroundMarkingCheck.codePreview}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
             {isDeliveryAlertOpen && deliveryAlerts.length > 0 && (
                 <div
                     className="fixed inset-0 z-[400] flex items-start justify-center bg-black/25 px-4 py-4 pointer-events-none">
@@ -4408,27 +5179,27 @@ export default function PosPage() {
             )}
             {(error || notice) && (
                 <div
-                    className="fixed right-4 top-4 z-[9999] flex w-[calc(100vw-32px)] max-w-md flex-col gap-3 pointer-events-none">
+                    className="pointer-events-none fixed right-3 top-3 z-[9999] flex w-[calc(100vw-24px)] max-w-sm flex-col gap-2"
+                >
                     {error && (
                         <motion.div
-                            initial={{opacity: 0, x: 24, y: -8}}
+                            initial={{opacity: 0, x: 18, y: -4}}
                             animate={{opacity: 1, x: 0, y: 0}}
-                            exit={{opacity: 0, x: 24}}
-                            className="pointer-events-auto rounded-3xl border border-red-200 bg-white p-4 shadow-2xl ring-4 ring-red-50"
+                            exit={{opacity: 0, x: 18}}
+                            className="pointer-events-auto overflow-hidden rounded-2xl border border-red-200 bg-white shadow-xl"
                             role="alert"
                         >
-                            <div className="flex items-start gap-3">
-                                <div
-                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-red-100 text-xl font-black text-red-700">
+                            <div className="flex min-h-12 items-center gap-2.5 px-3 py-2">
+                                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-red-100 text-sm font-black text-red-700">
                                     !
                                 </div>
 
                                 <div className="min-w-0 flex-1">
-                                    <div className="text-xs font-black uppercase tracking-[0.16em] text-red-600">
+                                    <div className="text-[10px] font-black uppercase tracking-[0.12em] text-red-600">
                                         Ошибка
                                     </div>
 
-                                    <div className="mt-1 text-sm font-bold leading-5 text-gray-900">
+                                    <div className="max-h-10 overflow-hidden text-xs font-bold leading-4 text-gray-900">
                                         {error}
                                     </div>
                                 </div>
@@ -4436,17 +5207,17 @@ export default function PosPage() {
                                 <button
                                     type="button"
                                     onClick={() => setError(null)}
-                                    className="rounded-full px-2 text-xl leading-none text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                    className="shrink-0 rounded-lg px-1.5 py-1 text-lg leading-none text-gray-400 hover:bg-gray-100 hover:text-gray-700"
                                     aria-label="Закрыть ошибку"
                                 >
                                     ×
                                 </button>
                             </div>
 
-                            <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-red-100">
+                            <div className="h-1 overflow-hidden bg-red-100">
                                 <div
                                     key={error}
-                                    className="h-full origin-left rounded-full bg-red-500"
+                                    className="h-full origin-left bg-red-500"
                                     style={{animation: `toast-progress ${TOAST_AUTO_CLOSE_MS}ms linear forwards`}}
                                 />
                             </div>
@@ -4455,24 +5226,23 @@ export default function PosPage() {
 
                     {notice && (
                         <motion.div
-                            initial={{opacity: 0, x: 24, y: -8}}
+                            initial={{opacity: 0, x: 18, y: -4}}
                             animate={{opacity: 1, x: 0, y: 0}}
-                            exit={{opacity: 0, x: 24}}
-                            className="pointer-events-auto rounded-3xl border border-emerald-200 bg-white p-4 shadow-2xl ring-4 ring-emerald-50"
+                            exit={{opacity: 0, x: 18}}
+                            className="pointer-events-auto overflow-hidden rounded-2xl border border-emerald-200 bg-white shadow-xl"
                             role="status"
                         >
-                            <div className="flex items-start gap-3">
-                                <div
-                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-xl font-black text-emerald-700">
+                            <div className="flex min-h-12 items-center gap-2.5 px-3 py-2">
+                                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-sm font-black text-emerald-700">
                                     ✓
                                 </div>
 
                                 <div className="min-w-0 flex-1">
-                                    <div className="text-xs font-black uppercase tracking-[0.16em] text-emerald-600">
+                                    <div className="text-[10px] font-black uppercase tracking-[0.12em] text-emerald-600">
                                         Уведомление
                                     </div>
 
-                                    <div className="mt-1 text-sm font-bold leading-5 text-gray-900">
+                                    <div className="max-h-10 overflow-hidden text-xs font-bold leading-4 text-gray-900">
                                         {notice}
                                     </div>
                                 </div>
@@ -4480,17 +5250,17 @@ export default function PosPage() {
                                 <button
                                     type="button"
                                     onClick={() => setNotice(null)}
-                                    className="rounded-full px-2 text-xl leading-none text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                    className="shrink-0 rounded-lg px-1.5 py-1 text-lg leading-none text-gray-400 hover:bg-gray-100 hover:text-gray-700"
                                     aria-label="Закрыть уведомление"
                                 >
                                     ×
                                 </button>
                             </div>
 
-                            <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-emerald-100">
+                            <div className="h-1 overflow-hidden bg-emerald-100">
                                 <div
                                     key={notice}
-                                    className="h-full origin-left rounded-full bg-emerald-500"
+                                    className="h-full origin-left bg-emerald-500"
                                     style={{animation: `toast-progress ${TOAST_AUTO_CLOSE_MS}ms linear forwards`}}
                                 />
                             </div>
@@ -4758,6 +5528,9 @@ export default function PosPage() {
                                                                 {formatCurrency(job.receipt.total)}
                                                                 {" · "}
                                                                 {job.receipt.paymentLabel}
+                                                                {job.receipt.customerName
+                                                                    ? ` · ${job.receipt.customerName}`
+                                                                    : ""}
                                                             </div>
 
                                                             {job.error && (
@@ -5109,16 +5882,170 @@ export default function PosPage() {
 
                     <section
                         className="min-w-0 space-y-4 xl:flex xl:h-full xl:min-h-0 xl:flex-col xl:space-y-0 xl:gap-4">
-                        <div className="rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl xl:shrink-0">
-                            <div className="mb-4">
-                                <div className="text-xs font-black uppercase tracking-[0.16em] text-indigo-500">
-                                    Сканер товара
+                        <div className="relative rounded-3xl border border-indigo-100 bg-white p-5 shadow-xl xl:shrink-0">
+                            <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                                <div>
+                                    <div className="text-xs font-black uppercase tracking-[0.16em] text-indigo-500">
+                                        Сканер товара
+                                    </div>
+
+                                    <h2 className="mt-1 text-2xl font-black text-gray-900">
+                                        Скан штрихкода или поиск
+                                    </h2>
                                 </div>
 
-                                <h2 className="mt-1 text-2xl font-black text-gray-900">
-                                    Скан штрихкода или поиск
-                                </h2>
+                                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                                    <div
+                                        className="inline-flex h-10 items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 text-sm font-black tabular-nums text-gray-700"
+                                        title="Время UTC+8"
+                                    >
+                                        <span aria-hidden="true">◷</span>
+                                        <span>{formatUtc8Clock(utc8Now)}</span>
+                                        <span className="text-[10px] font-bold text-gray-400">
+                                            UTC+8
+                                        </span>
+                                    </div>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => void toggleFullscreen()}
+                                        className="flex h-10 w-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-xl font-black text-gray-700 hover:bg-gray-50"
+                                        title={isFullscreen
+                                            ? "Выйти из полноэкранного режима"
+                                            : "На весь экран"}
+                                        aria-label={isFullscreen
+                                            ? "Выйти из полноэкранного режима"
+                                            : "На весь экран"}
+                                    >
+                                        {isFullscreen ? "↙" : "⛶"}
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setIsNotificationLogOpen(
+                                                value => !value,
+                                            )
+                                        }
+                                        className={`relative flex h-10 w-10 items-center justify-center rounded-xl border text-lg transition-colors ${
+                                            isNotificationLogOpen
+                                                ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+                                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                                        }`}
+                                        title="Журнал уведомлений"
+                                        aria-label="Журнал уведомлений"
+                                    >
+                                        <span aria-hidden="true">🔔</span>
+
+                                        {notificationLog.length > 0 && (
+                                            <span className="absolute -right-1.5 -top-1.5 flex min-w-5 items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-black leading-4 text-white">
+                                                {notificationLog.length > 99
+                                                    ? "99+"
+                                                    : notificationLog.length}
+                                            </span>
+                                        )}
+                                    </button>
+                                </div>
                             </div>
+
+                            {isNotificationLogOpen && (
+                                <div className="absolute right-5 top-[74px] z-[120] w-[min(430px,calc(100vw-40px))] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl">
+                                    <div className="flex items-center justify-between border-b border-gray-100 bg-gray-50 px-4 py-3">
+                                        <div>
+                                            <div className="text-sm font-black text-gray-900">
+                                                Журнал уведомлений
+                                            </div>
+
+                                            <div className="text-[11px] text-gray-500">
+                                                Очищается после закрытия смены
+                                            </div>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsNotificationLogOpen(false)}
+                                            className="rounded-lg px-2 py-1 text-lg leading-none text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                        >
+                                            ×
+                                        </button>
+                                    </div>
+
+                                    <div className="max-h-80 overflow-y-auto p-2">
+                                        {notificationLog.length === 0 ? (
+                                            <div className="rounded-xl bg-gray-50 px-4 py-8 text-center text-sm font-semibold text-gray-400">
+                                                За эту смену уведомлений пока нет
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {notificationLog
+                                                    .slice()
+                                                    .reverse()
+                                                    .map(entry => (
+                                                        <div
+                                                            key={entry.id}
+                                                            className={`rounded-xl border px-3 py-2 ${
+                                                                entry.kind === "error"
+                                                                    ? "border-red-100 bg-red-50"
+                                                                    : entry.kind === "system"
+                                                                        ? "border-slate-200 bg-slate-50"
+                                                                        : "border-emerald-100 bg-emerald-50"
+                                                            }`}
+                                                        >
+                                                            <div className="flex items-start gap-2">
+                                                                <div
+                                                                    className={`mt-0.5 text-xs font-black ${
+                                                                        entry.kind === "error"
+                                                                            ? "text-red-600"
+                                                                            : entry.kind === "system"
+                                                                                ? "text-slate-600"
+                                                                                : "text-emerald-600"
+                                                                    }`}
+                                                                >
+                                                                    {entry.kind === "error"
+                                                                        ? "!"
+                                                                        : entry.kind === "system"
+                                                                            ? "●"
+                                                                            : "✓"}
+                                                                </div>
+
+                                                                <div className="min-w-0 flex-1">
+                                                                    <div className="text-xs font-semibold leading-4 text-gray-800">
+                                                                        {entry.message}
+                                                                    </div>
+
+                                                                    <div className="mt-1 text-[10px] font-semibold text-gray-400">
+                                                                        {formatUtc8DateTime(entry.createdAt)} · UTC+8
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {isCheckingMarking && backgroundMarkingCheck && (
+                                <div
+                                    className="mb-3 flex h-9 items-center gap-2 overflow-hidden rounded-xl border border-purple-200 bg-purple-50 px-3 text-xs font-bold text-purple-800"
+                                    role="status"
+                                    aria-live="polite"
+                                >
+                                    <div className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-purple-200 border-t-purple-600" />
+
+                                    <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                                        Проверка маркировки в фоне ·{" "}
+                                        <span className="font-black">
+                                            {backgroundMarkingCheck.productName}
+                                        </span>
+                                        {" · "}
+                                        КМ {backgroundMarkingCheck.codePreview}
+                                        {" · "}
+                                        можно сканировать следующий обычный товар
+                                    </div>
+                                </div>
+                            )}
 
                             <div className="relative">
                                 <div className="absolute left-3 top-3 text-gray-400">
@@ -5473,6 +6400,67 @@ export default function PosPage() {
             </div>
 
             <AnimatePresence>
+                {isClosingReminderOpen && (
+                    <div
+                        key="closing-reminder-modal"
+                        className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-950/60 px-4"
+                    >
+                        <motion.div
+                            initial={{opacity: 0, scale: 0.95, y: 12}}
+                            animate={{opacity: 1, scale: 1, y: 0}}
+                            exit={{opacity: 0, scale: 0.95, y: 12}}
+                            className="w-full max-w-lg rounded-3xl border border-indigo-200 bg-white p-6 shadow-2xl"
+                        >
+                            <div className="inline-flex rounded-full bg-indigo-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-indigo-700">
+                                01:00 · UTC+8
+                            </div>
+
+                            <h2 className="mt-4 text-2xl font-black text-gray-900">
+                                Уходя домой, не забудь
+                            </h2>
+
+                            <p className="mt-2 text-sm leading-6 text-gray-500">
+                                Проверь всё перед закрытием магазина.
+                            </p>
+
+                            <div className="mt-5 space-y-3">
+                                {[
+                                    "Закрыть смену",
+                                    "Поставить все устройства на зарядку: терминал и сканер",
+                                    "Выключить свет в холодильниках",
+                                    "Помыть полы",
+                                ].map(item => (
+                                    <div
+                                        key={item}
+                                        className="flex items-start gap-3 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3"
+                                    >
+                                        <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border-2 border-indigo-300 bg-white text-xs font-black text-indigo-600">
+                                            ✓
+                                        </div>
+
+                                        <div className="text-sm font-black leading-6 text-gray-800">
+                                            {item}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="mt-6 rounded-2xl bg-indigo-50 px-4 py-3 text-sm font-semibold text-indigo-700">
+                                Текущее время: {formatUtc8Clock(utc8Now)} · UTC+8
+                            </div>
+
+                            <button
+                                type="button"
+                                autoFocus
+                                onClick={acknowledgeClosingReminder}
+                                className="mt-5 w-full rounded-2xl bg-indigo-600 px-5 py-3.5 text-base font-black text-white hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-200"
+                            >
+                                Принял(а)
+                            </button>
+                        </motion.div>
+                    </div>
+                )}
+
                 {pendingPriceLabelPrint && (
                     <div
                         key="xprinter-label-paper-warning-modal"
@@ -6258,6 +7246,96 @@ export default function PosPage() {
                     </div>
                 )}
 
+                {isHoldCheckoutNameModalOpen && (
+                    <div
+                        key="hold-checkout-name-modal"
+                        className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4"
+                        onClick={() => {
+                            setIsHoldCheckoutNameModalOpen(false);
+                            setHoldCheckoutName("");
+                        }}
+                    >
+                        <motion.div
+                            initial={{opacity: 0, scale: 0.96}}
+                            animate={{opacity: 1, scale: 1}}
+                            exit={{opacity: 0, scale: 0.96}}
+                            onClick={(event) => event.stopPropagation()}
+                            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+                        >
+                            <div className="mb-4 inline-flex rounded-full bg-amber-100 px-4 py-1.5 text-xs font-black uppercase tracking-[0.16em] text-amber-800">
+                                Отложенный чек
+                            </div>
+
+                            <h2 className="text-2xl font-black text-gray-900">
+                                Чей это чек?
+                            </h2>
+
+                            <p className="mt-2 text-sm leading-6 text-gray-500">
+                                Введите имя клиента. Оно будет показано в списке отложенных чеков.
+                            </p>
+
+                            <div className="mt-5 rounded-2xl bg-gray-50 p-4">
+                                <div className="text-sm text-gray-500">
+                                    Сумма чека
+                                </div>
+
+                                <div className="mt-1 text-3xl font-black text-gray-900">
+                                    {formatCurrency(total)}
+                                </div>
+
+                                <div className="mt-1 text-sm text-gray-500">
+                                    Позиций: {checkoutItems.length}
+                                </div>
+                            </div>
+
+                            <label className="mt-5 mb-2 block text-sm font-bold text-gray-700">
+                                Имя клиента
+                            </label>
+
+                            <input
+                                type="text"
+                                autoFocus
+                                maxLength={100}
+                                value={holdCheckoutName}
+                                onChange={(event) => {
+                                    setHoldCheckoutName(event.target.value);
+                                    setError(null);
+                                }}
+                                onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                        event.preventDefault();
+                                        confirmHoldCurrentCheckout();
+                                    }
+                                }}
+                                placeholder="Например: Сергей"
+                                className="w-full rounded-xl border border-gray-300 px-4 py-3 text-lg font-bold outline-none focus:border-transparent focus:ring-2 focus:ring-amber-500"
+                            />
+
+                            <div className="mt-6 flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setIsHoldCheckoutNameModalOpen(false);
+                                        setHoldCheckoutName("");
+                                    }}
+                                    className="rounded-xl border border-gray-300 px-5 py-3 font-bold text-gray-700 hover:bg-gray-50"
+                                >
+                                    Отмена
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={!holdCheckoutName.trim()}
+                                    onClick={confirmHoldCurrentCheckout}
+                                    className="rounded-xl bg-amber-600 px-5 py-3 font-black text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Отложить чек
+                                </button>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+
                 {isHeldReceiptsModalOpen && (
                     <div
                         key="held-receipts-modal"
@@ -6633,6 +7711,39 @@ export default function PosPage() {
                                 </div>
                             </div>
 
+                            <div className="mb-5">
+                                <label className="mb-2 block text-sm font-bold text-gray-700">
+                                    Имя / кто переводит
+                                </label>
+
+                                <input
+                                    type="text"
+                                    autoFocus
+                                    maxLength={160}
+                                    value={transferCustomerName}
+                                    onChange={(event) => {
+                                        setTransferCustomerName(event.target.value);
+                                        setError(null);
+                                    }}
+                                    onKeyDown={(event) => {
+                                        if (
+                                            event.key === "Enter" &&
+                                            transferCustomerName.trim() &&
+                                            !isPaying
+                                        ) {
+                                            event.preventDefault();
+                                            void completePayment("transfer", false);
+                                        }
+                                    }}
+                                    placeholder="Например: Александр"
+                                    className="w-full rounded-xl border border-gray-300 px-4 py-3 text-lg font-bold outline-none focus:border-transparent focus:ring-2 focus:ring-blue-500"
+                                />
+
+                                <div className="mt-2 text-xs text-gray-500">
+                                    Имя сохранится вместе с чеком и будет видно в истории продаж.
+                                </div>
+                            </div>
+
                             <div className="rounded-xl bg-blue-50 p-4 text-sm text-blue-700 mb-6">
                                 Перед подтверждением обязательно убедитесь, что перевод поступил
                                 или показан клиентом как выполненный.
@@ -6647,7 +7758,10 @@ export default function PosPage() {
                                 <button
                                     type="button"
                                     disabled={isPaying}
-                                    onClick={() => setPaymentModal(null)}
+                                    onClick={() => {
+                                        setPaymentModal(null);
+                                        setTransferCustomerName("");
+                                    }}
                                     className="px-5 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
                                 >
                                     Отмена
@@ -6655,7 +7769,7 @@ export default function PosPage() {
 
                                 <button
                                     type="button"
-                                    disabled={isPaying}
+                                    disabled={isPaying || !transferCustomerName.trim()}
                                     onClick={() => completePayment("transfer", false)}
                                     className="px-5 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
                                 >
@@ -6869,6 +7983,16 @@ export default function PosPage() {
                     {lastReceipt.paymentLabel}
                   </span>
                                 </div>
+
+                                {lastReceipt.paymentMethod === "transfer" &&
+                                    lastReceipt.customerName && (
+                                        <div className="flex justify-between">
+                                            <span>Клиент:</span>
+                                            <span className="font-semibold">
+                                                {lastReceipt.customerName}
+                                            </span>
+                                        </div>
+                                    )}
 
                                 <div className="flex justify-between text-xl font-bold">
                                     <span>Итого:</span>
