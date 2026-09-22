@@ -19,7 +19,7 @@ import {
     type PosBackgroundSaleJob,
 } from "./pos-sale-background-queue";
 import JsBarcode from "jsbarcode";
-import { useRouter } from "next/navigation";
+import {useRouter} from "next/navigation";
 import {
     canUseWarehouseSection,
     getFirstAllowedRouteForLocation,
@@ -32,7 +32,7 @@ import {
     useCallback,
     type KeyboardEvent,
 } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import {motion, AnimatePresence} from "framer-motion";
 import {
     AiOutlineDelete,
     AiOutlinePlus,
@@ -515,13 +515,121 @@ const formatCurrency = (amount: number | undefined | null): string => {
     return new Intl.NumberFormat("ru-RU", {
         style: "currency",
         currency: "RUB",
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
     }).format(safeAmount);
 };
 
 const isWeightProduct = (product: Product): boolean => {
     return product.unit === "weight";
+};
+
+const roundMoney = (value: number): number => {
+    return Math.round(
+        (Number(value || 0) + Number.EPSILON) * 100,
+    ) / 100;
+};
+
+const getRoundedSaleLineTotal = (
+    product: Product,
+    quantity: number,
+): number => {
+    const rawTotal =
+        getSellingPrice(product) *
+        Number(quantity || 0);
+
+    if (isWeightProduct(product)) {
+        // Весовые товары всегда округляем вверх до полного рубля.
+        // Небольшой EPSILON защищает от случаев вроде 428.00000000001.
+        return Math.ceil(
+            rawTotal -
+            Number.EPSILON,
+        );
+    }
+
+    return roundMoney(
+        rawTotal,
+    );
+};
+
+const getFiscalUnitPriceForRoundedWeight = (
+    product: Product,
+    quantity: number,
+    roundedLineTotal: number,
+): number => {
+    const originalPrice =
+        getSellingPrice(product);
+
+    if (
+        !isWeightProduct(product) ||
+        !Number.isFinite(quantity) ||
+        quantity <= 0
+    ) {
+        return originalPrice;
+    }
+
+    const target =
+        roundMoney(
+            roundedLineTotal,
+        );
+
+    // АТОЛ проверяет взаимосвязь price × quantity = amount.
+    // После округления строки вверх исходная цена за кг уже может
+    // не давать ровно ту же сумму. Подбираем ближайшую цену с точностью
+    // до копейки, которая после умножения даст нужный итог строки.
+    const idealPrice =
+        target /
+        quantity;
+
+    const baseCents =
+        Math.max(
+            1,
+            Math.round(
+                idealPrice * 100,
+            ),
+        );
+
+    for (
+        let offset = 0;
+        offset <= 500;
+        offset += 1
+    ) {
+        const candidates =
+            offset === 0
+                ? [baseCents]
+                : [
+                    baseCents - offset,
+                    baseCents + offset,
+                ];
+
+        for (
+            const cents
+            of candidates
+            ) {
+            if (cents <= 0) {
+                continue;
+            }
+
+            const candidate =
+                cents / 100;
+
+            if (
+                roundMoney(
+                    candidate *
+                    quantity,
+                ) ===
+                target
+            ) {
+                return candidate;
+            }
+        }
+    }
+
+    // Практически сюда не должны попасть.
+    // Оставляем ближайшее значение, чтобы сумма АТОЛ была максимально близкой.
+    return roundMoney(
+        idealPrice,
+    );
 };
 
 const canSellIntoNegativeStock = (product: Product): boolean => {
@@ -649,9 +757,18 @@ const escapeHtml = (value: unknown): string => {
 };
 
 const calculateTotal = (items: CheckoutItem[]): number => {
-    return items.reduce((sum, item) => {
-        return sum + getSellingPrice(item.product) * item.quantity;
-    }, 0);
+    return items.reduce(
+        (sum, item) => {
+            return (
+                sum +
+                getRoundedSaleLineTotal(
+                    item.product,
+                    item.quantity,
+                )
+            );
+        },
+        0,
+    );
 };
 
 const createReceiptId = (): string => {
@@ -739,7 +856,7 @@ const getHeldCheckoutTitle = (held: HeldCheckout): string => {
     return "Отложенный чек";
 };
 
-const readJsonSafe = async <T,>(response: Response): Promise<T | null> => {
+const readJsonSafe = async <T, >(response: Response): Promise<T | null> => {
     try {
         return (await response.json()) as T;
     } catch {
@@ -779,7 +896,7 @@ const getFiscalAgentToken = (): string => {
     return localStorage.getItem(FISCAL_AGENT_TOKEN_KEY) || "";
 };
 
-const callFiscalAgent = async <T,>(
+const callFiscalAgent = async <T, >(
     path: string,
     init?: RequestInit,
 ): Promise<T> => {
@@ -2467,7 +2584,7 @@ export default function PosPage() {
             if (existingItem) {
                 return prevItems.map((item) =>
                     String(item.product.id) === String(safeProduct.id)
-                        ? { ...item, quantity: nextQuantity }
+                        ? {...item, quantity: nextQuantity}
                         : item,
                 );
             }
@@ -3313,10 +3430,40 @@ export default function PosPage() {
                 const marked = isMarkedProduct(item.product);
                 const markingCode = normalizeMarkingCode(item.markingCode);
                 const isBlockPackage = marked && item.markingPackageMode === "block";
-                const lineTotal = price * item.quantity;
-                const fiscalQuantity = isBlockPackage ? 1 : item.quantity;
-                const fiscalPrice = isBlockPackage ? lineTotal : price;
-                const fiscalTotal = fiscalPrice * fiscalQuantity;
+                const lineTotal =
+                    getRoundedSaleLineTotal(
+                        item.product,
+                        item.quantity,
+                    );
+
+                const fiscalQuantity =
+                    isBlockPackage
+                        ? 1
+                        : item.quantity;
+
+                const fiscalPrice =
+                    isBlockPackage
+                        ? lineTotal
+                        : isWeightProduct(
+                            item.product,
+                        )
+                            ? getFiscalUnitPriceForRoundedWeight(
+                                item.product,
+                                item.quantity,
+                                lineTotal,
+                            )
+                            : price;
+
+                const fiscalTotal =
+                    isBlockPackage ||
+                    isWeightProduct(
+                        item.product,
+                    )
+                        ? lineTotal
+                        : roundMoney(
+                            fiscalPrice *
+                            fiscalQuantity,
+                        );
 
                 return {
                     productId: item.product.id,
@@ -3338,14 +3485,24 @@ export default function PosPage() {
                             markingMessage: item.markingMessage,
                             markingPackageMode: item.markingPackageMode,
                             markingPackageQuantity: item.markingPackageQuantity,
-                            ...(isBlockPackage
-                                ? {
-                                    fiscalQuantity,
-                                    fiscalPrice,
-                                    fiscalTotal,
-                                    fiscalPackageName: "Блок сигарет",
-                                }
-                                : {}),
+                            ...(
+                                isBlockPackage ||
+                                isWeightProduct(
+                                    item.product,
+                                )
+                                    ? {
+                                        fiscalQuantity,
+                                        fiscalPrice,
+                                        fiscalTotal,
+                                        ...(isBlockPackage
+                                            ? {
+                                                fiscalPackageName:
+                                                    "Блок сигарет",
+                                            }
+                                            : {}),
+                                    }
+                                    : {}
+                            ),
                         }
                         : {}),
                 };
@@ -3564,7 +3721,7 @@ export default function PosPage() {
         return products.flatMap((product) => {
             const quantity = getPriceLabelQuantity(product.id);
 
-            return Array.from({ length: quantity }, () => product);
+            return Array.from({length: quantity}, () => product);
         });
     };
 
@@ -4086,7 +4243,7 @@ export default function PosPage() {
         layout: PrintLayout = "a4",
     ) => {
         if (layout === "thermal") {
-            setPendingPriceLabelPrint({ mode, layout });
+            setPendingPriceLabelPrint({mode, layout});
             return;
         }
 
@@ -4124,7 +4281,8 @@ export default function PosPage() {
 
     if (!isAuthChecked) {
         return (
-            <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6 flex items-center justify-center text-gray-500">
+            <div
+                className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6 flex items-center justify-center text-gray-500">
                 Проверка авторизации...
             </div>
         );
@@ -4380,10 +4538,22 @@ export default function PosPage() {
                             )}
 
                             <div className="mt-5 grid grid-cols-2 gap-2">
-                                <button type="button" onClick={() => openPayment("cash")} disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems} className="rounded-2xl bg-emerald-600 px-3 py-3 text-sm font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">Наличные</button>
-                                <button type="button" onClick={() => openPayment("card")} disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems} className="rounded-2xl bg-indigo-600 px-3 py-3 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">Карта</button>
-                                <button type="button" onClick={() => openPayment("mixed")} disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems} className="rounded-2xl bg-violet-600 px-3 py-3 text-sm font-black text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50">Смешанная</button>
-                                <button type="button" onClick={() => openPayment("transfer")} disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems} className="rounded-2xl bg-blue-600 px-3 py-3 text-sm font-black text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">Перевод</button>
+                                <button type="button" onClick={() => openPayment("cash")}
+                                        disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems}
+                                        className="rounded-2xl bg-emerald-600 px-3 py-3 text-sm font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">Наличные
+                                </button>
+                                <button type="button" onClick={() => openPayment("card")}
+                                        disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems}
+                                        className="rounded-2xl bg-indigo-600 px-3 py-3 text-sm font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">Карта
+                                </button>
+                                <button type="button" onClick={() => openPayment("mixed")}
+                                        disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems}
+                                        className="rounded-2xl bg-violet-600 px-3 py-3 text-sm font-black text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50">Смешанная
+                                </button>
+                                <button type="button" onClick={() => openPayment("transfer")}
+                                        disabled={checkoutItems.length === 0 || hasUnsafeMarkedCheckoutItems}
+                                        className="rounded-2xl bg-blue-600 px-3 py-3 text-sm font-black text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">Перевод
+                                </button>
                             </div>
 
                             <div className="mt-4 grid grid-cols-2 gap-2">
@@ -4452,7 +4622,7 @@ export default function PosPage() {
                                     Закрыть смену
                                 </button>
 
-                                <PosCashDrawer />
+                                <PosCashDrawer/>
 
                                 <button
                                     type="button"
@@ -4591,10 +4761,101 @@ export default function PosPage() {
                                                             </div>
 
                                                             {job.error && (
-                                                                <div className="mt-1 text-[11px] font-semibold leading-4 text-red-600">
+                                                                <div
+                                                                    className="mt-1 text-[11px] font-semibold leading-4 text-red-600">
                                                                     {job.error}
                                                                 </div>
                                                             )}
+
+                                                            <details
+                                                                className="mt-3 rounded-xl border border-gray-200 bg-gray-50">
+                                                                <summary
+                                                                    className="cursor-pointer select-none px-3 py-2 text-xs font-black text-gray-700 hover:bg-gray-100">
+                                                                    Товары в чеке ({job.receipt.items.length})
+                                                                </summary>
+
+                                                                <div className="border-t border-gray-200">
+                                                                    {job.receipt.items.map((item, itemIndex) => (
+                                                                        <div
+                                                                            key={`${job.id}-${item.productId}-${itemIndex}`}
+                                                                            className="flex items-start justify-between gap-3 border-b border-gray-100 px-3 py-2 last:border-b-0"
+                                                                        >
+                                                                            <div className="min-w-0">
+                                                                                <div
+                                                                                    className="text-xs font-black text-gray-900">
+                                                                                    {item.name}
+                                                                                </div>
+
+                                                                                <div
+                                                                                    className="mt-1 text-[11px] text-gray-500">
+                                                                                    {formatQuantity(
+                                                                                        item.quantity,
+                                                                                        item.unit,
+                                                                                    )}
+                                                                                    {" × "}
+                                                                                    {formatCurrency(item.price)}
+                                                                                    {item.unit === "weight"
+                                                                                        ? " / кг"
+                                                                                        : " / шт."}
+                                                                                </div>
+
+                                                                                {item.barcode && (
+                                                                                    <div
+                                                                                        className="mt-0.5 text-[10px] text-gray-400">
+                                                                                        ШК: {item.barcode}
+                                                                                    </div>
+                                                                                )}
+
+                                                                                {(
+                                                                                    item.fiscalPrice !== undefined ||
+                                                                                    item.fiscalTotal !== undefined
+                                                                                ) && (
+                                                                                    <div
+                                                                                        className="mt-1 text-[10px] text-indigo-500">
+                                                                                        ККТ: цена{" "}
+                                                                                        {formatCurrency(
+                                                                                            item.fiscalPrice ??
+                                                                                            item.price,
+                                                                                        )}
+                                                                                        {" · "}
+                                                                                        сумма{" "}
+                                                                                        {formatCurrency(
+                                                                                            item.fiscalTotal ??
+                                                                                            item.total,
+                                                                                        )}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+
+                                                                            <div className="shrink-0 text-right">
+                                                                                <div
+                                                                                    className="text-sm font-black text-gray-900">
+                                                                                    {formatCurrency(item.total)}
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    ))}
+
+                                                                    <div
+                                                                        className="flex items-center justify-between bg-white px-3 py-3">
+                                                                        <span className="text-xs font-black text-gray-500">
+                                                                            Итого
+                                                                        </span>
+
+                                                                        <span
+                                                                            className="text-base font-black text-gray-950">
+                                                                            {formatCurrency(job.receipt.total)}
+                                                                        </span>
+                                                                    </div>
+
+                                                                    <div
+                                                                        className="border-t border-gray-100 bg-white px-3 py-2 text-[10px] text-gray-500">
+                                                                        {new Date(job.createdAt).toLocaleString("ru-RU")}
+                                                                        {" · "}
+                                                                        {job.receipt.paymentLabel}
+                                                                    </div>
+                                                                </div>
+                                                            </details>
                                                         </div>
 
                                                         <div className="flex shrink-0 flex-col items-end gap-2">
@@ -4734,7 +4995,8 @@ export default function PosPage() {
                                                             </div>
 
                                                             {job.error && (
-                                                                <div className="mt-1 text-[11px] font-semibold leading-4 text-red-600">
+                                                                <div
+                                                                    className="mt-1 text-[11px] font-semibold leading-4 text-red-600">
                                                                     {job.error}
                                                                 </div>
                                                             )}
@@ -5022,7 +5284,8 @@ export default function PosPage() {
                         </div>
 
 
-                        <div className="rounded-3xl border border-indigo-100 bg-white shadow-xl xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:overflow-hidden">
+                        <div
+                            className="rounded-3xl border border-indigo-100 bg-white shadow-xl xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:overflow-hidden">
                             <div
                                 className="sticky top-0 z-20 rounded-t-3xl border-b border-indigo-100 bg-white/95 px-5 py-4 backdrop-blur">
                                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -5178,7 +5441,10 @@ export default function PosPage() {
                                                             <div
                                                                 className="min-w-[145px] text-right text-2xl font-black text-gray-900">
                                                                 {formatCurrency(
-                                                                    getSellingPrice(item.product) * item.quantity,
+                                                                    getRoundedSaleLineTotal(
+                                                                        item.product,
+                                                                        item.quantity,
+                                                                    ),
                                                                 )}
                                                             </div>
 
@@ -6453,9 +6719,15 @@ export default function PosPage() {
 
                                     {paymentModal === "mixed" && (
                                         <div className="mt-3 rounded-xl bg-violet-50 px-4 py-3 text-sm text-violet-800">
-                                            <div className="flex justify-between"><span>Наличными:</span><span className="font-bold">{formatCurrency(mixedCashAmount)}</span></div>
-                                            <div className="mt-1 flex justify-between"><span>Картой:</span><span className="font-bold">{formatCurrency(mixedCardAmount)}</span></div>
-                                            <div className="mt-3 border-t border-violet-200 pt-2 text-xs font-semibold">В учёте сохраняется реальная разбивка. В АТОЛ временно отправляется вся сумма как карта.</div>
+                                            <div className="flex justify-between"><span>Наличными:</span><span
+                                                className="font-bold">{formatCurrency(mixedCashAmount)}</span></div>
+                                            <div className="mt-1 flex justify-between"><span>Картой:</span><span
+                                                className="font-bold">{formatCurrency(mixedCardAmount)}</span></div>
+                                            <div
+                                                className="mt-3 border-t border-violet-200 pt-2 text-xs font-semibold">В
+                                                учёте сохраняется реальная разбивка. В АТОЛ временно отправляется вся
+                                                сумма как карта.
+                                            </div>
                                         </div>
                                     )}
                                 </div>
@@ -6621,8 +6893,13 @@ export default function PosPage() {
 
                                 {lastReceipt.paymentMethod === "mixed" && (
                                     <>
-                                        <div className="flex justify-between text-emerald-700"><span>Наличными:</span><span className="font-semibold">{formatCurrency(lastReceipt.cashAmount || 0)}</span></div>
-                                        <div className="flex justify-between text-indigo-700"><span>Картой:</span><span className="font-semibold">{formatCurrency(lastReceipt.cardAmount || 0)}</span></div>
+                                        <div className="flex justify-between text-emerald-700">
+                                            <span>Наличными:</span><span
+                                            className="font-semibold">{formatCurrency(lastReceipt.cashAmount || 0)}</span>
+                                        </div>
+                                        <div className="flex justify-between text-indigo-700"><span>Картой:</span><span
+                                            className="font-semibold">{formatCurrency(lastReceipt.cardAmount || 0)}</span>
+                                        </div>
                                     </>
                                 )}
                             </div>
