@@ -21,7 +21,65 @@ import { syncAllProductsToIndexedDb } from '../lib/sync/products-sync'
 
 const PAGE_LIMIT = 20
 const FULL_SYNC_PAGE_LIMIT = 100
-const DEFAULT_PRODUCT_IMAGE = '/icons/products.jpg'
+
+/**
+ * Заглушка товара.
+ *
+ * В БД исторически могли сохраниться старые заглушки как `/icons/products.png`
+ * или `/icons/products.jpg`. Для интерфейса считаем их отсутствующей фотографией
+ * и всегда подменяем на новую `product-placeholder.png`.
+ *
+ * Версия в query нужна только для отображения, чтобы браузер/Vercel не держал
+ * старую картинку в кэше. В БД сохраняем путь без query-параметра.
+ */
+const PRODUCT_PLACEHOLDER_IMAGE_PATH = '/icons/product-placeholder.png'
+const DEFAULT_PRODUCT_IMAGE = `${PRODUCT_PLACEHOLDER_IMAGE_PATH}?v=20260924-2`
+
+const PLACEHOLDER_PRODUCT_IMAGE_PATHS = new Set([
+    '/icons/products.png',
+    '/icons/products.jpg',
+    PRODUCT_PLACEHOLDER_IMAGE_PATH,
+])
+
+const getProductImagePathname = (image?: string | null): string => {
+    const value = String(image || '').trim()
+
+    if (!value) {
+        return ''
+    }
+
+    try {
+        return new URL(value, 'https://warehouse.local').pathname.toLowerCase()
+    } catch {
+        return value.split(/[?#]/, 1)[0].toLowerCase()
+    }
+}
+
+const isPlaceholderProductImage = (image?: string | null): boolean => {
+    const pathname = getProductImagePathname(image)
+
+    return !pathname || PLACEHOLDER_PRODUCT_IMAGE_PATHS.has(pathname)
+}
+
+const getProductImage = (image?: string | null): string => {
+    const value = String(image || '').trim()
+
+    if (isPlaceholderProductImage(value)) {
+        return DEFAULT_PRODUCT_IMAGE
+    }
+
+    return value
+}
+
+const getProductImageForForm = (image?: string | null): string => {
+    const value = String(image || '').trim()
+
+    if (isPlaceholderProductImage(value)) {
+        return ''
+    }
+
+    return value
+}
 
 const UPDATE_MODAL_STORAGE_KEY = 'warehouse_updates_modal_v1_2026_06_24'
 
@@ -56,7 +114,7 @@ async function resolveProductImage(formData: ProductFormData): Promise<string> {
         return uploadProductImage(formData.imageFile)
     }
 
-    return formData.image || DEFAULT_PRODUCT_IMAGE
+    return getProductImageForForm(formData.image) || PRODUCT_PLACEHOLDER_IMAGE_PATH
 }
 
 
@@ -207,7 +265,7 @@ const buildProductFormInitialData = (product: Product): ProductFormData => {
         unit: product.unit,
         stock: String(product.stock),
         minStock: String(product.minStock),
-        image: product.image || '',
+        image: getProductImageForForm(product.image),
         marked: isMarkedProduct(product),
     }
 }
@@ -324,6 +382,12 @@ export default function Products() {
                 await refreshProductsFromIndexedDb()
             })
             .catch(error => {
+                // Kaspersky может перехватить fetch и превратить обычный AbortError
+                // в TypeError: Failed to fetch. Поэтому сначала проверяем сам signal.
+                if (controller.signal.aborted) {
+                    return
+                }
+
                 if (error instanceof Error && error.name === 'AbortError') {
                     return
                 }
@@ -687,7 +751,7 @@ export default function Products() {
 
             const createdProduct: Product = {
                 ...(data as Product),
-                image: (data as Product).image || DEFAULT_PRODUCT_IMAGE,
+                image: getProductImage((data as Product).image),
             }
 
             setProducts(prevProducts => [
@@ -775,7 +839,7 @@ export default function Products() {
             const updatedProduct: Product = {
                 ...editingProduct,
                 ...(data as Product),
-                image: (data as Product).image || DEFAULT_PRODUCT_IMAGE,
+                image: getProductImage((data as Product).image),
             }
 
             setProducts(prevProducts =>
@@ -1066,12 +1130,16 @@ export default function Products() {
                                             >
                                                 <div className="product-image-wrap relative h-40 bg-gray-100">
                                                     <img
-                                                        src={product.image || DEFAULT_PRODUCT_IMAGE}
+                                                        src={getProductImage(product.image)}
                                                         alt={product.name}
                                                         loading="lazy"
                                                         decoding="async"
                                                         onError={event => {
-                                                            event.currentTarget.src = DEFAULT_PRODUCT_IMAGE
+                                                            const imageElement = event.currentTarget
+
+                                                            if (!imageElement.src.includes('/icons/product-placeholder.png')) {
+                                                                imageElement.src = DEFAULT_PRODUCT_IMAGE
+                                                            }
                                                         }}
                                                         className="w-full h-full object-contain bg-white"
                                                     />

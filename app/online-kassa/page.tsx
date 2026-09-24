@@ -93,6 +93,76 @@ type MarkingStatus = "M+" | "M-" | "M";
 type MarkingPackageMode = "single" | "block";
 
 const CIGARETTE_BLOCK_QUANTITY = 10;
+const OWNER_REPRESENTATIVES = [
+    "Якимов Александр",
+    "Леньшина Ольга",
+    "Якимова-Леньшина Лада",
+    "Леньшин Илья",
+] as const;
+
+const CUSTOMER_DISPLAY_CHANNEL_NAME = "warehouse-customer-display-v1";
+const CUSTOMER_DISPLAY_PRODUCT_PLACEHOLDER = "/icons/product-placeholder.png?v=20260924-3";
+
+const normalizeCustomerDisplayImage = (image?: string | null): string => {
+    const value = String(image || "").trim();
+
+    if (!value) {
+        return CUSTOMER_DISPLAY_PRODUCT_PLACEHOLDER;
+    }
+
+    try {
+        const parsed = new URL(value, "http://warehouse.local");
+        const pathname = parsed.pathname.toLowerCase();
+
+        if (
+            pathname === "/icons/products.png" ||
+            pathname === "/icons/products.jpg" ||
+            pathname === "/icons/product-placeholder.png"
+        ) {
+            return CUSTOMER_DISPLAY_PRODUCT_PLACEHOLDER;
+        }
+    } catch {
+        const normalized = value.split("?")[0]?.toLowerCase() || "";
+
+        if (
+            normalized === "/icons/products.png" ||
+            normalized === "/icons/products.jpg" ||
+            normalized === "/icons/product-placeholder.png"
+        ) {
+            return CUSTOMER_DISPLAY_PRODUCT_PLACEHOLDER;
+        }
+    }
+
+    return value;
+};
+
+type OwnerRepresentative = (typeof OWNER_REPRESENTATIVES)[number];
+
+type CustomerDisplayItem = {
+    id: string;
+    productId: ProductId;
+    name: string;
+    quantity: number;
+    unit: string;
+    price: number;
+    total: number;
+    image?: string;
+};
+
+type CustomerDisplayStateMessage = {
+    type: "state";
+    locationName: string;
+    total: number;
+    items: CustomerDisplayItem[];
+    updatedAt: string;
+};
+
+type CustomerDisplayCompleteMessage = {
+    type: "sale-complete";
+    total: number;
+    updatedAt: string;
+};
+
 
 type CheckoutItem = {
     product: Product;
@@ -997,8 +1067,7 @@ const normalizeProduct = (product: Product): Product => {
 
 const normalizeProductsApiResponse = (data: unknown): ProductsApiResponse => {
     if (Array.isArray(data)) {
-        return {
-            items: data,
+        return {items: data,
             nextCursor: null,
             hasMore: false,
             limit: data.length,
@@ -1769,6 +1838,10 @@ export default function PosPage() {
     const posBackgroundWorkerRunningRef = useRef(false);
 
     const [checkoutItems, setCheckoutItems] = useState<CheckoutItem[]>([]);
+    const [isOwnerWriteoffOpen, setIsOwnerWriteoffOpen] = useState(false);
+    const [selectedOwnerRepresentative, setSelectedOwnerRepresentative] =
+        useState<OwnerRepresentative | "">("");
+    const [isOwnerWriteoffSaving, setIsOwnerWriteoffSaving] = useState(false);
     const [allProducts, setAllProducts] = useState<Product[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
     const [foundProducts, setFoundProducts] = useState<Product[]>([]);
@@ -1900,6 +1973,8 @@ export default function PosPage() {
     );
 
     const searchInputRef = useRef<HTMLInputElement>(null);
+    const customerDisplayChannelRef = useRef<BroadcastChannel | null>(null);
+    const customerDisplaySnapshotRef = useRef<CustomerDisplayStateMessage | null>(null);
     const newSaleButtonRef = useRef<HTMLButtonElement>(null);
     const skipCommodityReceiptPrintButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -1918,6 +1993,68 @@ export default function PosPage() {
     const hasUnsafeMarkedCheckoutItems = checkoutItems.some(
         (item) => isMarkedProduct(item.product) && item.markingStatus !== "M+",
     );
+
+    const customerDisplayState = useMemo<CustomerDisplayStateMessage>(() => {
+        const items: CustomerDisplayItem[] = checkoutItems.map((item) => {
+            const price = getSellingPrice(item.product);
+            const itemTotal = getRoundedSaleLineTotal(
+                item.product,
+                item.quantity,
+            );
+
+            return {
+                id: item.id,
+                productId: item.product.id,
+                name: item.product.name || "Товар",
+                quantity: item.quantity,
+                unit: item.product.unit || "piece",
+                price,
+                total: itemTotal,
+                image: normalizeCustomerDisplayImage(item.product.image),
+            };
+        });
+
+        return {
+            type: "state",
+            locationName: warehouseLocationName,
+            total,
+            items,
+            updatedAt: new Date().toISOString(),
+        };
+    }, [checkoutItems, total, warehouseLocationName]);
+
+    customerDisplaySnapshotRef.current = customerDisplayState;
+
+    useEffect(() => {
+        if (typeof window === "undefined" || !("BroadcastChannel" in window)) {
+            return;
+        }
+
+        const channel = new BroadcastChannel(CUSTOMER_DISPLAY_CHANNEL_NAME);
+        customerDisplayChannelRef.current = channel;
+
+        channel.onmessage = (event: MessageEvent<{type?: string}>) => {
+            if (event.data?.type === "request-state") {
+                const snapshot = customerDisplaySnapshotRef.current;
+
+                if (snapshot) {
+                    channel.postMessage(snapshot);
+                }
+            }
+        };
+
+        return () => {
+            channel.close();
+
+            if (customerDisplayChannelRef.current === channel) {
+                customerDisplayChannelRef.current = null;
+            }
+        };
+    }, []);
+
+    useEffect(() => {
+        customerDisplayChannelRef.current?.postMessage(customerDisplayState);
+    }, [customerDisplayState]);
 
     const appendNotificationLog =
         useCallback(
@@ -1997,9 +2134,7 @@ export default function PosPage() {
 
                 setUnreadNotificationCount(
                     0,
-                );
-
-                setIsNotificationLogOpen(
+                );setIsNotificationLogOpen(
                     false,
                 );
             },
@@ -2997,9 +3132,7 @@ export default function PosPage() {
                     data?.message ||
                     "Не удалось сохранить чек",
                 );
-            }
-
-            return data || receipt;
+            }return data || receipt;
         },
         [],
     );
@@ -3479,6 +3612,168 @@ export default function PosPage() {
             requestAnimationFrame(() => {
                 searchInputRef.current?.focus();
             });
+        }
+    };
+
+    const openCustomerDisplay = () => {
+        if (typeof window === "undefined") {
+            return;
+        }
+
+        const displayWindow = window.open(
+            "/customer-display",
+            "warehouse-customer-display",
+            "popup=yes,width=1280,height=720,resizable=yes,scrollbars=no",
+        );
+
+        if (!displayWindow) {
+            setError(
+                "Браузер заблокировал окно покупателя. Разрешите всплывающие окна для этой страницы.",
+            );
+            return;
+        }
+
+        displayWindow.focus();
+
+        window.setTimeout(() => {
+            const snapshot = customerDisplaySnapshotRef.current;
+
+            if (snapshot) {
+                customerDisplayChannelRef.current?.postMessage(snapshot);
+            }
+        }, 300);
+    };
+
+    const notifyCustomerDisplaySaleComplete = (saleTotal: number) => {
+        const message: CustomerDisplayCompleteMessage = {
+            type: "sale-complete",
+            total: saleTotal,
+            updatedAt: new Date().toISOString(),
+        };
+
+        customerDisplayChannelRef.current?.postMessage(message);
+    };
+
+    const openOwnerWriteoff = () => {
+        if (checkoutItems.length === 0) {
+            setError("Добавьте товары в чек");
+            return;
+        }
+
+        if (hasMarkedCheckoutItems) {
+            setError(
+                "«За Спасибо» пока недоступно для маркированного товара: требуется отдельный вывод из оборота в Честном знаке для собственных нужд.",
+            );
+            return;
+        }
+
+        setSelectedOwnerRepresentative("");
+        setError(null);
+        setIsOwnerWriteoffOpen(true);
+    };
+
+    const submitOwnerWriteoff = async () => {
+        if (!selectedOwnerRepresentative) {
+            setError("Выберите представителя");
+            return;
+        }
+
+        if (checkoutItems.length === 0) {
+            setError("Корзина пуста");
+            return;
+        }
+
+        if (hasMarkedCheckoutItems) {
+            setError(
+                "В корзине есть маркированный товар. Для него внутреннее списание через кассу заблокировано.",
+            );
+            return;
+        }
+
+        const writeoffItems: ReceiptItem[] = checkoutItems.map((item) => {
+            const price = getSellingPrice(item.product);
+            const lineTotal = getRoundedSaleLineTotal(
+                item.product,
+                item.quantity,
+            );
+
+            return {
+                productId: item.product.id,
+                name: item.product.name,
+                barcode: getPrimaryBarcode(String(item.product.barcode || "")) || "",
+                category: item.product.category || "",
+                unit: item.product.unit,
+                quantity: item.quantity,
+                price,
+                total: lineTotal,
+                stockQuantity: item.quantity,
+            };
+        });
+
+        try {
+            setIsOwnerWriteoffSaving(true);
+            setError(null);
+            setNotice(null);
+
+            const response = await fetch("/api/writeoff/owners", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    ...getLocationHeaders(),
+                },
+                body: JSON.stringify({
+                    representative: selectedOwnerRepresentative,
+                    items: writeoffItems.map((item) => ({
+                        productId: item.productId,
+                        quantity: item.stockQuantity ?? item.quantity,
+                    })),
+                }),
+            });
+
+            const data = await readJsonSafe<{
+                ok?: boolean;
+                message?: string;
+                representative?: string;
+                location?: {
+                    name?: string;
+                };
+            } & ApiError>(response);
+
+            if (!response.ok) {
+                throw new Error(
+                    data?.message || "Не удалось провести списание «За Спасибо»",
+                );
+            }
+
+            updateLocalStockAfterSale(writeoffItems);
+            setCheckoutItems([]);
+            setPaymentModal(null);
+            setFiscalConfirmModal(false);
+            setCashReceived("");
+            setMixedCashAmount(0);
+            setMixedCardAmount(0);
+            setTransferCustomerName("");
+            setSelectedOwnerRepresentative("");
+            setIsOwnerWriteoffOpen(false);
+
+            setNotice(
+                `Списание «За Спасибо» проведено: ${
+                    data?.representative || selectedOwnerRepresentative
+                } · ${data?.location?.name || warehouseLocationName}`,
+            );
+
+            requestAnimationFrame(() => {
+                searchInputRef.current?.focus();
+            });
+        } catch (err) {
+            console.error("Owner writeoff error:", err);
+            setError(
+                err instanceof Error
+                    ? err.message
+                    : "Ошибка внутреннего списания",
+            );
+        } finally {
+            setIsOwnerWriteoffSaving(false);
         }
     };
 
@@ -3997,9 +4292,7 @@ export default function PosPage() {
         if (!heldCheckout) {
             setError("Не удалось отложить чек");
             return;
-        }
-
-        saveHeldCheckoutName(
+        }saveHeldCheckoutName(
             String(heldCheckout.id),
             customerName,
         );
@@ -4886,6 +5179,7 @@ export default function PosPage() {
                 receiptItems,
             );
 
+            notifyCustomerDisplaySaleComplete(receiptTotal);
             setCheckoutItems([]);
             setPaymentModal(null);
             setFiscalConfirmModal(false);
@@ -4996,9 +5290,7 @@ export default function PosPage() {
         setPriceLabelQuantities((prev) => ({
             ...prev,
             [id]: safeQuantity,
-        }));
-
-        setSelectedPriceLabelIds((prev) => {
+        }));setSelectedPriceLabelIds((prev) => {
             if (prev.includes(id)) {
                 return prev;
             }
@@ -5803,6 +6095,25 @@ export default function PosPage() {
                                 </button>
                             </div>
 
+                            <div className="mt-3 grid grid-cols-2 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={openOwnerWriteoff}
+                                    disabled={checkoutItems.length === 0}
+                                    className="rounded-xl border border-fuchsia-300 bg-fuchsia-50 px-4 py-3 text-sm font-black text-fuchsia-800 transition hover:bg-fuchsia-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    За Спасибо :D
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={openCustomerDisplay}
+                                    className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-3 text-sm font-black text-cyan-800 transition hover:bg-cyan-100"
+                                >
+                                    Экран покупателя
+                                </button>
+                            </div>
+
                             <div className="mt-4 grid grid-cols-2 gap-2">
                                 <button
                                     type="button"
@@ -5997,8 +6308,7 @@ export default function PosPage() {
                                                     <div className="flex items-start justify-between gap-3">
                                                         <div className="min-w-0">
                                                             <div className="truncate text-xs font-black text-gray-900">
-                                                                {job.id}
-                                                            </div>
+                                                                {job.id}</div>
 
                                                             <div className="mt-1 text-[11px] text-gray-500">
                                                                 {job.receipt.items.length} поз. ·{" "}
@@ -6997,10 +7307,9 @@ export default function PosPage() {
                             <div className="mt-6 grid grid-cols-1 gap-2 sm:grid-cols-3">
                                 <button
                                     type="button"
-                                    onClick={() =>
-                                        setIsClockSettingsOpen(
-                                            false,
-                                        )
+                                    onClick={() =>setIsClockSettingsOpen(
+                                        false,
+                                    )
                                     }
                                     className="rounded-xl border border-gray-300 px-4 py-3 font-bold text-gray-700 hover:bg-gray-50"
                                 >
@@ -7997,106 +8306,104 @@ export default function PosPage() {
                                         ×
                                     </button>
                                 </div>
-                            </div>
+                            </div><div className="min-h-0 flex-1 overflow-y-auto p-6">
+                            {heldCheckouts.length === 0 ? (
+                                <div className="rounded-xl bg-gray-50 px-4 py-8 text-center text-gray-500">
+                                    Отложенных чеков пока нет
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {heldCheckouts.map((held) => {
+                                        const title = getHeldCheckoutTitle(held);
+                                        const heldTotal =
+                                            held.total ||
+                                            held.items.reduce((sum, item) => {
+                                                return (
+                                                    sum +
+                                                    safeParseNumber(
+                                                        item.product?.sellingPrice ??
+                                                        item.product?.selling_price,
+                                                    ) *
+                                                    safeParseNumber(item.quantity)
+                                                );
+                                            }, 0);
 
-                            <div className="min-h-0 flex-1 overflow-y-auto p-6">
-                                {heldCheckouts.length === 0 ? (
-                                    <div className="rounded-xl bg-gray-50 px-4 py-8 text-center text-gray-500">
-                                        Отложенных чеков пока нет
-                                    </div>
-                                ) : (
-                                    <div className="space-y-3">
-                                        {heldCheckouts.map((held) => {
-                                            const title = getHeldCheckoutTitle(held);
-                                            const heldTotal =
-                                                held.total ||
-                                                held.items.reduce((sum, item) => {
-                                                    return (
-                                                        sum +
-                                                        safeParseNumber(
-                                                            item.product?.sellingPrice ??
-                                                            item.product?.selling_price,
-                                                        ) *
-                                                        safeParseNumber(item.quantity)
-                                                    );
-                                                }, 0);
-
-                                            return (
+                                        return (
+                                            <div
+                                                key={held.id}
+                                                className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm"
+                                            >
                                                 <div
-                                                    key={held.id}
-                                                    className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm"
-                                                >
-                                                    <div
-                                                        className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                                                        <div className="min-w-0">
-                                                            <div className="font-bold text-gray-900">
-                                                                {title}
-                                                            </div>
-
-                                                            <div className="mt-1 text-xs text-gray-500">
-                                                                Создан:{" "}
-                                                                {new Date(held.createdAt).toLocaleString(
-                                                                    "ru-RU",
-                                                                )}{" "}
-                                                                · Позиций: {held.items.length}
-                                                            </div>
-
-                                                            <div className="mt-2 space-y-1 text-sm text-gray-600">
-                                                                {held.items.slice(0, 3).map((item, index) => (
-                                                                    <div
-                                                                        key={`${held.id}-${index}`}
-                                                                        className="truncate"
-                                                                    >
-                                                                        {item.product?.name || "Товар"} ×{" "}
-                                                                        {formatQuantity(
-                                                                            safeParseNumber(item.quantity),
-                                                                            item.product?.unit,
-                                                                        )}
-                                                                        {item.markingStatus
-                                                                            ? ` · [${item.markingStatus}]`
-                                                                            : ""}
-                                                                    </div>
-                                                                ))}
-
-                                                                {held.items.length > 3 && (
-                                                                    <div className="text-xs text-gray-400">
-                                                                        + ещё {held.items.length - 3}
-                                                                    </div>
-                                                                )}
-                                                            </div>
+                                                    className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                                    <div className="min-w-0">
+                                                        <div className="font-bold text-gray-900">
+                                                            {title}
                                                         </div>
 
-                                                        <div className="shrink-0 text-left sm:text-right">
-                                                            <div className="text-2xl font-bold text-indigo-700">
-                                                                {formatCurrency(heldTotal)}
-                                                            </div>
+                                                        <div className="mt-1 text-xs text-gray-500">
+                                                            Создан:{" "}
+                                                            {new Date(held.createdAt).toLocaleString(
+                                                                "ru-RU",
+                                                            )}{" "}
+                                                            · Позиций: {held.items.length}
+                                                        </div>
 
-                                                            <div
-                                                                className="mt-3 flex flex-wrap justify-start gap-2 sm:justify-end">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => restoreHeldCheckout(held)}
-                                                                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+                                                        <div className="mt-2 space-y-1 text-sm text-gray-600">
+                                                            {held.items.slice(0, 3).map((item, index) => (
+                                                                <div
+                                                                    key={`${held.id}-${index}`}
+                                                                    className="truncate"
                                                                 >
-                                                                    Открыть
-                                                                </button>
+                                                                    {item.product?.name || "Товар"} ×{" "}
+                                                                    {formatQuantity(
+                                                                        safeParseNumber(item.quantity),
+                                                                        item.product?.unit,
+                                                                    )}
+                                                                    {item.markingStatus
+                                                                        ? ` · [${item.markingStatus}]`
+                                                                        : ""}
+                                                                </div>
+                                                            ))}
 
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => deleteHeldCheckout(held)}
-                                                                    className="rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
-                                                                >
-                                                                    Удалить
-                                                                </button>
-                                                            </div>
+                                                            {held.items.length > 3 && (
+                                                                <div className="text-xs text-gray-400">
+                                                                    + ещё {held.items.length - 3}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="shrink-0 text-left sm:text-right">
+                                                        <div className="text-2xl font-bold text-indigo-700">
+                                                            {formatCurrency(heldTotal)}
+                                                        </div>
+
+                                                        <div
+                                                            className="mt-3 flex flex-wrap justify-start gap-2 sm:justify-end">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => restoreHeldCheckout(held)}
+                                                                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+                                                            >
+                                                                Открыть
+                                                            </button>
+
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => deleteHeldCheckout(held)}
+                                                                className="rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                                                            >
+                                                                Удалить
+                                                            </button>
                                                         </div>
                                                     </div>
                                                 </div>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                            </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
                         </motion.div>
                     </div>
                 )}
@@ -8997,8 +9304,7 @@ export default function PosPage() {
                                                 false
                                             )
                                         }
-                                        className="rounded-xl border border-gray-300 bg-white px-5 py-3 font-bold text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-                                    >
+                                        className="rounded-xl border border-gray-300 bg-white px-5 py-3 font-bold text-gray-700 hover:bg-gray-100 disabled:opacity-50">
                                         Отмена
                                     </button>
 
@@ -9022,6 +9328,132 @@ export default function PosPage() {
                             </div>
                         </motion.div>
                     </div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {isOwnerWriteoffOpen && (
+                    <motion.div
+                        initial={{opacity: 0}}
+                        animate={{opacity: 1}}
+                        exit={{opacity: 0}}
+                        className="fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+                        onMouseDown={(event) => {
+                            if (
+                                event.currentTarget === event.target &&
+                                !isOwnerWriteoffSaving
+                            ) {
+                                setIsOwnerWriteoffOpen(false);
+                            }
+                        }}
+                    >
+                        <motion.div
+                            initial={{opacity: 0, scale: 0.96, y: 14}}
+                            animate={{opacity: 1, scale: 1, y: 0}}
+                            exit={{opacity: 0, scale: 0.96, y: 14}}
+                            className="w-full max-w-2xl overflow-hidden rounded-[30px] bg-white shadow-2xl"
+                        >
+                            <div className="border-b border-gray-100 bg-gradient-to-r from-fuchsia-600 to-violet-600 px-6 py-5 text-white">
+                                <div className="text-xs font-black uppercase tracking-[0.18em] text-fuchsia-100">
+                                    Внутреннее списание
+                                </div>
+                                <h2 className="mt-1 text-2xl font-black">
+                                    За Спасибо :D
+                                </h2>
+                                <p className="mt-2 max-w-xl text-sm font-semibold text-fuchsia-50/90">
+                                    Товар будет списан с остатка текущей точки, но операция не попадёт
+                                    в продажи, выручку, кассовый остаток и финансовую статистику.
+                                </p>
+                            </div>
+
+                            <div className="space-y-5 p-6">
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div className="rounded-2xl bg-gray-50 p-4">
+                                        <div className="text-xs font-black uppercase tracking-wide text-gray-400">
+                                            Позиций
+                                        </div>
+                                        <div className="mt-1 text-2xl font-black text-gray-900">
+                                            {checkoutItems.length}
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-2xl bg-gray-50 p-4">
+                                        <div className="text-xs font-black uppercase tracking-wide text-gray-400">
+                                            Розничная стоимость
+                                        </div>
+                                        <div className="mt-1 text-2xl font-black text-fuchsia-700">
+                                            {formatCurrency(total)}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <div className="mb-3 text-sm font-black text-gray-900">
+                                        Кто забирает товар
+                                    </div>
+
+                                    <div className="grid gap-2 sm:grid-cols-2">
+                                        {OWNER_REPRESENTATIVES.map((representative) => {
+                                            const selected =
+                                                selectedOwnerRepresentative === representative;
+
+                                            return (
+                                                <button
+                                                    key={representative}
+                                                    type="button"
+                                                    onClick={() =>
+                                                        setSelectedOwnerRepresentative(representative)
+                                                    }
+                                                    className={`rounded-2xl border px-4 py-4 text-left text-sm font-black transition ${
+                                                        selected
+                                                            ? "border-fuchsia-500 bg-fuchsia-50 text-fuchsia-800 ring-2 ring-fuchsia-100"
+                                                            : "border-gray-200 bg-white text-gray-800 hover:border-fuchsia-200 hover:bg-fuchsia-50/40"
+                                                    }`}
+                                                >
+                                                    {representative}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                {hasMarkedCheckoutItems && (
+                                    <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700">
+                                        В корзине есть маркированный товар. Такое списание через кассу
+                                        заблокировано до реализации корректного вывода из оборота
+                                        «для собственных нужд».
+                                    </div>
+                                )}
+
+                                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsOwnerWriteoffOpen(false)}
+                                        disabled={isOwnerWriteoffSaving}
+                                        className="rounded-xl border border-gray-300 px-5 py-3 text-sm font-black text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                                    >
+                                        Отмена
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => void submitOwnerWriteoff()}
+                                        disabled={
+                                            isOwnerWriteoffSaving ||
+                                            !selectedOwnerRepresentative ||
+                                            checkoutItems.length === 0 ||
+                                            hasMarkedCheckoutItems
+                                        }
+                                        className="rounded-xl bg-fuchsia-600 px-5 py-3 text-sm font-black text-white shadow-lg shadow-fuchsia-200 transition hover:bg-fuchsia-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        {isOwnerWriteoffSaving
+                                            ? "Списываю..."
+                                            : "Подтвердить списание"}
+                                    </button>
+                                </div>
+                            </div>
+                        </motion.div>
+                    </motion.div>
                 )}
             </AnimatePresence>
 
