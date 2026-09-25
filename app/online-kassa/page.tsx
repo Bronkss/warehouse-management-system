@@ -229,7 +229,74 @@ type FiscalQueueStatus =
     | "pending"
     | "processing"
     | "done"
-    | "failed";
+    | "failed"
+    | "archived";
+
+type FiscalQueueErrorInfo = {
+    code: string;
+    atolCode?: number | null;
+    title: string;
+    explanation: string;
+    canRetry: boolean;
+    requiresReview: boolean;
+};
+
+type FiscalLineDiagnostic = {
+    index: number;
+    name: string;
+    barcode?: string | null;
+    unit?: string | null;
+    quantity: number;
+    originalQuantity: number;
+    requestedPrice: number;
+    requestedAmount: number;
+    fiscalPrice: number;
+    fiscalAmount: number;
+    calculatedAmount: number;
+    difference: number;
+    adjusted: boolean;
+    adjustmentReason?: string | null;
+    targetPreserved: boolean;
+    valid: boolean;
+    marked: boolean;
+    markingCodePreview?: string | null;
+};
+
+type FiscalReceiptDiagnostic = {
+    valid: boolean;
+    adjustedCount: number;
+    requestedTotal: number;
+    fiscalTotal: number;
+    lines: FiscalLineDiagnostic[];
+};
+
+type FiscalQueueReceiptView = {
+    id?: string | null;
+    receiptNumber?: string | null;
+    createdAt?: string | null;
+    paymentMethod?: string | null;
+    paymentLabel?: string | null;
+    total: number;
+    customerName?: string | null;
+    cashierName?: string | null;
+    locationName?: string | null;
+    locationSlug?: string | null;
+    items: Array<{
+        productId?: ProductId | null;
+        name: string;
+        barcode?: string | null;
+        category?: string | null;
+        unit?: string | null;
+        quantity: number;
+        price: number;
+        total: number;
+        fiscalQuantity?: number | null;
+        fiscalPrice?: number | null;
+        fiscalTotal?: number | null;
+        marked?: boolean;
+        markingCodePreview?: string | null;
+    }>;
+};
 
 type FiscalQueueJob = {
     id: string;
@@ -239,12 +306,16 @@ type FiscalQueueJob = {
     updatedAt: string;
     startedAt?: string | null;
     completedAt?: string | null;
+    archivedAt?: string | null;
     attempts: number;
     error?: string | null;
+    errorInfo?: FiscalQueueErrorInfo | null;
     hasMarkedItems: boolean;
     itemCount: number;
     total: number;
     paymentMethod?: string | null;
+    diagnostics?: FiscalReceiptDiagnostic | null;
+    receipt?: FiscalQueueReceiptView | null;
     result?: {
         ok?: boolean;
         mode?: string | null;
@@ -252,6 +323,9 @@ type FiscalQueueJob = {
             uuid?: string | null;
             fiscalParams?: FiscalParams | null;
         } | null;
+        diagnostics?: FiscalReceiptDiagnostic | null;
+        statusCode?: number;
+        details?: unknown;
     } | null;
 };
 
@@ -261,10 +335,18 @@ type FiscalQueueSnapshot = {
         processing: number;
         done: number;
         failed: number;
+        archived: number;
     };
     workerRunning: boolean;
     jobs: FiscalQueueJob[];
 };
+
+type FiscalJournalFilter =
+    | "attention"
+    | "active"
+    | "done"
+    | "archived"
+    | "all";
 
 type FiscalEnqueueResponse = {
     ok?: boolean;
@@ -1114,12 +1196,14 @@ const getMeasureName = (unit: unknown): string => {
 const formatCurrency = (amount: number | undefined | null): string => {
     const safeAmount =
         typeof amount === "number" && Number.isFinite(amount) ? amount : 0;
+    const hasKopecks =
+        Math.abs(safeAmount - Math.round(safeAmount)) > 0.0001;
 
     return new Intl.NumberFormat("ru-RU", {
         style: "currency",
         currency: "RUB",
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 0,
+        minimumFractionDigits: hasKopecks ? 2 : 0,
+        maximumFractionDigits: hasKopecks ? 2 : 0,
     }).format(safeAmount);
 };
 
@@ -1133,6 +1217,41 @@ const roundMoney = (value: number): number => {
     ) / 100;
 };
 
+const findExactFiscalUnitPriceForAmount = (
+    quantity: number,
+    targetAmount: number,
+    preferredPrice: number,
+): number | null => {
+    if (
+        !Number.isFinite(quantity) ||
+        quantity <= 0 ||
+        !Number.isFinite(targetAmount) ||
+        targetAmount < 0
+    ) {
+        return null;
+    }
+
+    const lower = ((targetAmount - 0.005) * 100) / quantity;
+    const upper = ((targetAmount + 0.005) * 100) / quantity;
+    const minCents = Math.max(1, Math.ceil(lower - 1e-9));
+    const maxCents = Math.ceil(upper - 1e-9) - 1;
+
+    if (maxCents < minCents) {
+        return null;
+    }
+
+    const preferredCents = Math.round(preferredPrice * 100);
+    const candidateCents = Math.min(
+        maxCents,
+        Math.max(minCents, preferredCents > 0 ? preferredCents : minCents),
+    );
+    const candidate = candidateCents / 100;
+
+    return roundMoney(candidate * quantity) === roundMoney(targetAmount)
+        ? candidate
+        : null;
+};
+
 const getRoundedSaleLineTotal = (
     product: Product,
     quantity: number,
@@ -1142,12 +1261,22 @@ const getRoundedSaleLineTotal = (
         Number(quantity || 0);
 
     if (isWeightProduct(product)) {
-        // Весовые товары всегда округляем вверх до полного рубля.
-        // Небольшой EPSILON защищает от случаев вроде 428.00000000001.
-        return Math.ceil(
-            rawTotal -
-            Number.EPSILON,
+        const roundedUpTotal = Math.ceil(
+            rawTotal - Number.EPSILON,
         );
+        const exactPrice = findExactFiscalUnitPriceForAmount(
+            quantity,
+            roundedUpTotal,
+            getSellingPrice(product),
+        );
+
+        // Сохраняем полные рубли только когда такую сумму реально можно
+        // передать в ККТ без нарушения price × quantity = amount.
+        // В редком невозможном случае оставляем честную сумму с копейками,
+        // вместо того чтобы получать [16] «Неверная цена (сумма)».
+        return exactPrice !== null
+            ? roundedUpTotal
+            : roundMoney(rawTotal);
     }
 
     return roundMoney(
@@ -1161,7 +1290,7 @@ const getFiscalUnitPriceForRoundedWeight = (
     roundedLineTotal: number,
 ): number => {
     const originalPrice =
-        getSellingPrice(product);
+        roundMoney(getSellingPrice(product));
 
     if (
         !isWeightProduct(product) ||
@@ -1171,68 +1300,14 @@ const getFiscalUnitPriceForRoundedWeight = (
         return originalPrice;
     }
 
-    const target =
-        roundMoney(
-            roundedLineTotal,
-        );
-
-    // АТОЛ проверяет взаимосвязь price × quantity = amount.
-    // После округления строки вверх исходная цена за кг уже может
-    // не давать ровно ту же сумму. Подбираем ближайшую цену с точностью
-    // до копейки, которая после умножения даст нужный итог строки.
-    const idealPrice =
-        target /
-        quantity;
-
-    const baseCents =
-        Math.max(
-            1,
-            Math.round(
-                idealPrice * 100,
-            ),
-        );
-
-    for (
-        let offset = 0;
-        offset <= 500;
-        offset += 1
-    ) {
-        const candidates =
-            offset === 0
-                ? [baseCents]
-                : [
-                    baseCents - offset,
-                    baseCents + offset,
-                ];
-
-        for (
-            const cents
-            of candidates
-            ) {
-            if (cents <= 0) {
-                continue;
-            }
-
-            const candidate =
-                cents / 100;
-
-            if (
-                roundMoney(
-                    candidate *
-                    quantity,
-                ) ===
-                target
-            ) {
-                return candidate;
-            }
-        }
-    }
-
-    // Практически сюда не должны попасть.
-    // Оставляем ближайшее значение, чтобы сумма АТОЛ была максимально близкой.
-    return roundMoney(
-        idealPrice,
+    const target = roundMoney(roundedLineTotal);
+    const exactPrice = findExactFiscalUnitPriceForAmount(
+        quantity,
+        target,
+        originalPrice,
     );
+
+    return exactPrice ?? originalPrice;
 };
 
 const canSellIntoNegativeStock = (product: Product): boolean => {
@@ -1829,6 +1904,12 @@ export default function PosPage() {
         null,
     );
     const [isFiscalQueueOpen, setIsFiscalQueueOpen] = useState(false);
+    const [fiscalJournalFilter, setFiscalJournalFilter] =
+        useState<FiscalJournalFilter>("attention");
+    const [expandedFiscalJobId, setExpandedFiscalJobId] =
+        useState<string | null>(null);
+    const [fiscalActionJobId, setFiscalActionJobId] =
+        useState<string | null>(null);
 
     const [posBackgroundJobs, setPosBackgroundJobs] = useState<
         PosBackgroundSaleJob<Receipt>[]
@@ -1993,6 +2074,30 @@ export default function PosPage() {
     const hasUnsafeMarkedCheckoutItems = checkoutItems.some(
         (item) => isMarkedProduct(item.product) && item.markingStatus !== "M+",
     );
+
+    const fiscalJournalJobs = useMemo(() => {
+        const jobs = (fiscalQueue?.jobs || []).slice().reverse();
+
+        return jobs.filter((job) => {
+            if (fiscalJournalFilter === "attention") {
+                return job.status === "failed";
+            }
+
+            if (fiscalJournalFilter === "active") {
+                return job.status === "pending" || job.status === "processing";
+            }
+
+            if (fiscalJournalFilter === "done") {
+                return job.status === "done";
+            }
+
+            if (fiscalJournalFilter === "archived") {
+                return job.status === "archived";
+            }
+
+            return true;
+        });
+    }, [fiscalJournalFilter, fiscalQueue]);
 
     const customerDisplayState = useMemo<CustomerDisplayStateMessage>(() => {
         const items: CustomerDisplayItem[] = checkoutItems.map((item) => {
@@ -3072,6 +3177,138 @@ export default function PosPage() {
         [],
     );
 
+    const retryFiscalQueueJob = useCallback(
+        async (job: FiscalQueueJob) => {
+            if (job.errorInfo?.canRetry === false) {
+                setError(
+                    job.errorInfo.explanation ||
+                    "Этот чек нельзя повторять без дополнительной проверки",
+                );
+                return;
+            }
+
+            try {
+                setFiscalActionJobId(job.id);
+                setError(null);
+                setNotice(null);
+
+                await callFiscalAgent(
+                    `/fiscal/jobs/${encodeURIComponent(job.id)}/retry`,
+                    {method: "POST"},
+                );
+
+                setNotice(`Чек ${job.receiptId} возвращён в фискальную очередь`);
+                await refreshFiscalQueue({silent: true});
+            } catch (actionError) {
+                setError(
+                    actionError instanceof Error
+                        ? actionError.message
+                        : "Не удалось повторить чек",
+                );
+            } finally {
+                setFiscalActionJobId(null);
+            }
+        },
+        [refreshFiscalQueue],
+    );
+
+    const archiveFiscalQueueJob = useCallback(
+        async (job: FiscalQueueJob) => {
+            try {
+                setFiscalActionJobId(job.id);
+                setError(null);
+                setNotice(null);
+
+                await callFiscalAgent(
+                    `/fiscal/jobs/${encodeURIComponent(job.id)}/archive`,
+                    {method: "POST"},
+                );
+
+                setNotice("Запись убрана из активного фискального журнала");
+                setExpandedFiscalJobId((current) =>
+                    current === job.id ? null : current,
+                );
+                await refreshFiscalQueue({silent: true});
+            } catch (actionError) {
+                setError(
+                    actionError instanceof Error
+                        ? actionError.message
+                        : "Не удалось убрать запись из журнала",
+                );
+            } finally {
+                setFiscalActionJobId(null);
+            }
+        },
+        [refreshFiscalQueue],
+    );
+
+    const deleteFiscalQueueJob = useCallback(
+        async (job: FiscalQueueJob) => {
+            const confirmed = window.confirm(
+                `Удалить запись ${job.receiptId} из локального фискального журнала?\n\n` +
+                "Это НЕ отменит продажу, НЕ вернёт товар на склад и НЕ удалит чек из БД.",
+            );
+
+            if (!confirmed) {
+                return;
+            }
+
+            try {
+                setFiscalActionJobId(job.id);
+                setError(null);
+                setNotice(null);
+
+                await callFiscalAgent(
+                    `/fiscal/jobs/${encodeURIComponent(job.id)}`,
+                    {method: "DELETE"},
+                );
+
+                setNotice("Запись удалена из локального фискального журнала");
+                setExpandedFiscalJobId((current) =>
+                    current === job.id ? null : current,
+                );
+                await refreshFiscalQueue({silent: true});
+            } catch (actionError) {
+                setError(
+                    actionError instanceof Error
+                        ? actionError.message
+                        : "Не удалось удалить запись",
+                );
+            } finally {
+                setFiscalActionJobId(null);
+            }
+        },
+        [refreshFiscalQueue],
+    );
+
+    const copyFiscalJobDiagnostics = useCallback(
+        async (job: FiscalQueueJob) => {
+            try {
+                const payload = {
+                    id: job.id,
+                    receiptId: job.receiptId,
+                    status: job.status,
+                    createdAt: job.createdAt,
+                    updatedAt: job.updatedAt,
+                    attempts: job.attempts,
+                    error: job.error,
+                    errorInfo: job.errorInfo,
+                    diagnostics: job.diagnostics,
+                    receipt: job.receipt,
+                    result: job.result,
+                };
+
+                await navigator.clipboard.writeText(
+                    JSON.stringify(payload, null, 2),
+                );
+                setNotice("Диагностика чека скопирована");
+            } catch {
+                setError("Не удалось скопировать диагностику");
+            }
+        },
+        [],
+    );
+
     useEffect(() => {
         if (!isAuthChecked) {
             return;
@@ -3588,6 +3825,25 @@ export default function PosPage() {
             setIsShiftActionLoading(true);
             setError(null);
             setNotice(null);
+
+            const localJobs =
+                await getAllPosBackgroundJobs<Receipt>();
+            const activePosJobs = localJobs.filter(
+                (job) =>
+                    job.status === "pending" ||
+                    job.status === "processing",
+            ).length;
+            const currentFiscalQueue =
+                await refreshFiscalQueue({silent: true});
+            const activeFiscalJobs =
+                Number(currentFiscalQueue?.counts.pending || 0) +
+                Number(currentFiscalQueue?.counts.processing || 0);
+
+            if (activePosJobs > 0 || activeFiscalJobs > 0) {
+                throw new Error(
+                    `Нельзя закрыть смену: дождитесь обработки чеков. POS: ${activePosJobs}, ККТ: ${activeFiscalJobs}.`,
+                );
+            }
 
             await callFiscalAgent("/service/close-shift", {
                 method: "POST",
@@ -5056,6 +5312,19 @@ export default function PosPage() {
                     price,
                     total: lineTotal,
                     marked,
+                    ...(
+                        isBlockPackage ||
+                        isWeightProduct(item.product)
+                            ? {
+                                fiscalQuantity,
+                                fiscalPrice,
+                                fiscalTotal,
+                                ...(isBlockPackage
+                                    ? {fiscalPackageName: "Блок сигарет"}
+                                    : {}),
+                            }
+                            : {}
+                    ),
                     ...(marked && markingCode
                         ? {
                             markingCode,
@@ -5063,24 +5332,6 @@ export default function PosPage() {
                             markingMessage: item.markingMessage,
                             markingPackageMode: item.markingPackageMode,
                             markingPackageQuantity: item.markingPackageQuantity,
-                            ...(
-                                isBlockPackage ||
-                                isWeightProduct(
-                                    item.product,
-                                )
-                                    ? {
-                                        fiscalQuantity,
-                                        fiscalPrice,
-                                        fiscalTotal,
-                                        ...(isBlockPackage
-                                            ? {
-                                                fiscalPackageName:
-                                                    "Блок сигарет",
-                                            }
-                                            : {}),
-                                    }
-                                    : {}
-                            ),
                         }
                         : {}),
                 };
@@ -6463,65 +6714,38 @@ export default function PosPage() {
                             </div>
 
                             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                                <div className="flex items-center justify-between gap-3">
+                                <div className="flex flex-wrap items-start justify-between gap-3">
                                     <div>
                                         <div className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">
-                                            Фискальная очередь
+                                            Фискальный журнал
                                         </div>
 
                                         <div className="mt-1 text-sm font-black text-slate-900">
-                                            {(fiscalQueue?.counts.pending || 0) +
-                                            (fiscalQueue?.counts.processing || 0) >
-                                            0
-                                                ? `В работе: ${
-                                                    (fiscalQueue?.counts.pending || 0) +
-                                                    (fiscalQueue?.counts.processing || 0)
-                                                }`
-                                                : "Очередь свободна"}
+                                            {(fiscalQueue?.counts.failed || 0) > 0
+                                                ? `Требуют внимания: ${fiscalQueue?.counts.failed || 0}`
+                                                : (fiscalQueue?.counts.pending || 0) +
+                                                (fiscalQueue?.counts.processing || 0) > 0
+                                                    ? `В работе: ${(fiscalQueue?.counts.pending || 0) + (fiscalQueue?.counts.processing || 0)}`
+                                                    : "Ошибок нет"}
+                                        </div>
+
+                                        <div className="mt-1 text-[11px] leading-4 text-slate-500">
+                                            Здесь видно причину ошибки, товары, расчёт ККТ и историю попыток.
                                         </div>
                                     </div>
 
                                     <button
                                         type="button"
                                         onClick={() =>
-                                            setIsFiscalQueueOpen(
-                                                value => !value,
-                                            )
+                                            setIsFiscalQueueOpen((value) => !value)
                                         }
                                         className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-700 hover:bg-slate-100"
                                     >
-                                        Подробнее
+                                        {isFiscalQueueOpen ? "Скрыть" : "Открыть журнал"}
                                     </button>
                                 </div>
 
                                 <div className="mt-3 grid grid-cols-4 gap-2 text-center">
-                                    <div className="rounded-xl bg-white px-2 py-2">
-                                        <div className="text-lg font-black text-amber-600">
-                                            {fiscalQueue?.counts.pending || 0}
-                                        </div>
-                                        <div className="text-[10px] font-bold uppercase text-gray-400">
-                                            Очередь
-                                        </div>
-                                    </div>
-
-                                    <div className="rounded-xl bg-white px-2 py-2">
-                                        <div className="text-lg font-black text-indigo-600">
-                                            {fiscalQueue?.counts.processing || 0}
-                                        </div>
-                                        <div className="text-[10px] font-bold uppercase text-gray-400">
-                                            Печать
-                                        </div>
-                                    </div>
-
-                                    <div className="rounded-xl bg-white px-2 py-2">
-                                        <div className="text-lg font-black text-emerald-600">
-                                            {fiscalQueue?.counts.done || 0}
-                                        </div>
-                                        <div className="text-[10px] font-bold uppercase text-gray-400">
-                                            Готово
-                                        </div>
-                                    </div>
-
                                     <div className="rounded-xl bg-white px-2 py-2">
                                         <div className="text-lg font-black text-red-600">
                                             {fiscalQueue?.counts.failed || 0}
@@ -6530,66 +6754,306 @@ export default function PosPage() {
                                             Ошибки
                                         </div>
                                     </div>
+                                    <div className="rounded-xl bg-white px-2 py-2">
+                                        <div className="text-lg font-black text-amber-600">
+                                            {(fiscalQueue?.counts.pending || 0) +
+                                                (fiscalQueue?.counts.processing || 0)}
+                                        </div>
+                                        <div className="text-[10px] font-bold uppercase text-gray-400">
+                                            В работе
+                                        </div>
+                                    </div>
+                                    <div className="rounded-xl bg-white px-2 py-2">
+                                        <div className="text-lg font-black text-emerald-600">
+                                            {fiscalQueue?.counts.done || 0}
+                                        </div>
+                                        <div className="text-[10px] font-bold uppercase text-gray-400">
+                                            Готово
+                                        </div>
+                                    </div>
+                                    <div className="rounded-xl bg-white px-2 py-2">
+                                        <div className="text-lg font-black text-slate-500">
+                                            {fiscalQueue?.counts.archived || 0}
+                                        </div>
+                                        <div className="text-[10px] font-bold uppercase text-gray-400">
+                                            Архив
+                                        </div>
+                                    </div>
                                 </div>
 
                                 {isFiscalQueueOpen && (
-                                    <div className="mt-3 max-h-60 space-y-2 overflow-y-auto">
-                                        {(fiscalQueue?.jobs || [])
-                                            .slice()
-                                            .reverse()
-                                            .slice(0, 15)
-                                            .map(job => (
-                                                <div
-                                                    key={job.id}
-                                                    className="rounded-xl border border-slate-200 bg-white p-3"
+                                    <div className="mt-3">
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {[
+                                                ["attention", `Требуют внимания (${fiscalQueue?.counts.failed || 0})`],
+                                                ["active", `В работе (${(fiscalQueue?.counts.pending || 0) + (fiscalQueue?.counts.processing || 0)})`],
+                                                ["done", `Успешные (${fiscalQueue?.counts.done || 0})`],
+                                                ["archived", `Архив (${fiscalQueue?.counts.archived || 0})`],
+                                                ["all", "Все"],
+                                            ].map(([value, label]) => (
+                                                <button
+                                                    key={value}
+                                                    type="button"
+                                                    onClick={() =>
+                                                        setFiscalJournalFilter(value as FiscalJournalFilter)
+                                                    }
+                                                    className={`rounded-lg px-2.5 py-1.5 text-[11px] font-black transition-colors ${
+                                                        fiscalJournalFilter === value
+                                                            ? "bg-slate-900 text-white"
+                                                            : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+                                                    }`}
                                                 >
-                                                    <div className="flex items-start justify-between gap-3">
-                                                        <div className="min-w-0">
-                                                            <div className="truncate text-xs font-black text-slate-900">
-                                                                {job.receiptId}
-                                                            </div>
+                                                    {label}
+                                                </button>
+                                            ))}
+                                        </div>
 
-                                                            <div className="mt-1 text-[11px] text-gray-500">
-                                                                {job.itemCount} поз. ·{" "}
-                                                                {formatCurrency(job.total)}
-                                                            </div>
+                                        <div className="mt-3 max-h-[520px] space-y-2 overflow-y-auto pr-1">
+                                            {fiscalJournalJobs.slice(0, 60).map((job) => {
+                                                const isExpanded = expandedFiscalJobId === job.id;
+                                                const isActionLoading = fiscalActionJobId === job.id;
+                                                const errorInfo = job.errorInfo;
+                                                const receipt = job.receipt;
+                                                const diagnostics = job.diagnostics;
 
-                                                            {job.error && (
-                                                                <div
-                                                                    className="mt-1 text-[11px] font-semibold leading-4 text-red-600">
-                                                                    {job.error}
+                                                return (
+                                                    <div
+                                                        key={job.id}
+                                                        className={`rounded-xl border bg-white p-3 ${
+                                                            job.status === "failed"
+                                                                ? "border-red-200"
+                                                                : job.status === "processing"
+                                                                    ? "border-indigo-200"
+                                                                    : job.status === "pending"
+                                                                        ? "border-amber-200"
+                                                                        : "border-slate-200"
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-start justify-between gap-3">
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                    <div className="truncate text-xs font-black text-slate-900">
+                                                                        {job.receiptId}
+                                                                    </div>
+                                                                    <span className="text-[10px] font-semibold text-slate-400">
+                                                                        {formatPosDateTime(job.createdAt, clockCorrectionMs)}
+                                                                    </span>
                                                                 </div>
+
+                                                                <div className="mt-1 text-[11px] text-gray-500">
+                                                                    {job.itemCount} поз. · {formatCurrency(job.total)}
+                                                                    {receipt?.paymentLabel
+                                                                        ? ` · ${receipt.paymentLabel}`
+                                                                        : job.paymentMethod
+                                                                            ? ` · ${job.paymentMethod}`
+                                                                            : ""}
+                                                                    {receipt?.customerName
+                                                                        ? ` · ${receipt.customerName}`
+                                                                        : ""}
+                                                                    {job.attempts > 0
+                                                                        ? ` · попыток: ${job.attempts}`
+                                                                        : ""}
+                                                                </div>
+                                                            </div>
+
+                                                            <span
+                                                                className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-black uppercase ${
+                                                                    job.status === "done"
+                                                                        ? "bg-emerald-100 text-emerald-700"
+                                                                        : job.status === "failed"
+                                                                            ? "bg-red-100 text-red-700"
+                                                                            : job.status === "processing"
+                                                                                ? "bg-indigo-100 text-indigo-700"
+                                                                                : job.status === "archived"
+                                                                                    ? "bg-slate-200 text-slate-600"
+                                                                                    : "bg-amber-100 text-amber-700"
+                                                                }`}
+                                                            >
+                                                                {job.status === "done"
+                                                                    ? "Готов"
+                                                                    : job.status === "failed"
+                                                                        ? "Ошибка"
+                                                                        : job.status === "processing"
+                                                                            ? "Печать"
+                                                                            : job.status === "archived"
+                                                                                ? "Архив"
+                                                                                : "Очередь"}
+                                                            </span>
+                                                        </div>
+
+                                                        {job.status === "failed" && (
+                                                            <div className="mt-3 rounded-xl border border-red-100 bg-red-50 p-3">
+                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                    <div className="text-xs font-black text-red-800">
+                                                                        {errorInfo?.title || "Ошибка фискализации"}
+                                                                    </div>
+                                                                    {errorInfo?.atolCode && (
+                                                                        <span className="rounded-md bg-red-100 px-1.5 py-0.5 text-[10px] font-black text-red-700">
+                                                                            АТОЛ {errorInfo.atolCode}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="mt-1 text-[11px] font-semibold leading-4 text-red-700">
+                                                                    {errorInfo?.explanation || job.error}
+                                                                </div>
+                                                                {job.error && errorInfo?.title !== job.error && (
+                                                                    <div className="mt-2 text-[10px] leading-4 text-red-500">
+                                                                        Ответ ККТ: {job.error}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )}
+
+                                                        {diagnostics && diagnostics.adjustedCount > 0 && (
+                                                            <div className="mt-2 rounded-lg bg-indigo-50 px-2.5 py-2 text-[10px] font-semibold leading-4 text-indigo-700">
+                                                                Расчёт ККТ: автоматически исправлено строк — {diagnostics.adjustedCount}.
+                                                                {Math.abs(diagnostics.fiscalTotal - diagnostics.requestedTotal) > 0.001
+                                                                    ? ` Итог ККТ ${formatCurrency(diagnostics.fiscalTotal)} вместо ${formatCurrency(diagnostics.requestedTotal)}.`
+                                                                    : " Итоговая сумма сохранена."}
+                                                            </div>
+                                                        )}
+
+                                                        <div className="mt-3 flex flex-wrap gap-2">
+                                                            {job.status === "failed" && errorInfo?.canRetry !== false && (
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={isActionLoading}
+                                                                    onClick={() => void retryFiscalQueueJob(job)}
+                                                                    className="rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-black text-white hover:bg-indigo-700 disabled:opacity-50"
+                                                                >
+                                                                    {isActionLoading
+                                                                        ? "Подождите…"
+                                                                        : errorInfo?.code === "INVALID_PRICE_AMOUNT"
+                                                                            ? "Исправить и повторить"
+                                                                            : "Повторить"}
+                                                                </button>
+                                                            )}
+
+                                                            {job.status === "failed" && errorInfo?.canRetry === false && (
+                                                                <span className="rounded-lg bg-amber-100 px-3 py-1.5 text-[11px] font-black text-amber-800">
+                                                                    Повтор заблокирован · нужна проверка/коррекция
+                                                                </span>
+                                                            )}
+
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    setExpandedFiscalJobId((current) =>
+                                                                        current === job.id ? null : job.id,
+                                                                    )
+                                                                }
+                                                                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-black text-slate-700 hover:bg-slate-100"
+                                                            >
+                                                                {isExpanded ? "Скрыть детали" : "Подробнее"}
+                                                            </button>
+
+                                                            {(job.status === "failed" || job.status === "done") && (
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={isActionLoading}
+                                                                    onClick={() => void archiveFiscalQueueJob(job)}
+                                                                    className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-black text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                                                                >
+                                                                    Убрать из журнала
+                                                                </button>
                                                             )}
                                                         </div>
 
-                                                        <span
-                                                            className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-black uppercase ${
-                                                                job.status === "done"
-                                                                    ? "bg-emerald-100 text-emerald-700"
-                                                                    : job.status === "failed"
-                                                                        ? "bg-red-100 text-red-700"
-                                                                        : job.status === "processing"
-                                                                            ? "bg-indigo-100 text-indigo-700"
-                                                                            : "bg-amber-100 text-amber-700"
-                                                            }`}
-                                                        >
-                                                            {job.status === "done"
-                                                                ? "Готов"
-                                                                : job.status === "failed"
-                                                                    ? "Ошибка"
-                                                                    : job.status === "processing"
-                                                                        ? "Печать"
-                                                                        : "В очереди"}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            ))}
+                                                        {isExpanded && (
+                                                            <div className="mt-3 space-y-3 border-t border-slate-100 pt-3">
+                                                                <div>
+                                                                    <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">
+                                                                        Товары и расчёт ККТ
+                                                                    </div>
+                                                                    <div className="mt-2 space-y-2">
+                                                                        {(receipt?.items || []).map((item, itemIndex) => {
+                                                                            const line = diagnostics?.lines?.[itemIndex];
+                                                                            return (
+                                                                                <div
+                                                                                    key={`${job.id}-${itemIndex}`}
+                                                                                    className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2"
+                                                                                >
+                                                                                    <div className="text-xs font-black text-slate-900">
+                                                                                        {item.name}
+                                                                                    </div>
+                                                                                    <div className="mt-1 text-[11px] text-slate-500">
+                                                                                        {formatQuantity(item.quantity, item.unit || undefined)} × {formatCurrency(item.price)}
+                                                                                        {item.unit === "weight" ? " / кг" : " / шт."}
+                                                                                        {" = "}{formatCurrency(item.total)}
+                                                                                    </div>
+                                                                                    {line && (
+                                                                                        <div className={`mt-1 text-[10px] leading-4 ${line.adjusted ? "font-semibold text-indigo-600" : "text-slate-400"}`}>
+                                                                                            ККТ: {line.quantity} × {formatCurrency(line.fiscalPrice)} = {formatCurrency(line.fiscalAmount)}
+                                                                                            {line.adjustmentReason
+                                                                                                ? ` · ${line.adjustmentReason}`
+                                                                                                : ""}
+                                                                                        </div>
+                                                                                    )}
+                                                                                    {item.markingCodePreview && (
+                                                                                        <div className="mt-1 text-[10px] text-purple-500">
+                                                                                            КМ: {item.markingCodePreview}
+                                                                                        </div>
+                                                                                    )}
+                                                                                    {item.barcode && (
+                                                                                        <div className="mt-1 text-[10px] text-slate-400">
+                                                                                            ШК: {item.barcode}
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
 
-                                        {(fiscalQueue?.jobs.length || 0) === 0 && (
-                                            <div className="rounded-xl bg-white p-3 text-center text-xs text-gray-500">
-                                                Фоновых чеков пока нет.
-                                            </div>
-                                        )}
+                                                                <div className="flex flex-wrap gap-2">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => void copyFiscalJobDiagnostics(job)}
+                                                                        className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[11px] font-black text-indigo-700 hover:bg-indigo-100"
+                                                                    >
+                                                                        Копировать диагностику
+                                                                    </button>
+                                                                    {job.status !== "pending" && job.status !== "processing" && (
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={isActionLoading}
+                                                                            onClick={() => void deleteFiscalQueueJob(job)}
+                                                                            className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-black text-red-700 hover:bg-red-100 disabled:opacity-50"
+                                                                        >
+                                                                            Удалить запись
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+
+                                                                <details className="rounded-lg border border-slate-200 bg-white">
+                                                                    <summary className="cursor-pointer px-3 py-2 text-[11px] font-black text-slate-600">
+                                                                        Технический лог
+                                                                    </summary>
+                                                                    <pre className="max-h-56 overflow-auto whitespace-pre-wrap border-t border-slate-100 p-3 text-[10px] leading-4 text-slate-600">
+                                                                        {JSON.stringify(
+                                                                            {
+                                                                                error: job.error,
+                                                                                errorInfo: job.errorInfo,
+                                                                                result: job.result,
+                                                                                diagnostics: job.diagnostics,
+                                                                            },
+                                                                            null,
+                                                                            2,
+                                                                        )}
+                                                                    </pre>
+                                                                </details>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+
+                                            {fiscalJournalJobs.length === 0 && (
+                                                <div className="rounded-xl bg-white p-4 text-center text-xs text-gray-500">
+                                                    В этом разделе записей нет.
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
                             </div>
